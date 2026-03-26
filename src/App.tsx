@@ -79,6 +79,11 @@ function parseLaunchArgs(value: string): string[] {
   return args;
 }
 
+function toErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
 export default function App() {
   const [installations, setInstallations] = useState<Installation[]>([]);
   const [selectedInstallationId, setSelectedInstallationId] = useState<string | null>(null);
@@ -89,6 +94,7 @@ export default function App() {
   const [nodePreview, setNodePreview] = useState<ResolvedTarget | null>(null);
   const [corePreviewError, setCorePreviewError] = useState<string | null>(null);
   const [nodePreviewError, setNodePreviewError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [events, setEvents] = useState<OperationEvent[]>([]);
   const [registerForm, setRegisterForm] = useState({
     name: "Primary ComfyUI",
@@ -128,6 +134,15 @@ export default function App() {
     setInstallations(next);
     if (!selectedInstallationIdRef.current && next.length) {
       setSelectedInstallationId(next[0].id);
+    }
+  }
+
+  async function runAction(action: () => Promise<void>) {
+    setActionError(null);
+    try {
+      await action();
+    } catch (error) {
+      setActionError(toErrorMessage(error));
     }
   }
 
@@ -318,29 +333,32 @@ export default function App() {
             />
           </label>
           <button
-            onClick={async () => {
-              const result = await api.registerInstallation({
-                name: registerForm.name,
-                comfyRoot: registerForm.comfyRoot,
-                pythonExe: registerForm.pythonExe || null,
-                launchProfile: {
-                  mode: "managed_child",
-                  command: registerForm.launchCommand,
-                  args: parseLaunchArgs(registerForm.launchArgs),
-                  cwd: registerForm.launchCwd || registerForm.comfyRoot,
-                  env: {}
-                }
-              });
-              setCorePreview(null);
-              setNodePreview(null);
-              setCorePreviewError(null);
-              setNodePreviewError(null);
-              await refreshInstallations();
-              setSelectedInstallationId(result.installation.id);
-            }}
+            onClick={() =>
+              void runAction(async () => {
+                const result = await api.registerInstallation({
+                  name: registerForm.name,
+                  comfyRoot: registerForm.comfyRoot,
+                  pythonExe: registerForm.pythonExe || null,
+                  launchProfile: {
+                    mode: "managed_child",
+                    command: registerForm.launchCommand,
+                    args: parseLaunchArgs(registerForm.launchArgs),
+                    cwd: registerForm.launchCwd || registerForm.comfyRoot,
+                    env: {}
+                  }
+                });
+                setCorePreview(null);
+                setNodePreview(null);
+                setCorePreviewError(null);
+                setNodePreviewError(null);
+                await refreshInstallations();
+                setSelectedInstallationId(result.installation.id);
+              })
+            }
           >
             Register
           </button>
+          {actionError ? <div className="muted">{actionError}</div> : null}
         </div>
 
         <div className="card fill">
@@ -370,22 +388,26 @@ export default function App() {
                 </div>
                 <div className="row gap">
                   <button
-                    onClick={async () => {
-                      await api.updateAll({
-                        installationId: selectedInstallation.id,
-                        dirtyRepoStrategy: "abort",
-                        syncDependencies: true,
-                        restartAfterSuccess: false
-                      });
-                    }}
+                    onClick={() =>
+                      void runAction(async () => {
+                        await api.updateAll({
+                          installationId: selectedInstallation.id,
+                          dirtyRepoStrategy: "abort",
+                          syncDependencies: true,
+                          restartAfterSuccess: false
+                        });
+                      })
+                    }
                   >
                     Update all
                   </button>
                   <button
                     className="secondary"
-                    onClick={async () => {
-                      await api.restartInstallation({ installationId: selectedInstallation.id });
-                    }}
+                    onClick={() =>
+                      void runAction(async () => {
+                        await api.restartInstallation({ installationId: selectedInstallation.id });
+                      })
+                    }
                   >
                     Restart
                   </button>
@@ -419,19 +441,21 @@ export default function App() {
                   Resolve
                 </button>
                 <button
-                  onClick={async () => {
-                    await api.patchCore({
-                      installationId: selectedInstallation.id,
-                      input: coreInput,
-                      dirtyRepoStrategy: "abort",
-                      setTrackedTarget: true,
-                      syncDependencies: true,
-                      restartAfterSuccess: false
-                    });
-                    setCoreInput("");
-                    setCorePreview(null);
-                    setCorePreviewError(null);
-                  }}
+                  onClick={() =>
+                    void runAction(async () => {
+                      await api.patchCore({
+                        installationId: selectedInstallation.id,
+                        input: coreInput,
+                        dirtyRepoStrategy: "abort",
+                        setTrackedTarget: true,
+                        syncDependencies: true,
+                        restartAfterSuccess: false
+                      });
+                      setCoreInput("");
+                      setCorePreview(null);
+                      setCorePreviewError(null);
+                    })
+                  }
                 >
                   Apply
                 </button>
@@ -447,14 +471,16 @@ export default function App() {
               {coreRepo ? (
                 <RepoCard
                   repo={coreRepo}
-                  onRollback={async () => {
-                    await api.rollbackRepo({
-                      repoId: coreRepo.id,
-                      restoreStash: true,
-                      syncDependencies: true,
-                      restartAfterSuccess: false
-                    });
-                  }}
+                  onRollback={() =>
+                    void runAction(async () => {
+                      await api.rollbackRepo({
+                        repoId: coreRepo.id,
+                        restoreStash: true,
+                        syncDependencies: true,
+                        restartAfterSuccess: false
+                      });
+                    })
+                  }
                 />
               ) : (
                 <div className="muted">No managed core repo is registered for this installation.</div>
@@ -486,20 +512,22 @@ export default function App() {
                   Resolve
                 </button>
                 <button
-                  onClick={async () => {
-                    await api.installOrPatchCustomNode({
-                      installationId: selectedInstallation.id,
-                      input: nodeInput,
-                      existingRepoConflictStrategy: "install_with_suffix",
-                      dirtyRepoStrategy: "abort",
-                      setTrackedTarget: true,
-                      syncDependencies: true,
-                      restartAfterSuccess: false
-                    });
-                    setNodeInput("");
-                    setNodePreview(null);
-                    setNodePreviewError(null);
-                  }}
+                  onClick={() =>
+                    void runAction(async () => {
+                      await api.installOrPatchCustomNode({
+                        installationId: selectedInstallation.id,
+                        input: nodeInput,
+                        existingRepoConflictStrategy: "install_with_suffix",
+                        dirtyRepoStrategy: "abort",
+                        setTrackedTarget: true,
+                        syncDependencies: true,
+                        restartAfterSuccess: false
+                      });
+                      setNodeInput("");
+                      setNodePreview(null);
+                      setNodePreviewError(null);
+                    })
+                  }
                 >
                   Install / Patch
                 </button>
@@ -523,21 +551,25 @@ export default function App() {
                       <RepoCard
                         key={repo.id}
                         repo={repo}
-                        onUpdate={async () => {
-                          await api.updateRepo({
-                            repoId: repo.id,
-                            dirtyRepoStrategy: "abort",
-                            syncDependencies: true
-                          });
-                        }}
-                        onRollback={async () => {
-                          await api.rollbackRepo({
-                            repoId: repo.id,
-                            restoreStash: true,
-                            syncDependencies: true,
-                            restartAfterSuccess: false
-                          });
-                        }}
+                        onUpdate={() =>
+                          void runAction(async () => {
+                            await api.updateRepo({
+                              repoId: repo.id,
+                              dirtyRepoStrategy: "abort",
+                              syncDependencies: true
+                            });
+                          })
+                        }
+                        onRollback={() =>
+                          void runAction(async () => {
+                            await api.rollbackRepo({
+                              repoId: repo.id,
+                              restoreStash: true,
+                              syncDependencies: true,
+                              restartAfterSuccess: false
+                            });
+                          })
+                        }
                       />
                     ))}
                   </div>
