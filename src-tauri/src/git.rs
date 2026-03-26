@@ -44,6 +44,18 @@ pub async fn run_git_allow_fail(path: &Path, args: &[&str]) -> AppResult<Option<
     ))
 }
 
+async fn run_git_no_cwd(args: &[&str]) -> AppResult<String> {
+    let output = Command::new("git").args(args).output().await?;
+    if !output.status.success() {
+        return Err(AppError::Git(format!(
+            "{}\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 pub async fn inspect_repo(path: &Path) -> AppResult<RepoStatus> {
     let head_sha = run_git_allow_fail(path, &["rev-parse", "HEAD"]).await?;
     let branch = run_git_allow_fail(path, &["symbolic-ref", "--short", "-q", "HEAD"]).await?;
@@ -184,6 +196,16 @@ pub async fn ls_remote_head(path: &Path, name: &str) -> AppResult<bool> {
 
 pub async fn ls_remote_tag(path: &Path, name: &str) -> AppResult<bool> {
     let output = run_git(path, &["ls-remote", "--tags", "origin", name]).await?;
+    Ok(!output.trim().is_empty())
+}
+
+pub async fn ls_remote_head_remote(remote: &str, name: &str) -> AppResult<bool> {
+    let output = run_git_no_cwd(&["ls-remote", "--heads", remote, name]).await?;
+    Ok(!output.trim().is_empty())
+}
+
+pub async fn ls_remote_tag_remote(remote: &str, name: &str) -> AppResult<bool> {
+    let output = run_git_no_cwd(&["ls-remote", "--tags", remote, name]).await?;
     Ok(!output.trim().is_empty())
 }
 

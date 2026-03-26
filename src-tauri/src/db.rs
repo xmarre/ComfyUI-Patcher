@@ -456,6 +456,20 @@ impl Database {
             .ok_or_else(|| AppError::Db("failed to reload checkpoint".to_string()))
     }
 
+    pub fn update_checkpoint_stash(
+        &self,
+        checkpoint_id: &str,
+        stash_created: bool,
+        stash_ref: Option<&str>,
+    ) -> AppResult<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            "UPDATE repo_checkpoints SET stash_created = ?2, stash_ref = ?3 WHERE id = ?1",
+            params![checkpoint_id, stash_created as i64, stash_ref],
+        )?;
+        Ok(())
+    }
+
     pub fn get_checkpoint(&self, checkpoint_id: &str) -> AppResult<Option<RepoCheckpoint>> {
         let conn = self.connect()?;
         let mut stmt = conn.prepare(

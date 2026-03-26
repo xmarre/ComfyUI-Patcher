@@ -108,6 +108,7 @@ export type OperationEvent = {
     | "queued"
     | "preflight"
     | "checkpoint"
+    | "stash"
     | "fetch"
     | "clone"
     | "checkout"

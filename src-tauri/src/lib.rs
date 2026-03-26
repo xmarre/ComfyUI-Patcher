@@ -171,21 +171,51 @@ async fn create_checkpoint_if_needed(
     operation_id: &str,
     strategy: &DirtyRepoStrategy,
 ) -> AppResult<RepoCheckpoint> {
-    let status = inspect_repo(Path::new(&repo.local_path)).await?;
+    let path = Path::new(&repo.local_path);
+    let status = inspect_repo(path).await?;
     let head = status
         .head_sha
         .clone()
         .ok_or_else(|| AppError::Git("repository has no HEAD".to_string()))?;
-    let stash_ref = ensure_clean_or_apply_strategy(Path::new(&repo.local_path), strategy).await?;
-    state.db.create_checkpoint(
+
+    if status.is_dirty && matches!(strategy, DirtyRepoStrategy::Abort) {
+        return Err(AppError::Conflict(
+            "repository has local changes".to_string(),
+        ));
+    }
+
+    let checkpoint = state.db.create_checkpoint(
         &repo.id,
         operation_id,
         &head,
         status.branch.as_deref(),
         status.is_detached,
-        stash_ref.is_some(),
-        stash_ref.as_deref(),
-    )
+        false,
+        None,
+    )?;
+
+    let stash_ref = ensure_clean_or_apply_strategy(path, strategy).await?;
+    if let Some(stash_ref) = stash_ref {
+        if let Err(db_err) =
+            state
+                .db
+                .update_checkpoint_stash(&checkpoint.id, true, Some(&stash_ref))
+        {
+            let compensation = apply_stash(path, &stash_ref).await;
+            return match compensation {
+                Ok(()) => Err(db_err),
+                Err(stash_err) => Err(AppError::Db(format!(
+                    "{}; additionally failed to restore stashed worktree: {}",
+                    db_err, stash_err
+                ))),
+            };
+        }
+    }
+
+    state
+        .db
+        .get_checkpoint(&checkpoint.id)?
+        .ok_or_else(|| AppError::Db("failed to reload checkpoint".to_string()))
 }
 
 async fn apply_resolved_target(
@@ -1210,6 +1240,7 @@ async fn run_rollback_repo(
                     "error",
                     format!("failed to restore stash: {err}"),
                 );
+                return Err(AppError::Git(format!("failed to restore stash: {err}")));
             }
         }
         maybe_sync_dependencies(

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import RepoCard from "./components/RepoCard";
 import OperationPanel from "./components/OperationPanel";
@@ -20,6 +20,54 @@ const defaultLaunchProfile: LaunchProfile = {
   env: {}
 };
 
+function parseLaunchArgs(value: string): string[] {
+  const args: string[] = [];
+  let current = "";
+  let quote: '"' | "'" | null = null;
+  let escape = false;
+
+  for (const char of value) {
+    if (escape) {
+      current += char;
+      escape = false;
+      continue;
+    }
+
+    if (quote === '"' && char === "\\") {
+      escape = true;
+      continue;
+    }
+
+    if (quote) {
+      if (char === quote) {
+        quote = null;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      if (current) {
+        args.push(current);
+        current = "";
+      }
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (escape) current += "\\";
+  if (current) args.push(current);
+  return args;
+}
+
 export default function App() {
   const [installations, setInstallations] = useState<Installation[]>([]);
   const [selectedInstallationId, setSelectedInstallationId] = useState<string | null>(null);
@@ -38,6 +86,25 @@ export default function App() {
     launchCwd: ""
   });
 
+  const detailRequestSeq = useRef(0);
+  const corePreviewRequestSeq = useRef(0);
+  const nodePreviewRequestSeq = useRef(0);
+  const selectedInstallationIdRef = useRef<string | null>(null);
+  const coreInputRef = useRef("");
+  const nodeInputRef = useRef("");
+
+  useEffect(() => {
+    selectedInstallationIdRef.current = selectedInstallationId;
+  }, [selectedInstallationId]);
+
+  useEffect(() => {
+    coreInputRef.current = coreInput;
+  }, [coreInput]);
+
+  useEffect(() => {
+    nodeInputRef.current = nodeInput;
+  }, [nodeInput]);
+
   const selectedInstallation = useMemo(
     () => installations.find((item) => item.id === selectedInstallationId) ?? null,
     [installations, selectedInstallationId]
@@ -46,17 +113,27 @@ export default function App() {
   async function refreshInstallations() {
     const next = await api.listInstallations();
     setInstallations(next);
-    if (!selectedInstallationId && next.length) {
+    if (!selectedInstallationIdRef.current && next.length) {
       setSelectedInstallationId(next[0].id);
     }
   }
 
-  async function refreshDetail(installationId: string | null) {
+  async function refreshDetail(
+    installationId: string | null,
+    options?: { clear?: boolean }
+  ) {
+    const requestSeq = ++detailRequestSeq.current;
     if (!installationId) {
       setDetail(null);
       return;
     }
-    setDetail(await api.getInstallationDetail(installationId));
+    if (options?.clear) {
+      setDetail(null);
+    }
+    const next = await api.getInstallationDetail(installationId);
+    if (detailRequestSeq.current !== requestSeq) return;
+    if (selectedInstallationIdRef.current !== installationId) return;
+    setDetail(next);
   }
 
   useEffect(() => {
@@ -64,41 +141,74 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    void refreshDetail(selectedInstallationId);
+    setCorePreview(null);
+    setNodePreview(null);
+    void refreshDetail(selectedInstallationId, { clear: true });
   }, [selectedInstallationId]);
 
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
-    api.subscribeOperationEvents((event) => {
-      if (cancelled) return;
-      setEvents((prev) => [event, ...prev].slice(0, 100));
-      if (selectedInstallationId) {
-        void refreshDetail(selectedInstallationId);
-      }
-      void refreshInstallations();
-    }).then((fn) => {
-      if (cancelled) {
-        fn();
-        return;
-      }
-      unlisten = fn;
-    });
+    api
+      .subscribeOperationEvents((event) => {
+        if (cancelled) return;
+        setEvents((prev) => [event, ...prev].slice(0, 100));
+        const installationId = selectedInstallationIdRef.current;
+        if (installationId) {
+          void refreshDetail(installationId);
+        }
+        void refreshInstallations();
+      })
+      .then((fn) => {
+        if (cancelled) {
+          fn();
+          return;
+        }
+        unlisten = fn;
+      });
     return () => {
       cancelled = true;
       if (unlisten) unlisten();
     };
-  }, [selectedInstallationId]);
+  }, []);
+
+  useEffect(() => {
+    setCorePreview(null);
+    corePreviewRequestSeq.current += 1;
+  }, [coreInput]);
+
+  useEffect(() => {
+    setNodePreview(null);
+    nodePreviewRequestSeq.current += 1;
+  }, [nodeInput]);
 
   async function preview(input: ResolveTargetInput, target: "core" | "node") {
-    if (!input.installationId || !input.input.trim()) return;
+    if (!input.installationId || !input.input.trim()) {
+      if (target === "core") setCorePreview(null);
+      else setNodePreview(null);
+      return;
+    }
+
+    const requestSeq =
+      target === "core" ? ++corePreviewRequestSeq.current : ++nodePreviewRequestSeq.current;
     const resolved = await api.resolveTarget(input);
-    if (target === "core") setCorePreview(resolved);
-    else setNodePreview(resolved);
+
+    if (selectedInstallationIdRef.current !== input.installationId) return;
+    if (target === "core") {
+      if (corePreviewRequestSeq.current !== requestSeq) return;
+      if (coreInputRef.current !== input.input) return;
+      setCorePreview(resolved);
+    } else {
+      if (nodePreviewRequestSeq.current !== requestSeq) return;
+      if (nodeInputRef.current !== input.input) return;
+      setNodePreview(resolved);
+    }
   }
 
   const coreRepo = detail?.coreRepo ?? null;
   const customNodeRepos = detail?.customNodeRepos ?? [];
+  const hasMatchingDetail =
+    !!selectedInstallation && detail?.installation.id === selectedInstallation.id;
 
   return (
     <div className="app-shell">
@@ -175,11 +285,13 @@ export default function App() {
                 launchProfile: {
                   mode: "managed_child",
                   command: registerForm.launchCommand,
-                  args: registerForm.launchArgs.split(" ").filter(Boolean),
+                  args: parseLaunchArgs(registerForm.launchArgs),
                   cwd: registerForm.launchCwd || registerForm.comfyRoot,
                   env: {}
                 }
               });
+              setCorePreview(null);
+              setNodePreview(null);
               await refreshInstallations();
               setSelectedInstallationId(result.installation.id);
             }}
@@ -205,7 +317,7 @@ export default function App() {
       </aside>
 
       <main className="main">
-        {selectedInstallation && detail ? (
+        {selectedInstallation && hasMatchingDetail ? (
           <>
             <section className="page-header card">
               <div className="row between">
@@ -274,6 +386,7 @@ export default function App() {
                       restartAfterSuccess: false
                     });
                     setCoreInput("");
+                    setCorePreview(null);
                   }}
                 >
                   Apply
@@ -339,6 +452,7 @@ export default function App() {
                       restartAfterSuccess: false
                     });
                     setNodeInput("");
+                    setNodePreview(null);
                   }}
                 >
                   Install / Patch
@@ -390,8 +504,12 @@ export default function App() {
           </>
         ) : (
           <section className="card">
-            <h2>No installation selected</h2>
-            <div className="muted">Register a ComfyUI root on the left to begin.</div>
+            <h2>{selectedInstallation ? "Loading installation" : "No installation selected"}</h2>
+            <div className="muted">
+              {selectedInstallation
+                ? "Refreshing installation details."
+                : "Register a ComfyUI root on the left to begin."}
+            </div>
           </section>
         )}
       </main>

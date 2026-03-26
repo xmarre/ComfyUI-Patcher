@@ -1,11 +1,14 @@
 use crate::errors::{AppError, AppResult};
-use crate::git::{canonicalize_remote, ls_remote_head, ls_remote_tag};
+use crate::git::{
+    canonicalize_remote, ls_remote_head, ls_remote_head_remote, ls_remote_tag, ls_remote_tag_remote,
+};
 use crate::models::{ResolvedTarget, TargetKind};
 use crate::util::slugify;
 use regex::Regex;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT};
 use serde::Deserialize;
 use std::path::Path;
+use std::time::Duration;
 
 #[derive(Clone)]
 pub struct GithubClient {
@@ -68,6 +71,8 @@ impl GithubClient {
             );
         }
         let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30))
             .default_headers(headers)
             .build()?;
         Ok(Self {
@@ -137,24 +142,31 @@ impl GithubClient {
             });
         }
 
-        if let Some(branch) = parse_branch_url(trimmed) {
-            let canonical_repo_url = format!("https://github.com/{}/{}", branch.owner, branch.repo);
+        if let Some(tree) = parse_branch_url(trimmed) {
+            let canonical_repo_url = format!("https://github.com/{}/{}", tree.owner, tree.repo);
+            let fetch_url = format!("https://github.com/{}/{}.git", tree.owner, tree.repo);
+            let (target_kind, checkout_ref) = resolve_tree_ref(&fetch_url, &tree.branch).await?;
             return Ok(ResolvedTarget {
                 source_input: trimmed.to_string(),
-                target_kind: TargetKind::Branch,
+                target_kind: target_kind.clone(),
                 canonical_repo_url: canonical_repo_url.clone(),
-                fetch_url: format!("https://github.com/{}/{}.git", branch.owner, branch.repo),
-                checkout_ref: branch.branch.clone(),
+                fetch_url,
+                checkout_ref: checkout_ref.clone(),
                 resolved_sha: None,
                 pr_number: None,
                 pr_base_repo_url: None,
                 pr_head_repo_url: None,
                 pr_head_ref: None,
-                summary_label: format!(
-                    "branch {} @ {}/{}",
-                    branch.branch, branch.owner, branch.repo
-                ),
-                suggested_local_dir_name: slugify(&branch.repo),
+                summary_label: match target_kind {
+                    TargetKind::Branch => {
+                        format!("branch {} @ {}/{}", checkout_ref, tree.owner, tree.repo)
+                    }
+                    TargetKind::Tag => {
+                        format!("tag {} @ {}/{}", checkout_ref, tree.owner, tree.repo)
+                    }
+                    _ => format!("ref {} @ {}/{}", checkout_ref, tree.owner, tree.repo),
+                },
+                suggested_local_dir_name: slugify(&tree.repo),
             });
         }
 
@@ -372,6 +384,32 @@ fn parse_pr_url(input: &str) -> Option<PrUrlParts> {
     }
 }
 
+async fn resolve_tree_ref(fetch_url: &str, tail: &str) -> AppResult<(TargetKind, String)> {
+    let parts: Vec<&str> = tail
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if parts.is_empty() {
+        return Err(AppError::InvalidInput(
+            "GitHub tree URL is missing the target branch or tag".to_string(),
+        ));
+    }
+
+    for end in (1..=parts.len()).rev() {
+        let candidate = parts[..end].join("/");
+        if ls_remote_head_remote(fetch_url, &candidate).await? {
+            return Ok((TargetKind::Branch, candidate));
+        }
+        if ls_remote_tag_remote(fetch_url, &candidate).await? {
+            return Ok((TargetKind::Tag, candidate));
+        }
+    }
+
+    Err(AppError::InvalidInput(format!(
+        "could not resolve tree URL target '{tail}' against remote refs"
+    )))
+}
+
 fn is_probable_sha(input: &str) -> bool {
     Regex::new(r"^[0-9a-fA-F]{7,40}$").unwrap().is_match(input)
 }
@@ -385,12 +423,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_branch_urls_with_slashes() {
+    fn parses_tree_urls_with_slashes() {
         let parsed =
             parse_branch_url("https://github.com/Comfy-Org/ComfyUI/tree/feature/a/b").unwrap();
         assert_eq!(parsed.owner, "Comfy-Org");
         assert_eq!(parsed.repo, "ComfyUI");
         assert_eq!(parsed.branch, "feature/a/b");
+    }
+
+    #[test]
+    fn parses_tree_urls_with_paths_after_branch() {
+        let parsed =
+            parse_branch_url("https://github.com/Comfy-Org/ComfyUI/tree/main/src/components")
+                .unwrap();
+        assert_eq!(parsed.branch, "main/src/components");
     }
 
     #[test]
