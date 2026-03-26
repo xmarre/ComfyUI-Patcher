@@ -202,24 +202,6 @@ async fn find_existing_custom_node_repo_by_remote(
     let target_remote = canonical_target_remote(resolved)?;
     let mut matches = Vec::new();
 
-    for repo in state.db.list_repos_by_installation(&installation.id)? {
-        let repo_path = PathBuf::from(&repo.local_path);
-        if !repo_path.exists() || !repo_path.is_dir() || !is_git_repo(&repo_path).await {
-            continue;
-        }
-
-        if matches!(repo.kind, RepoKind::CustomNode)
-            && repo
-                .canonical_remote
-                .as_deref()
-                .and_then(canonicalize_remote)
-                .as_deref()
-                == Some(target_remote.as_str())
-        {
-            matches.push(repo);
-        }
-    }
-
     let custom_nodes_dir = PathBuf::from(&installation.custom_nodes_dir);
     if custom_nodes_dir.exists() {
         for entry in std::fs::read_dir(&custom_nodes_dir)? {
@@ -668,8 +650,13 @@ async fn list_manager_custom_nodes(
         .into_iter()
         .map(|entry| {
             let install_type = entry.install_type_label();
-            let source_input = entry.source_input();
             let canonical_repo_url = entry.canonical_git_remote();
+            let is_installable = install_type == "git-clone" && canonical_repo_url.is_some();
+            let source_input = if is_installable {
+                canonical_repo_url.clone()
+            } else {
+                entry.source_input()
+            };
             let installed = canonical_repo_url
                 .as_ref()
                 .and_then(|remote| installed_by_remote.get(remote));
@@ -681,7 +668,7 @@ async fn list_manager_custom_nodes(
                 install_type: install_type.clone(),
                 source_input,
                 canonical_repo_url,
-                is_installable: install_type == "git-clone" && entry.canonical_git_remote().is_some(),
+                is_installable,
                 is_installed: installed.is_some(),
                 installed_repo_id: installed.map(|repo| repo.id.clone()),
                 installed_display_name: installed.map(|repo| repo.display_name.clone()),

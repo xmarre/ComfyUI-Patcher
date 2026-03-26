@@ -28,7 +28,9 @@ impl ProcessRegistry {
         }
         let cwd = profile.cwd.as_deref().map(Path::new);
         let child = if profile.env.as_ref().is_some_and(|env| !env.is_empty()) {
-            if cwd.and_then(parse_wsl_unc_path).is_some() {
+            let program_is_wsl = parse_wsl_unc_path(Path::new(&profile.command)).is_some();
+            let cwd_is_wsl = cwd.and_then(parse_wsl_unc_path).is_some();
+            if program_is_wsl || cwd_is_wsl {
                 return Err(AppError::Process(
                     "launch profiles with custom environment variables are not supported for WSL-backed installations"
                         .to_string(),

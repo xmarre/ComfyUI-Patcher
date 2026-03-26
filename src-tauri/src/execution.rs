@@ -1,4 +1,4 @@
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 use std::path::Path;
 use std::process::Output;
 use tokio::process::{Child, Command};
@@ -11,9 +11,11 @@ pub struct WslPath {
 
 pub fn parse_wsl_unc_path(path: &Path) -> Option<WslPath> {
     let raw = path.to_string_lossy().replace('/', "\\");
-    let re = Regex::new(
+    let re = RegexBuilder::new(
         r"^(?:\\\\\?\\UNC\\|\\\\)(?:wsl\.localhost|wsl\$)\\(?P<distro>[^\\]+)(?P<rest>\\.*)?$",
     )
+    .case_insensitive(true)
+    .build()
     .unwrap();
     let caps = re.captures(&raw)?;
     let distro = caps.name("distro")?.as_str().to_string();
@@ -86,6 +88,16 @@ mod tests {
     fn parses_plain_wsl_unc_paths() {
         let parsed = parse_wsl_unc_path(Path::new(
             r"\\wsl.localhost\Ubuntu-22.04\home\toor\ComfyUI",
+        ))
+        .unwrap();
+        assert_eq!(parsed.distro, "Ubuntu-22.04");
+        assert_eq!(parsed.linux_path, "/home/toor/ComfyUI");
+    }
+
+    #[test]
+    fn parses_uppercase_wsl_hostnames() {
+        let parsed = parse_wsl_unc_path(Path::new(
+            r"\\WSL.LOCALHOST\Ubuntu-22.04\home\toor\ComfyUI",
         ))
         .unwrap();
         assert_eq!(parsed.distro, "Ubuntu-22.04");

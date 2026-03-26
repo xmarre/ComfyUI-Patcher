@@ -50,6 +50,7 @@ export default function ManagerRegistryBrowser({
   }
 
   useEffect(() => {
+    requestSeq.current += 1;
     const timeoutId = window.setTimeout(() => {
       void refresh(query);
     }, 180);
