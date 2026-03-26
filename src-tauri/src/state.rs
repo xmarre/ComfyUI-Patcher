@@ -2,6 +2,7 @@ use crate::db::Database;
 use crate::errors::AppResult;
 use crate::github::GithubClient;
 use crate::process::ProcessRegistry;
+use crate::registry::ManagerRegistryClient;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager};
@@ -12,6 +13,7 @@ pub struct AppState {
     pub db: Database,
     pub github: GithubClient,
     pub processes: ProcessRegistry,
+    pub manager_registry: ManagerRegistryClient,
     repo_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     installation_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
@@ -25,10 +27,12 @@ impl AppState {
         std::fs::create_dir_all(&data_dir)?;
         let db = Database::new(&data_dir)?;
         let github = GithubClient::new(std::env::var("GITHUB_TOKEN").ok())?;
+        let manager_registry = ManagerRegistryClient::new()?;
         Ok(Self {
             db,
             github,
             processes: ProcessRegistry::new(),
+            manager_registry,
             repo_locks: Arc::new(Mutex::new(HashMap::new())),
             installation_locks: Arc::new(Mutex::new(HashMap::new())),
         })

@@ -1,8 +1,8 @@
 use crate::errors::{AppError, AppResult};
+use crate::execution::output_command;
 use crate::models::Installation;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use tokio::process::Command;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DependencyPlan {
@@ -25,7 +25,7 @@ pub fn plan_dependency_sync(installation: &Installation, repo_path: &Path) -> De
                 "pip".to_string(),
                 "install".to_string(),
                 "-r".to_string(),
-                requirements.to_string_lossy().to_string(),
+                "requirements.txt".to_string(),
             ],
             cwd: repo_path.to_string_lossy().to_string(),
             reason: "requirements.txt detected".to_string(),
@@ -59,11 +59,7 @@ pub async fn execute_dependency_sync(plan: &DependencyPlan) -> AppResult<()> {
     if plan.strategy == "none" {
         return Ok(());
     }
-    let output = Command::new(&plan.command)
-        .args(&plan.args)
-        .current_dir(&plan.cwd)
-        .output()
-        .await?;
+    let output = output_command(&plan.command, &plan.args, Some(Path::new(&plan.cwd))).await?;
     if !output.status.success() {
         return Err(AppError::Dependency(format!(
             "{}\n{}",

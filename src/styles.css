@@ -253,3 +253,40 @@ pre {
     grid-template-columns: 1fr;
   }
 }
+
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  filter: none;
+}
+
+.registry-header,
+.registry-item-header {
+  align-items: flex-start;
+}
+
+.registry-badges {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.registry-list {
+  max-height: 680px;
+  overflow: auto;
+}
+
+.registry-item {
+  gap: 0.75rem;
+}
+
+.registry-description {
+  line-height: 1.4;
+}
+
+.registry-source {
+  word-break: break-all;
+}
+
+.registry-actions {
+  flex-wrap: wrap;
+}

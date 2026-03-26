@@ -1,6 +1,8 @@
 use crate::errors::{AppError, AppResult};
+use crate::execution::{parse_wsl_unc_path, spawn_command};
 use crate::models::LaunchProfile;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -24,15 +26,29 @@ impl ProcessRegistry {
                 "process already running for installation".to_string(),
             ));
         }
-        let mut command = Command::new(&profile.command);
-        command.args(&profile.args);
-        if let Some(cwd) = &profile.cwd {
-            command.current_dir(cwd);
-        }
-        if let Some(env) = &profile.env {
-            command.envs(env);
-        }
-        let child = command.spawn()?;
+        let cwd = profile.cwd.as_deref().map(Path::new);
+        let child = if profile.env.as_ref().is_some_and(|env| !env.is_empty()) {
+            if cwd.and_then(parse_wsl_unc_path).is_some() {
+                return Err(AppError::Process(
+                    "launch profiles with custom environment variables are not supported for WSL-backed installations"
+                        .to_string(),
+                ));
+            }
+            let mut command = Command::new(&profile.command);
+            command.args(&profile.args);
+            if let Some(cwd) = &profile.cwd {
+                command.current_dir(cwd);
+            }
+            if let Some(env) = &profile.env {
+                command.envs(env);
+            }
+            command
+                .spawn()
+                .map_err(|e| AppError::Process(e.to_string()))?
+        } else {
+            spawn_command(&profile.command, &profile.args, cwd)
+                .map_err(|e| AppError::Process(e.to_string()))?
+        };
         map.insert(installation_id.to_string(), child);
         Ok(())
     }

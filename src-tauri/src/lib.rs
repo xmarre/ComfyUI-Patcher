@@ -1,10 +1,12 @@
 mod db;
 mod deps;
 mod errors;
+mod execution;
 mod git;
 mod github;
 mod models;
 mod process;
+mod registry;
 mod state;
 mod util;
 
@@ -18,6 +20,7 @@ use crate::git::{
 use crate::models::*;
 use crate::state::AppState;
 use crate::util::{detect_env_kind, infer_python};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -179,6 +182,97 @@ fn ensure_remote_matches(current: Option<&str>, target: &ResolvedTarget) -> AppR
         )));
     }
     Ok(())
+}
+
+
+fn canonical_target_remote(resolved: &ResolvedTarget) -> AppResult<String> {
+    canonicalize_remote(&resolved.canonical_repo_url).ok_or_else(|| {
+        AppError::Conflict(format!(
+            "resolved target repo '{}' could not be canonicalized",
+            resolved.canonical_repo_url
+        ))
+    })
+}
+
+async fn find_existing_custom_node_repo_by_remote(
+    state: &AppState,
+    installation: &Installation,
+    resolved: &ResolvedTarget,
+) -> AppResult<Option<ManagedRepo>> {
+    let target_remote = canonical_target_remote(resolved)?;
+    let mut matches = Vec::new();
+
+    for repo in state.db.list_repos_by_installation(&installation.id)? {
+        let repo_path = PathBuf::from(&repo.local_path);
+        if !repo_path.exists() || !repo_path.is_dir() || !is_git_repo(&repo_path).await {
+            continue;
+        }
+
+        if matches!(repo.kind, RepoKind::CustomNode)
+            && repo
+                .canonical_remote
+                .as_deref()
+                .and_then(canonicalize_remote)
+                .as_deref()
+                == Some(target_remote.as_str())
+        {
+            matches.push(repo);
+        }
+    }
+
+    let custom_nodes_dir = PathBuf::from(&installation.custom_nodes_dir);
+    if custom_nodes_dir.exists() {
+        for entry in std::fs::read_dir(&custom_nodes_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_dir() || !is_git_repo(&path).await {
+                continue;
+            }
+            let status = inspect_repo(&path).await?;
+            if status.origin_url.as_deref() != Some(target_remote.as_str()) {
+                continue;
+            }
+            let repo = state.db.upsert_repo(
+                &installation.id,
+                RepoKind::CustomNode,
+                path.file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("custom-node"),
+                &path.to_string_lossy(),
+                status.origin_url.as_deref(),
+                status.head_sha.as_deref(),
+                status.branch.as_deref(),
+                status.is_detached,
+                status.is_dirty,
+            )?;
+            if !matches.iter().any(|existing| existing.id == repo.id) {
+                matches.push(repo);
+            }
+        }
+    }
+
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.into_iter().next()),
+        _ => Err(AppError::Conflict(format!(
+            "multiple custom node directories match remote {}; resolve duplicates manually",
+            target_remote
+        ))),
+    }
+}
+
+async fn preferred_custom_node_dir_name(
+    state: &AppState,
+    resolved: &ResolvedTarget,
+) -> String {
+    match state
+        .manager_registry
+        .preferred_dir_name_for_target(resolved)
+        .await
+    {
+        Ok(Some(value)) => value,
+        _ => resolved.suggested_local_dir_name.clone(),
+    }
 }
 
 fn absolutize_path_against(root: &Path, value: &str) -> AppResult<PathBuf> {
@@ -544,6 +638,69 @@ fn get_installation_detail(
 }
 
 #[tauri::command]
+async fn list_manager_custom_nodes(
+    state: State<'_, AppState>,
+    input: ListManagerCustomNodesInput,
+) -> Result<Vec<ManagerRegistryCustomNode>, String> {
+    let installation = state
+        .db
+        .get_installation(&input.installation_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "installation not found".to_string())?;
+
+    let (_, discovered_custom_nodes) = discover_repositories_for_installation(&state, &installation)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut installed_by_remote: HashMap<String, ManagedRepo> = HashMap::new();
+    for repo in discovered_custom_nodes {
+        if let Some(remote) = repo.canonical_remote.as_deref().and_then(canonicalize_remote) {
+            installed_by_remote.entry(remote).or_insert(repo);
+        }
+    }
+
+    let limit = input.limit.unwrap_or(100).clamp(1, 500);
+    let mut items = state
+        .manager_registry
+        .search_entries(input.query.as_deref(), limit)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|entry| {
+            let install_type = entry.install_type_label();
+            let source_input = entry.source_input();
+            let canonical_repo_url = entry.canonical_git_remote();
+            let installed = canonical_repo_url
+                .as_ref()
+                .and_then(|remote| installed_by_remote.get(remote));
+            ManagerRegistryCustomNode {
+                registry_id: entry.registry_id(),
+                title: entry.title(),
+                author: entry.author(),
+                description: entry.description(),
+                install_type: install_type.clone(),
+                source_input,
+                canonical_repo_url,
+                is_installable: install_type == "git-clone" && entry.canonical_git_remote().is_some(),
+                is_installed: installed.is_some(),
+                installed_repo_id: installed.map(|repo| repo.id.clone()),
+                installed_display_name: installed.map(|repo| repo.display_name.clone()),
+                installed_local_path: installed.map(|repo| repo.local_path.clone()),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    items.sort_by(|left, right| {
+        right
+            .is_installed
+            .cmp(&left.is_installed)
+            .then_with(|| left.title.to_ascii_lowercase().cmp(&right.title.to_ascii_lowercase()))
+            .then_with(|| left.registry_id.cmp(&right.registry_id))
+    });
+    Ok(items)
+}
+
+#[tauri::command]
 async fn resolve_target(
     state: State<'_, AppState>,
     input: ResolveTargetInput,
@@ -737,13 +894,49 @@ async fn run_install_or_patch_custom_node(
         )
         .await?;
         let custom_nodes_dir = PathBuf::from(&installation.custom_nodes_dir);
-        let requested_dir_name = input
+        let existing_repo_match =
+            find_existing_custom_node_repo_by_remote(&state, &installation, &resolved).await?;
+        let requested_dir_name = match input
             .target_local_dir_name
             .clone()
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| resolved.suggested_local_dir_name.clone());
+        {
+            Some(value) => value,
+            None => match existing_repo_match.as_ref() {
+                Some(repo) => repo
+                    .local_path
+                    .rsplit(std::path::MAIN_SEPARATOR)
+                    .next()
+                    .unwrap_or(&resolved.suggested_local_dir_name)
+                    .to_string(),
+                None => preferred_custom_node_dir_name(&state, &resolved).await,
+            },
+        };
         let base_dir_name = validate_custom_node_dir_name(&requested_dir_name)?;
-        let mut target_path = join_custom_node_path(&custom_nodes_dir, &base_dir_name);
+        let mut target_path = existing_repo_match
+            .as_ref()
+            .map(|repo| PathBuf::from(&repo.local_path))
+            .unwrap_or_else(|| join_custom_node_path(&custom_nodes_dir, &base_dir_name));
+
+        if let Some(repo) = existing_repo_match.as_ref() {
+            log_operation(
+                &state,
+                &app,
+                &operation_id,
+                "preflight",
+                "info",
+                format!("reusing existing custom node directory {}", repo.local_path),
+            );
+        } else {
+            log_operation(
+                &state,
+                &app,
+                &operation_id,
+                "preflight",
+                "info",
+                format!("selected custom node directory {}", target_path.to_string_lossy()),
+            );
+        }
 
         if target_path.exists() {
             if is_git_repo(&target_path).await {
@@ -1494,6 +1687,7 @@ pub fn run() {
             register_installation,
             list_installations,
             get_installation_detail,
+            list_manager_custom_nodes,
             resolve_target,
             patch_core,
             install_or_patch_custom_node,

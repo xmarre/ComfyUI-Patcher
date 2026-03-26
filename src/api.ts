@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   InstallationDetail,
+  ListManagerCustomNodesInput,
+  ManagerRegistryCustomNode,
   OperationEvent,
   OperationRecord,
   OperationStart,
@@ -25,6 +27,8 @@ export const api = {
     invoke<RegisterInstallationResult>("register_installation", { input }),
   getInstallationDetail: (installationId: string) =>
     invoke<InstallationDetail>("get_installation_detail", { installationId }),
+  listManagerCustomNodes: (input: ListManagerCustomNodesInput) =>
+    invoke<ManagerRegistryCustomNode[]>("list_manager_custom_nodes", { input }),
   resolveTarget: (input: ResolveTargetInput) =>
     invoke<ResolvedTarget>("resolve_target", { input }),
   patchCore: (input: PatchCoreInput) =>
