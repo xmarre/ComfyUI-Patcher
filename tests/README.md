@@ -1,0 +1,1 @@
+This directory is reserved for integration and end-to-end tests. The backend currently includes URL parsing unit tests in `src-tauri/src/github.rs`, which cover the highest-risk normalization edge cases for this version: slash-heavy branch URLs, PR URL parsing, and SHA detection.
