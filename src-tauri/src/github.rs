@@ -209,6 +209,74 @@ impl GithubClient {
             });
         }
 
+        if let Some(repo_path) = current_repo_path {
+            let kind = if ls_remote_head(repo_path, trimmed).await? {
+                Some(TargetKind::Branch)
+            } else if ls_remote_tag(repo_path, trimmed).await? {
+                Some(TargetKind::Tag)
+            } else {
+                None
+            };
+
+            if let Some(kind) = kind {
+                let canonical_repo_url = current_repo_remote.ok_or_else(|| {
+                    AppError::InvalidInput("missing current repository remote".to_string())
+                })?;
+                return Ok(ResolvedTarget {
+                    source_input: trimmed.to_string(),
+                    target_kind: kind.clone(),
+                    canonical_repo_url: canonical_repo_url.to_string(),
+                    fetch_url: format!("{canonical_repo_url}.git"),
+                    checkout_ref: trimmed.to_string(),
+                    resolved_sha: None,
+                    pr_number: None,
+                    pr_base_repo_url: None,
+                    pr_head_repo_url: None,
+                    pr_head_ref: None,
+                    summary_label: match kind {
+                        TargetKind::Branch => format!("branch {trimmed}"),
+                        TargetKind::Tag => format!("tag {trimmed}"),
+                        _ => format!("ref {trimmed}"),
+                    },
+                    suggested_local_dir_name: canonical_repo_url
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or("repo")
+                        .to_string(),
+                });
+            }
+
+            if is_probable_sha(trimmed) {
+                let canonical_repo_url = current_repo_remote.ok_or_else(|| {
+                    AppError::InvalidInput(
+                        "raw commit SHA requires an existing repository context".to_string(),
+                    )
+                })?;
+                return Ok(ResolvedTarget {
+                    source_input: trimmed.to_string(),
+                    target_kind: TargetKind::Commit,
+                    canonical_repo_url: canonical_repo_url.to_string(),
+                    fetch_url: format!("{canonical_repo_url}.git"),
+                    checkout_ref: trimmed.to_string(),
+                    resolved_sha: Some(trimmed.to_string()),
+                    pr_number: None,
+                    pr_base_repo_url: None,
+                    pr_head_repo_url: None,
+                    pr_head_ref: None,
+                    summary_label: format!("commit {}", short_sha(trimmed)),
+                    suggested_local_dir_name: canonical_repo_url
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or("repo")
+                        .to_string(),
+                });
+            }
+
+            return Err(AppError::InvalidInput(format!(
+                "could not resolve branch, tag, or commit '{trimmed}' against origin"
+            )));
+        }
+
         if is_probable_sha(trimmed) {
             let canonical_repo_url = current_repo_remote.ok_or_else(|| {
                 AppError::InvalidInput(
@@ -235,46 +303,10 @@ impl GithubClient {
             });
         }
 
-        let repo_path = current_repo_path.ok_or_else(|| {
-            AppError::InvalidInput(
-                "raw branch or tag names require an existing repository context; use a GitHub URL for new custom nodes"
-                    .to_string(),
-            )
-        })?;
-        let kind = if ls_remote_head(repo_path, trimmed).await? {
-            TargetKind::Branch
-        } else if ls_remote_tag(repo_path, trimmed).await? {
-            TargetKind::Tag
-        } else {
-            return Err(AppError::InvalidInput(format!(
-                "could not resolve branch or tag '{trimmed}' against origin"
-            )));
-        };
-        let canonical_repo_url = current_repo_remote.ok_or_else(|| {
-            AppError::InvalidInput("missing current repository remote".to_string())
-        })?;
-        Ok(ResolvedTarget {
-            source_input: trimmed.to_string(),
-            target_kind: kind.clone(),
-            canonical_repo_url: canonical_repo_url.to_string(),
-            fetch_url: format!("{canonical_repo_url}.git"),
-            checkout_ref: trimmed.to_string(),
-            resolved_sha: None,
-            pr_number: None,
-            pr_base_repo_url: None,
-            pr_head_repo_url: None,
-            pr_head_ref: None,
-            summary_label: match kind {
-                TargetKind::Branch => format!("branch {trimmed}"),
-                TargetKind::Tag => format!("tag {trimmed}"),
-                _ => format!("ref {trimmed}"),
-            },
-            suggested_local_dir_name: canonical_repo_url
-                .rsplit('/')
-                .next()
-                .unwrap_or("repo")
+        Err(AppError::InvalidInput(
+            "raw branch or tag names require an existing repository context; use a GitHub URL for new custom nodes"
                 .to_string(),
-        })
+        ))
     }
 }
 

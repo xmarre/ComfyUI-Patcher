@@ -11,9 +11,9 @@ mod util;
 use crate::deps::{execute_dependency_sync, plan_dependency_sync};
 use crate::errors::{AppError, AppResult};
 use crate::git::{
-    apply_stash, clone_repo, ensure_clean_or_apply_strategy, fetch_origin, fetch_refspec,
-    inspect_repo, is_git_repo, join_custom_node_path, reset_hard, submodule_update, switch_branch,
-    switch_detached, validate_custom_node_dir_name,
+    apply_stash, canonicalize_remote, clone_repo, ensure_clean_or_apply_strategy, fetch_origin,
+    fetch_refspec, inspect_repo, is_git_repo, join_custom_node_path, reset_hard, submodule_update,
+    switch_branch, switch_detached, validate_custom_node_dir_name,
 };
 use crate::models::*;
 use crate::state::AppState;
@@ -154,15 +154,45 @@ async fn resolve_target_for_context(
 }
 
 fn ensure_remote_matches(current: Option<&str>, target: &ResolvedTarget) -> AppResult<()> {
-    if let Some(current) = current {
-        if current != target.canonical_repo_url {
-            return Err(AppError::Conflict(format!(
-                "resolved target repo {} does not match managed repo remote {}",
-                target.canonical_repo_url, current
-            )));
-        }
+    let current = current.ok_or_else(|| {
+        AppError::Conflict(
+            "managed repository has no canonical remote; cannot validate resolved target repo"
+                .to_string(),
+        )
+    })?;
+    let current = canonicalize_remote(current).ok_or_else(|| {
+        AppError::Conflict(format!(
+            "managed repository remote '{}' could not be canonicalized for validation",
+            current
+        ))
+    })?;
+    let target_remote = canonicalize_remote(&target.canonical_repo_url).ok_or_else(|| {
+        AppError::Conflict(format!(
+            "resolved target repo '{}' could not be canonicalized for validation",
+            target.canonical_repo_url
+        ))
+    })?;
+    if current != target_remote {
+        return Err(AppError::Conflict(format!(
+            "resolved target repo {} does not match managed repo remote {}",
+            target_remote, current
+        )));
     }
     Ok(())
+}
+
+fn absolutize_path_against(root: &Path, value: &str) -> AppResult<PathBuf> {
+    let path = PathBuf::from(value);
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    };
+    if absolute.exists() {
+        Ok(absolute.canonicalize()?)
+    } else {
+        Ok(absolute)
+    }
 }
 
 async fn create_checkpoint_if_needed(
@@ -426,27 +456,64 @@ async fn register_installation_impl(
     state: &AppState,
     input: RegisterInstallationInput,
 ) -> AppResult<RegisterInstallationResult> {
-    let root = PathBuf::from(&input.comfy_root);
-    if !root.exists() || !root.is_dir() {
+    let requested_root = PathBuf::from(&input.comfy_root);
+    if !requested_root.exists() || !requested_root.is_dir() {
         return Err(AppError::InvalidInput(
             "ComfyUI root does not exist or is not a directory".to_string(),
         ));
     }
+    let root = requested_root.canonicalize()?;
 
-    let python = match input.python_exe {
-        Some(value) if !value.trim().is_empty() => PathBuf::from(value),
+    let python = match input.python_exe.as_deref().map(str::trim) {
+        Some(value) if !value.is_empty() => {
+            let candidate = PathBuf::from(value);
+            if candidate.is_absolute() {
+                if candidate.exists() {
+                    candidate.canonicalize()?
+                } else {
+                    candidate
+                }
+            } else if candidate.components().count() > 1
+                || value.contains(std::path::MAIN_SEPARATOR)
+            {
+                absolutize_path_against(&root, value)?
+            } else {
+                candidate
+            }
+        }
         _ => infer_python(&root).unwrap_or_else(|| PathBuf::from("python")),
     };
 
     let custom_nodes_dir = root.join("custom_nodes");
     std::fs::create_dir_all(&custom_nodes_dir)?;
 
+    let launch_profile = input
+        .launch_profile
+        .as_ref()
+        .map(|profile| {
+            let mut profile = profile.clone();
+            if let Some(cwd) = profile
+                .cwd
+                .as_deref()
+                .map(str::trim)
+                .filter(|cwd| !cwd.is_empty())
+            {
+                profile.cwd = Some(
+                    absolutize_path_against(&root, cwd)?
+                        .to_string_lossy()
+                        .to_string(),
+                );
+            }
+            Ok::<LaunchProfile, AppError>(profile)
+        })
+        .transpose()?;
+
     let installation = state.db.create_installation(
         &input.name,
         &root.to_string_lossy(),
         &python.to_string_lossy(),
         &custom_nodes_dir.to_string_lossy(),
-        input.launch_profile.as_ref(),
+        launch_profile.as_ref(),
         &detect_env_kind(&python),
         is_git_repo(&root).await,
     )?;
@@ -650,6 +717,8 @@ async fn run_install_or_patch_custom_node(
     operation_id: String,
 ) -> AppResult<()> {
     state.db.set_operation_running(&operation_id)?;
+    let installation_lock = state.installation_lock(&installation.id).await;
+    let _installation_guard = installation_lock.lock().await;
     log_operation(
         &state,
         &app,
@@ -679,9 +748,7 @@ async fn run_install_or_patch_custom_node(
         if target_path.exists() {
             if is_git_repo(&target_path).await {
                 let status = inspect_repo(&target_path).await?;
-                if let Some(origin) = status.origin_url.as_deref() {
-                    ensure_remote_matches(Some(origin), &resolved)?;
-                }
+                ensure_remote_matches(status.origin_url.as_deref(), &resolved)?;
                 let repo = state.db.upsert_repo(
                     &installation.id,
                     RepoKind::CustomNode,

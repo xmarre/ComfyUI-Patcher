@@ -80,8 +80,8 @@ pub fn canonicalize_remote(input: &str) -> Option<String> {
         .unwrap()
         .captures(input)
     {
-        let owner = caps.name("owner")?.as_str();
-        let repo = caps.name("repo")?.as_str();
+        let owner = caps.name("owner")?.as_str().to_ascii_lowercase();
+        let repo = caps.name("repo")?.as_str().to_ascii_lowercase();
         return Some(format!("https://github.com/{owner}/{repo}"));
     }
 
@@ -92,8 +92,8 @@ pub fn canonicalize_remote(input: &str) -> Option<String> {
             .filter(|segment| !segment.is_empty())
             .collect();
         if segments.len() >= 2 {
-            let owner = segments[0];
-            let repo = segments[1].trim_end_matches(".git");
+            let owner = segments[0].to_ascii_lowercase();
+            let repo = segments[1].trim_end_matches(".git").to_ascii_lowercase();
             return Some(format!("https://github.com/{owner}/{repo}"));
         }
     }

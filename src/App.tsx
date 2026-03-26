@@ -25,46 +25,57 @@ function parseLaunchArgs(value: string): string[] {
   let current = "";
   let quote: '"' | "'" | null = null;
   let escape = false;
+  let tokenStarted = false;
 
   for (const char of value) {
     if (escape) {
       current += char;
       escape = false;
+      tokenStarted = true;
       continue;
     }
 
     if (quote === '"' && char === "\\") {
       escape = true;
+      tokenStarted = true;
       continue;
     }
 
     if (quote) {
       if (char === quote) {
         quote = null;
+        tokenStarted = true;
       } else {
         current += char;
+        tokenStarted = true;
       }
       continue;
     }
 
     if (char === '"' || char === "'") {
       quote = char;
+      tokenStarted = true;
       continue;
     }
 
     if (/\s/.test(char)) {
-      if (current) {
+      if (tokenStarted) {
         args.push(current);
         current = "";
+        tokenStarted = false;
       }
       continue;
     }
 
     current += char;
+    tokenStarted = true;
   }
 
-  if (escape) current += "\\";
-  if (current) args.push(current);
+  if (escape) {
+    current += "\\";
+    tokenStarted = true;
+  }
+  if (tokenStarted) args.push(current);
   return args;
 }
 
@@ -76,6 +87,8 @@ export default function App() {
   const [nodeInput, setNodeInput] = useState("");
   const [corePreview, setCorePreview] = useState<ResolvedTarget | null>(null);
   const [nodePreview, setNodePreview] = useState<ResolvedTarget | null>(null);
+  const [corePreviewError, setCorePreviewError] = useState<string | null>(null);
+  const [nodePreviewError, setNodePreviewError] = useState<string | null>(null);
   const [events, setEvents] = useState<OperationEvent[]>([]);
   const [registerForm, setRegisterForm] = useState({
     name: "Primary ComfyUI",
@@ -143,6 +156,8 @@ export default function App() {
   useEffect(() => {
     setCorePreview(null);
     setNodePreview(null);
+    setCorePreviewError(null);
+    setNodePreviewError(null);
     void refreshDetail(selectedInstallationId, { clear: true });
   }, [selectedInstallationId]);
 
@@ -174,34 +189,60 @@ export default function App() {
 
   useEffect(() => {
     setCorePreview(null);
+    setCorePreviewError(null);
     corePreviewRequestSeq.current += 1;
   }, [coreInput]);
 
   useEffect(() => {
     setNodePreview(null);
+    setNodePreviewError(null);
     nodePreviewRequestSeq.current += 1;
   }, [nodeInput]);
 
   async function preview(input: ResolveTargetInput, target: "core" | "node") {
     if (!input.installationId || !input.input.trim()) {
-      if (target === "core") setCorePreview(null);
-      else setNodePreview(null);
+      if (target === "core") {
+        setCorePreview(null);
+        setCorePreviewError(null);
+      } else {
+        setNodePreview(null);
+        setNodePreviewError(null);
+      }
       return;
     }
 
     const requestSeq =
       target === "core" ? ++corePreviewRequestSeq.current : ++nodePreviewRequestSeq.current;
-    const resolved = await api.resolveTarget(input);
 
-    if (selectedInstallationIdRef.current !== input.installationId) return;
-    if (target === "core") {
-      if (corePreviewRequestSeq.current !== requestSeq) return;
-      if (coreInputRef.current !== input.input) return;
-      setCorePreview(resolved);
-    } else {
-      if (nodePreviewRequestSeq.current !== requestSeq) return;
-      if (nodeInputRef.current !== input.input) return;
-      setNodePreview(resolved);
+    try {
+      const resolved = await api.resolveTarget(input);
+
+      if (selectedInstallationIdRef.current !== input.installationId) return;
+      if (target === "core") {
+        if (corePreviewRequestSeq.current !== requestSeq) return;
+        if (coreInputRef.current !== input.input) return;
+        setCorePreview(resolved);
+        setCorePreviewError(null);
+      } else {
+        if (nodePreviewRequestSeq.current !== requestSeq) return;
+        if (nodeInputRef.current !== input.input) return;
+        setNodePreview(resolved);
+        setNodePreviewError(null);
+      }
+    } catch (error) {
+      if (selectedInstallationIdRef.current !== input.installationId) return;
+      const message = error instanceof Error ? error.message : String(error);
+      if (target === "core") {
+        if (corePreviewRequestSeq.current !== requestSeq) return;
+        if (coreInputRef.current !== input.input) return;
+        setCorePreview(null);
+        setCorePreviewError(message);
+      } else {
+        if (nodePreviewRequestSeq.current !== requestSeq) return;
+        if (nodeInputRef.current !== input.input) return;
+        setNodePreview(null);
+        setNodePreviewError(message);
+      }
     }
   }
 
@@ -292,6 +333,8 @@ export default function App() {
               });
               setCorePreview(null);
               setNodePreview(null);
+              setCorePreviewError(null);
+              setNodePreviewError(null);
               await refreshInstallations();
               setSelectedInstallationId(result.installation.id);
             }}
@@ -387,6 +430,7 @@ export default function App() {
                     });
                     setCoreInput("");
                     setCorePreview(null);
+                    setCorePreviewError(null);
                   }}
                 >
                   Apply
@@ -399,6 +443,7 @@ export default function App() {
                   <div className="mono small">{corePreview.resolvedSha ?? corePreview.checkoutRef}</div>
                 </div>
               ) : null}
+              {corePreviewError ? <div className="muted">{corePreviewError}</div> : null}
               {coreRepo ? (
                 <RepoCard
                   repo={coreRepo}
@@ -453,6 +498,7 @@ export default function App() {
                     });
                     setNodeInput("");
                     setNodePreview(null);
+                    setNodePreviewError(null);
                   }}
                 >
                   Install / Patch
@@ -465,6 +511,7 @@ export default function App() {
                   <div className="mono small">{nodePreview.suggestedLocalDirName}</div>
                 </div>
               ) : null}
+              {nodePreviewError ? <div className="muted">{nodePreviewError}</div> : null}
             </section>
 
             <section className="grid two">
