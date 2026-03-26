@@ -17,6 +17,9 @@ pub enum AppError {
     #[error("github resolution failed: {0}")]
     Github(String),
 
+    #[error("json error: {0}")]
+    Json(String),
+
     #[error("database error: {0}")]
     Db(String),
 
@@ -50,7 +53,7 @@ impl From<reqwest::Error> for AppError {
 
 impl From<serde_json::Error> for AppError {
     fn from(value: serde_json::Error) -> Self {
-        Self::Db(value.to_string())
+        Self::Json(value.to_string())
     }
 }
 

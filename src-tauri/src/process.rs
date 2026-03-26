@@ -20,7 +20,9 @@ impl ProcessRegistry {
     pub async fn start(&self, installation_id: &str, profile: &LaunchProfile) -> AppResult<()> {
         let mut map = self.inner.lock().await;
         if map.contains_key(installation_id) {
-            return Err(AppError::Process("process already running for installation".to_string()));
+            return Err(AppError::Process(
+                "process already running for installation".to_string(),
+            ));
         }
         let mut command = Command::new(&profile.command);
         command.args(&profile.args);
@@ -35,17 +37,29 @@ impl ProcessRegistry {
         Ok(())
     }
 
-    pub async fn stop(&self, installation_id: &str) -> AppResult<()> {
+    pub async fn stop(&self, installation_id: &str) -> AppResult<bool> {
         let mut map = self.inner.lock().await;
+        let child = match map.get_mut(installation_id) {
+            Some(child) => child,
+            None => return Ok(false),
+        };
+        child
+            .start_kill()
+            .map_err(|e| AppError::Process(e.to_string()))?;
         let mut child = map
             .remove(installation_id)
-            .ok_or_else(|| AppError::Process("no managed child process is running".to_string()))?;
-        child.kill().await.map_err(|e| AppError::Process(e.to_string()))?;
-        Ok(())
+            .ok_or_else(|| AppError::Process("process registry lost managed child".to_string()))?;
+        drop(map);
+        if let Err(err) = child.wait().await {
+            let mut map = self.inner.lock().await;
+            map.insert(installation_id.to_string(), child);
+            return Err(AppError::Process(err.to_string()));
+        }
+        Ok(true)
     }
 
     pub async fn restart(&self, installation_id: &str, profile: &LaunchProfile) -> AppResult<()> {
-        let _ = self.stop(installation_id).await;
+        let _ = self.stop(installation_id).await?;
         self.start(installation_id, profile).await
     }
 }

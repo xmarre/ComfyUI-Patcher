@@ -39,7 +39,9 @@ pub async fn run_git_allow_fail(path: &Path, args: &[&str]) -> AppResult<Option<
     if !output.status.success() {
         return Ok(None);
     }
-    Ok(Some(String::from_utf8_lossy(&output.stdout).trim().to_string()))
+    Ok(Some(
+        String::from_utf8_lossy(&output.stdout).trim().to_string(),
+    ))
 }
 
 pub async fn inspect_repo(path: &Path) -> AppResult<RepoStatus> {
@@ -86,38 +88,58 @@ pub fn canonicalize_remote(input: &str) -> Option<String> {
     None
 }
 
-pub async fn ensure_clean_or_apply_strategy(path: &Path, strategy: &DirtyRepoStrategy) -> AppResult<Option<String>> {
+pub async fn ensure_clean_or_apply_strategy(
+    path: &Path,
+    strategy: &DirtyRepoStrategy,
+) -> AppResult<Option<String>> {
     let status = inspect_repo(path).await?;
     if !status.is_dirty {
         return Ok(None);
     }
     match strategy {
-        DirtyRepoStrategy::Abort => Err(AppError::Conflict("repository has local changes".to_string())),
+        DirtyRepoStrategy::Abort => Err(AppError::Conflict(
+            "repository has local changes".to_string(),
+        )),
         DirtyRepoStrategy::HardReset => {
             run_git(path, &["reset", "--hard"]).await?;
             run_git(path, &["clean", "-fd"]).await?;
             Ok(None)
         }
         DirtyRepoStrategy::Stash => {
-            let out = run_git(path, &["stash", "push", "-u", "-m", "comfyui-patcher-auto-stash"]).await?;
+            let out = run_git(
+                path,
+                &["stash", "push", "-u", "-m", "comfyui-patcher-auto-stash"],
+            )
+            .await?;
             if out.contains("No local changes") {
                 Ok(None)
             } else {
-                Ok(Some("stash@{0}".to_string()))
+                let stash_id = run_git(path, &["rev-parse", "--verify", "stash@{0}"]).await?;
+                if stash_id.is_empty() {
+                    Err(AppError::Git(
+                        "git stash push succeeded but no stash entry could be resolved".to_string(),
+                    ))
+                } else {
+                    Ok(Some(stash_id))
+                }
             }
         }
     }
 }
 
 pub async fn clone_repo(url: &str, dest: &Path) -> AppResult<()> {
-    let parent = dest.parent().ok_or_else(|| AppError::InvalidInput("destination has no parent".to_string()))?;
+    let parent = dest
+        .parent()
+        .ok_or_else(|| AppError::InvalidInput("destination has no parent".to_string()))?;
     std::fs::create_dir_all(parent)?;
     let output = Command::new("git")
         .args(["clone", url, &dest.to_string_lossy()])
         .output()
         .await?;
     if !output.status.success() {
-        return Err(AppError::Git(String::from_utf8_lossy(&output.stderr).to_string()));
+        return Err(AppError::Git(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ));
     }
     Ok(())
 }
@@ -156,25 +178,40 @@ pub async fn submodule_update(path: &Path) -> AppResult<()> {
 }
 
 pub async fn ls_remote_head(path: &Path, name: &str) -> AppResult<bool> {
-    let output = Command::new("git")
-        .args(["ls-remote", "--heads", "origin", name])
-        .current_dir(path)
-        .output()
-        .await?;
-    Ok(output.status.success() && !String::from_utf8_lossy(&output.stdout).trim().is_empty())
+    let output = run_git(path, &["ls-remote", "--heads", "origin", name]).await?;
+    Ok(!output.trim().is_empty())
 }
 
 pub async fn ls_remote_tag(path: &Path, name: &str) -> AppResult<bool> {
-    let output = Command::new("git")
-        .args(["ls-remote", "--tags", "origin", name])
-        .current_dir(path)
-        .output()
-        .await?;
-    Ok(output.status.success() && !String::from_utf8_lossy(&output.stdout).trim().is_empty())
+    let output = run_git(path, &["ls-remote", "--tags", "origin", name]).await?;
+    Ok(!output.trim().is_empty())
 }
 
-pub async fn apply_stash(path: &Path) -> AppResult<()> {
-    let _ = run_git(path, &["stash", "pop"]).await?;
+fn stash_ref_from_list(stash_list: &str, stash_id: &str) -> Option<String> {
+    if stash_id.starts_with("stash@{") {
+        return Some(stash_id.to_string());
+    }
+
+    stash_list.lines().find_map(|line| {
+        let mut parts = line.splitn(2, '\t');
+        let sha = parts.next()?.trim();
+        let stash_ref = parts.next()?.trim();
+        (sha == stash_id && !stash_ref.is_empty()).then(|| stash_ref.to_string())
+    })
+}
+
+pub async fn apply_stash(path: &Path, stash_id: &str) -> AppResult<()> {
+    let stash_ref = if stash_id.starts_with("stash@{") {
+        stash_id.to_string()
+    } else {
+        let stash_list = run_git(path, &["stash", "list", "--format=%H%x09%gd"]).await?;
+        stash_ref_from_list(&stash_list, stash_id).ok_or_else(|| {
+            AppError::Git(format!(
+                "could not find saved stash entry for checkpoint stash {stash_id}"
+            ))
+        })?
+    };
+    let _ = run_git(path, &["stash", "pop", &stash_ref]).await?;
     Ok(())
 }
 
@@ -200,7 +237,8 @@ pub fn validate_custom_node_dir_name(dir_name: &str) -> AppResult<String> {
     match (components.next(), components.next()) {
         (Some(Component::Normal(name)), None) => Ok(name.to_string_lossy().into_owned()),
         _ => Err(AppError::InvalidInput(
-            "custom node directory name must be a single folder name inside custom_nodes".to_string(),
+            "custom node directory name must be a single folder name inside custom_nodes"
+                .to_string(),
         )),
     }
 }
@@ -254,5 +292,22 @@ mod tests {
             validate_custom_node_dir_name("/tmp/foo"),
             Err(AppError::InvalidInput(_))
         ));
+    }
+
+    #[test]
+    fn resolves_stash_ref_from_saved_sha() {
+        let stash_list = "abc123\tstash@{0}\ndef456\tstash@{1}";
+        assert_eq!(
+            stash_ref_from_list(stash_list, "def456"),
+            Some("stash@{1}".to_string())
+        );
+    }
+
+    #[test]
+    fn preserves_legacy_stash_refs() {
+        assert_eq!(
+            stash_ref_from_list("", "stash@{2}"),
+            Some("stash@{2}".to_string())
+        );
     }
 }

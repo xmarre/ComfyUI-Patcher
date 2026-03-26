@@ -3,7 +3,7 @@ use crate::git::{canonicalize_remote, ls_remote_head, ls_remote_tag};
 use crate::models::{ResolvedTarget, TargetKind};
 use crate::util::slugify;
 use regex::Regex;
-use reqwest::header::{ACCEPT, HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT};
 use serde::Deserialize;
 use std::path::Path;
 
@@ -56,25 +56,48 @@ impl GithubClient {
     pub fn new(token: Option<String>) -> AppResult<Self> {
         let mut headers = HeaderMap::new();
         headers.insert(USER_AGENT, HeaderValue::from_static("comfyui-patcher"));
-        headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.github+json"));
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/vnd.github+json"),
+        );
         if let Some(token) = &token {
             headers.insert(
                 "authorization",
-                HeaderValue::from_str(&format!("Bearer {token}")).map_err(|e| AppError::Github(e.to_string()))?,
+                HeaderValue::from_str(&format!("Bearer {token}"))
+                    .map_err(|e| AppError::Github(e.to_string()))?,
             );
         }
-        let client = reqwest::Client::builder().default_headers(headers).build()?;
-        Ok(Self { client, _token: token })
+        let client = reqwest::Client::builder()
+            .default_headers(headers)
+            .build()?;
+        Ok(Self {
+            client,
+            _token: token,
+        })
     }
 
     async fn get_repo(&self, owner: &str, repo: &str) -> AppResult<RepoResponse> {
         let url = format!("https://api.github.com/repos/{owner}/{repo}");
-        Ok(self.client.get(url).send().await?.error_for_status()?.json().await?)
+        Ok(self
+            .client
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
     }
 
     async fn get_pr(&self, owner: &str, repo: &str, number: u64) -> AppResult<PullResponse> {
         let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{number}");
-        Ok(self.client.get(url).send().await?.error_for_status()?.json().await?)
+        Ok(self
+            .client
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
     }
 
     pub async fn resolve_target(
@@ -90,11 +113,14 @@ impl GithubClient {
 
         if let Some(pr) = parse_pr_url(trimmed) {
             let pr_data = self.get_pr(&pr.owner, &pr.repo, pr.number).await?;
-            let canonical_repo_url = canonicalize_remote(&pr_data.base.repo.html_url)
-                .ok_or_else(|| AppError::Github("could not canonicalize PR base repo".to_string()))?;
+            let canonical_repo_url =
+                canonicalize_remote(&pr_data.base.repo.html_url).ok_or_else(|| {
+                    AppError::Github("could not canonicalize PR base repo".to_string())
+                })?;
             let fetch_url = pr_data.base.repo.clone_url;
-            let head_url = canonicalize_remote(&pr_data.head.repo.html_url)
-                .ok_or_else(|| AppError::Github("could not canonicalize PR head repo".to_string()))?;
+            let head_url = canonicalize_remote(&pr_data.head.repo.html_url).ok_or_else(|| {
+                AppError::Github("could not canonicalize PR head repo".to_string())
+            })?;
             return Ok(ResolvedTarget {
                 source_input: trimmed.to_string(),
                 target_kind: TargetKind::Pr,
@@ -124,7 +150,10 @@ impl GithubClient {
                 pr_base_repo_url: None,
                 pr_head_repo_url: None,
                 pr_head_ref: None,
-                summary_label: format!("branch {} @ {}/{}", branch.branch, branch.owner, branch.repo),
+                summary_label: format!(
+                    "branch {} @ {}/{}",
+                    branch.branch, branch.owner, branch.repo
+                ),
                 suggested_local_dir_name: slugify(&branch.repo),
             });
         }
@@ -149,8 +178,9 @@ impl GithubClient {
 
         if let Some(repo) = parse_repo_url(trimmed) {
             let metadata = self.get_repo(&repo.owner, &repo.repo).await?;
-            let canonical_repo_url = canonicalize_remote(&metadata.html_url)
-                .ok_or_else(|| AppError::Github("could not canonicalize repository URL".to_string()))?;
+            let canonical_repo_url = canonicalize_remote(&metadata.html_url).ok_or_else(|| {
+                AppError::Github("could not canonicalize repository URL".to_string())
+            })?;
             return Ok(ResolvedTarget {
                 source_input: trimmed.to_string(),
                 target_kind: TargetKind::DefaultBranch,
@@ -169,7 +199,9 @@ impl GithubClient {
 
         if is_probable_sha(trimmed) {
             let canonical_repo_url = current_repo_remote.ok_or_else(|| {
-                AppError::InvalidInput("raw commit SHA requires an existing repository context".to_string())
+                AppError::InvalidInput(
+                    "raw commit SHA requires an existing repository context".to_string(),
+                )
             })?;
             return Ok(ResolvedTarget {
                 source_input: trimmed.to_string(),
@@ -183,7 +215,11 @@ impl GithubClient {
                 pr_head_repo_url: None,
                 pr_head_ref: None,
                 summary_label: format!("commit {}", short_sha(trimmed)),
-                suggested_local_dir_name: canonical_repo_url.rsplit('/').next().unwrap_or("repo").to_string(),
+                suggested_local_dir_name: canonical_repo_url
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("repo")
+                    .to_string(),
             });
         }
 
@@ -202,8 +238,9 @@ impl GithubClient {
                 "could not resolve branch or tag '{trimmed}' against origin"
             )));
         };
-        let canonical_repo_url = current_repo_remote
-            .ok_or_else(|| AppError::InvalidInput("missing current repository remote".to_string()))?;
+        let canonical_repo_url = current_repo_remote.ok_or_else(|| {
+            AppError::InvalidInput("missing current repository remote".to_string())
+        })?;
         Ok(ResolvedTarget {
             source_input: trimmed.to_string(),
             target_kind: kind.clone(),
@@ -220,7 +257,11 @@ impl GithubClient {
                 TargetKind::Tag => format!("tag {trimmed}"),
                 _ => format!("ref {trimmed}"),
             },
-            suggested_local_dir_name: canonical_repo_url.rsplit('/').next().unwrap_or("repo").to_string(),
+            suggested_local_dir_name: canonical_repo_url
+                .rsplit('/')
+                .next()
+                .unwrap_or("repo")
+                .to_string(),
         })
     }
 }
@@ -257,7 +298,10 @@ fn parse_repo_url(input: &str) -> Option<RepoUrlParts> {
     if !url.host_str()?.eq_ignore_ascii_case("github.com") {
         return None;
     }
-    let segments: Vec<_> = url.path_segments()?.filter(|segment| !segment.is_empty()).collect();
+    let segments: Vec<_> = url
+        .path_segments()?
+        .filter(|segment| !segment.is_empty())
+        .collect();
     if segments.len() == 2 {
         Some(RepoUrlParts {
             owner: segments[0].to_string(),
@@ -273,7 +317,10 @@ fn parse_branch_url(input: &str) -> Option<BranchUrlParts> {
     if !url.host_str()?.eq_ignore_ascii_case("github.com") {
         return None;
     }
-    let segments: Vec<_> = url.path_segments()?.filter(|segment| !segment.is_empty()).collect();
+    let segments: Vec<_> = url
+        .path_segments()?
+        .filter(|segment| !segment.is_empty())
+        .collect();
     if segments.len() >= 4 && segments[2] == "tree" {
         Some(BranchUrlParts {
             owner: segments[0].to_string(),
@@ -290,7 +337,10 @@ fn parse_commit_url(input: &str) -> Option<CommitUrlParts> {
     if !url.host_str()?.eq_ignore_ascii_case("github.com") {
         return None;
     }
-    let segments: Vec<_> = url.path_segments()?.filter(|segment| !segment.is_empty()).collect();
+    let segments: Vec<_> = url
+        .path_segments()?
+        .filter(|segment| !segment.is_empty())
+        .collect();
     if segments.len() == 4 && segments[2] == "commit" {
         Some(CommitUrlParts {
             owner: segments[0].to_string(),
@@ -307,7 +357,10 @@ fn parse_pr_url(input: &str) -> Option<PrUrlParts> {
     if !url.host_str()?.eq_ignore_ascii_case("github.com") {
         return None;
     }
-    let segments: Vec<_> = url.path_segments()?.filter(|segment| !segment.is_empty()).collect();
+    let segments: Vec<_> = url
+        .path_segments()?
+        .filter(|segment| !segment.is_empty())
+        .collect();
     if segments.len() == 4 && segments[2] == "pull" {
         Some(PrUrlParts {
             owner: segments[0].to_string(),
@@ -333,7 +386,8 @@ mod tests {
 
     #[test]
     fn parses_branch_urls_with_slashes() {
-        let parsed = parse_branch_url("https://github.com/Comfy-Org/ComfyUI/tree/feature/a/b").unwrap();
+        let parsed =
+            parse_branch_url("https://github.com/Comfy-Org/ComfyUI/tree/feature/a/b").unwrap();
         assert_eq!(parsed.owner, "Comfy-Org");
         assert_eq!(parsed.repo, "ComfyUI");
         assert_eq!(parsed.branch, "feature/a/b");

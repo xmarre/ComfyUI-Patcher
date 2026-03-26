@@ -67,6 +67,8 @@ impl Database {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_managed_repos_installation_local_path
+            ON managed_repos (installation_id, local_path);
             CREATE TABLE IF NOT EXISTS operations (
                 id TEXT PRIMARY KEY,
                 installation_id TEXT NOT NULL,
@@ -191,53 +193,39 @@ impl Database {
     ) -> AppResult<ManagedRepo> {
         let conn = self.connect()?;
         let now = now_rfc3339();
-        let existing_id: Option<String> = conn
-            .query_row(
-                "SELECT id FROM managed_repos WHERE installation_id = ?1 AND local_path = ?2",
-                params![installation_id, local_path],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let repo_id = existing_id.unwrap_or_else(new_id);
-        if self.get_repo(&repo_id)?.is_some() {
-            conn.execute(
-                "UPDATE managed_repos SET
-                 kind = ?2, display_name = ?3, canonical_remote = ?4, current_head_sha = ?5, current_branch = ?6,
-                 is_detached = ?7, is_dirty = ?8, updated_at = ?9
-                 WHERE id = ?1",
-                params![
-                    repo_id,
-                    serde_json::to_string(&kind)?,
-                    display_name,
-                    canonical_remote,
-                    current_head_sha,
-                    current_branch,
-                    is_detached as i64,
-                    is_dirty as i64,
-                    now
-                ],
-            )?;
-        } else {
-            conn.execute(
-                "INSERT INTO managed_repos
-                 (id, installation_id, kind, display_name, local_path, canonical_remote, current_head_sha, current_branch, is_detached, is_dirty,
-                  tracked_target_kind, tracked_target_input, tracked_target_resolved_sha, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, NULL, NULL, ?11, ?11)",
-                params![
-                    repo_id,
-                    installation_id,
-                    serde_json::to_string(&kind)?,
-                    display_name,
-                    local_path,
-                    canonical_remote,
-                    current_head_sha,
-                    current_branch,
-                    is_detached as i64,
-                    is_dirty as i64,
-                    now
-                ],
-            )?;
-        }
+        conn.execute(
+            "INSERT INTO managed_repos
+             (id, installation_id, kind, display_name, local_path, canonical_remote, current_head_sha, current_branch, is_detached, is_dirty,
+              tracked_target_kind, tracked_target_input, tracked_target_resolved_sha, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, NULL, NULL, ?11, ?11)
+             ON CONFLICT(installation_id, local_path) DO UPDATE SET
+                 kind = excluded.kind,
+                 display_name = excluded.display_name,
+                 canonical_remote = excluded.canonical_remote,
+                 current_head_sha = excluded.current_head_sha,
+                 current_branch = excluded.current_branch,
+                 is_detached = excluded.is_detached,
+                 is_dirty = excluded.is_dirty,
+                 updated_at = excluded.updated_at",
+            params![
+                new_id(),
+                installation_id,
+                serde_json::to_string(&kind)?,
+                display_name,
+                local_path,
+                canonical_remote,
+                current_head_sha,
+                current_branch,
+                is_detached as i64,
+                is_dirty as i64,
+                now
+            ],
+        )?;
+        let repo_id: String = conn.query_row(
+            "SELECT id FROM managed_repos WHERE installation_id = ?1 AND local_path = ?2",
+            params![installation_id, local_path],
+            |row| row.get(0),
+        )?;
         self.get_repo(&repo_id)?
             .ok_or_else(|| AppError::Db("failed to reload repo".to_string()))
     }
@@ -278,7 +266,9 @@ impl Database {
         resolved_sha: Option<&str>,
     ) -> AppResult<()> {
         let conn = self.connect()?;
-        let target_kind_json = target_kind.map(|value| serde_json::to_string(&value)).transpose()?;
+        let target_kind_json = target_kind
+            .map(|value| serde_json::to_string(&value))
+            .transpose()?;
         conn.execute(
             "UPDATE managed_repos
              SET tracked_target_kind = ?2, tracked_target_input = ?3, tracked_target_resolved_sha = ?4, updated_at = ?5
@@ -391,7 +381,10 @@ impl Database {
             .map_err(Into::into)
     }
 
-    pub fn list_operations(&self, installation_id: Option<&str>) -> AppResult<Vec<OperationRecord>> {
+    pub fn list_operations(
+        &self,
+        installation_id: Option<&str>,
+    ) -> AppResult<Vec<OperationRecord>> {
         let conn = self.connect()?;
         let sql = if installation_id.is_some() {
             "SELECT id, installation_id, repo_id, kind, status, requested_input, log_file, error_message, checkpoint_id, created_at, started_at, finished_at
@@ -417,15 +410,19 @@ impl Database {
     }
 
     pub fn append_operation_log(&self, operation_id: &str, line: &str) -> AppResult<()> {
+        use std::io::Write;
+
         let op = self
             .get_operation(operation_id)?
             .ok_or_else(|| AppError::NotFound("operation not found".to_string()))?;
-        let mut current = std::fs::read_to_string(&op.log_file).unwrap_or_default();
-        current.push_str(line);
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&op.log_file)?;
+        file.write_all(line.as_bytes())?;
         if !line.ends_with('\n') {
-            current.push('\n');
+            file.write_all(b"\n")?;
         }
-        std::fs::write(op.log_file, current)?;
         Ok(())
     }
 
