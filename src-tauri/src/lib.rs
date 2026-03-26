@@ -211,7 +211,8 @@ async fn find_existing_custom_node_repo_by_remote(
                 continue;
             }
             let status = inspect_repo(&path).await?;
-            if status.origin_url.as_deref() != Some(target_remote.as_str()) {
+            let live_remote = status.origin_url.as_deref().and_then(canonicalize_remote);
+            if live_remote.as_deref() != Some(target_remote.as_str()) {
                 continue;
             }
             let repo = state.db.upsert_repo(
@@ -890,10 +891,9 @@ async fn run_install_or_patch_custom_node(
         {
             Some(value) => value,
             None => match existing_repo_match.as_ref() {
-                Some(repo) => repo
-                    .local_path
-                    .rsplit(std::path::MAIN_SEPARATOR)
-                    .next()
+                Some(repo) => Path::new(&repo.local_path)
+                    .file_name()
+                    .and_then(|value| value.to_str())
                     .unwrap_or(&resolved.suggested_local_dir_name)
                     .to_string(),
                 None => preferred_custom_node_dir_name(&state, &resolved).await,
