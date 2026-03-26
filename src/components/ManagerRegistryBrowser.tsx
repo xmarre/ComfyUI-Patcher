@@ -93,7 +93,9 @@ export default function ManagerRegistryBrowser({
               </div>
               <div className="badge-group registry-badges">
                 <span className="badge">{entry.installType}</span>
-                {entry.isInstalled ? (
+                {entry.hasAmbiguousInstallation ? (
+                  <span className="badge warn">duplicate installs</span>
+                ) : entry.isInstalled ? (
                   <span className="badge ok">installed</span>
                 ) : entry.isInstallable ? (
                   <span className="badge">available</span>
@@ -115,12 +117,22 @@ export default function ManagerRegistryBrowser({
               </div>
             ) : null}
 
+            {entry.hasAmbiguousInstallation ? (
+              <div className="small muted">
+                Multiple local directories match this remote. Resolve duplicates manually before patching.
+              </div>
+            ) : null}
+
             <div className="row gap registry-actions">
               <button
-                disabled={!entry.isInstallable || !entry.sourceInput}
+                disabled={!entry.isInstallable || !entry.sourceInput || entry.hasAmbiguousInstallation}
                 onClick={() => entry.sourceInput && void onInstall(entry.sourceInput)}
               >
-                {entry.isInstalled ? "Patch existing" : "Install"}
+                {entry.hasAmbiguousInstallation
+                  ? "Resolve duplicates first"
+                  : entry.isInstalled
+                    ? "Patch existing"
+                    : "Install"}
               </button>
               {entry.sourceInput && entry.isInstallable ? (
                 <button

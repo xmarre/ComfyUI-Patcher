@@ -20,7 +20,7 @@ use crate::git::{
 use crate::models::*;
 use crate::state::AppState;
 use crate::util::{detect_env_kind, infer_python};
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -112,6 +112,80 @@ async fn discover_repositories_for_installation(
     Ok((core_repo, custom_node_repos))
 }
 
+async fn discover_custom_node_repos_best_effort(
+    state: &AppState,
+    installation: &Installation,
+) -> AppResult<Vec<ManagedRepo>> {
+    let mut custom_node_repos = Vec::new();
+    let custom_nodes_dir = PathBuf::from(&installation.custom_nodes_dir);
+    if !custom_nodes_dir.exists() {
+        return Ok(custom_node_repos);
+    }
+
+    let entries = match std::fs::read_dir(&custom_nodes_dir) {
+        Ok(entries) => entries,
+        Err(err) => {
+            eprintln!(
+                "failed to scan custom_nodes directory {} during registry browsing: {}",
+                custom_nodes_dir.to_string_lossy(),
+                err
+            );
+            return Ok(custom_node_repos);
+        }
+    };
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                eprintln!(
+                    "failed to read an entry under {} during registry browsing: {}",
+                    custom_nodes_dir.to_string_lossy(),
+                    err
+                );
+                continue;
+            }
+        };
+        let path = entry.path();
+        if !path.is_dir() || !is_git_repo(&path).await {
+            continue;
+        }
+
+        let display_name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("custom-node")
+            .to_string();
+
+        let status = match inspect_repo(&path).await {
+            Ok(status) => status,
+            Err(err) => {
+                eprintln!(
+                    "skipping unreadable custom node repo {} during registry browsing: {}",
+                    path.to_string_lossy(),
+                    err
+                );
+                continue;
+            }
+        };
+
+        let repo = state.db.upsert_repo(
+            &installation.id,
+            RepoKind::CustomNode,
+            &display_name,
+            &path.to_string_lossy(),
+            status.origin_url.as_deref(),
+            status.head_sha.as_deref(),
+            status.branch.as_deref(),
+            status.is_detached,
+            status.is_dirty,
+        )?;
+        custom_node_repos.push(repo);
+    }
+
+    Ok(custom_node_repos)
+}
+
 async fn refresh_repo_state(state: &AppState, repo_id: &str) -> AppResult<()> {
     let repo = state
         .db
@@ -200,7 +274,7 @@ async fn find_existing_custom_node_repo_by_remote(
     resolved: &ResolvedTarget,
 ) -> AppResult<Option<ManagedRepo>> {
     let target_remote = canonical_target_remote(resolved)?;
-    let mut matches = Vec::new();
+    let mut matches: Vec<ManagedRepo> = Vec::new();
 
     let custom_nodes_dir = PathBuf::from(&installation.custom_nodes_dir);
     if custom_nodes_dir.exists() {
@@ -631,14 +705,27 @@ async fn list_manager_custom_nodes(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "installation not found".to_string())?;
 
-    let (_, discovered_custom_nodes) = discover_repositories_for_installation(&state, &installation)
+    let discovered_custom_nodes = discover_custom_node_repos_best_effort(&state, &installation)
         .await
         .map_err(|e| e.to_string())?;
 
-    let mut installed_by_remote: HashMap<String, ManagedRepo> = HashMap::new();
+    let mut installed_by_remote: HashMap<String, Option<ManagedRepo>> = HashMap::new();
     for repo in discovered_custom_nodes {
         if let Some(remote) = repo.canonical_remote.as_deref().and_then(canonicalize_remote) {
-            installed_by_remote.entry(remote).or_insert(repo);
+            match installed_by_remote.entry(remote) {
+                Entry::Vacant(slot) => {
+                    slot.insert(Some(repo));
+                }
+                Entry::Occupied(mut slot) => {
+                    let same_repo = slot
+                        .get()
+                        .as_ref()
+                        .is_some_and(|existing| existing.id == repo.id);
+                    if !same_repo {
+                        slot.insert(None);
+                    }
+                }
+            }
         }
     }
 
@@ -658,9 +745,11 @@ async fn list_manager_custom_nodes(
             } else {
                 entry.source_input()
             };
-            let installed = canonical_repo_url
+            let installed_state = canonical_repo_url
                 .as_ref()
                 .and_then(|remote| installed_by_remote.get(remote));
+            let installed = installed_state.and_then(|state| state.as_ref());
+            let has_ambiguous_installation = matches!(installed_state, Some(None));
             ManagerRegistryCustomNode {
                 registry_id: entry.registry_id(),
                 title: entry.title(),
@@ -670,7 +759,8 @@ async fn list_manager_custom_nodes(
                 source_input,
                 canonical_repo_url,
                 is_installable,
-                is_installed: installed.is_some(),
+                is_installed: installed_state.is_some(),
+                has_ambiguous_installation,
                 installed_repo_id: installed.map(|repo| repo.id.clone()),
                 installed_display_name: installed.map(|repo| repo.display_name.clone()),
                 installed_local_path: installed.map(|repo| repo.local_path.clone()),
@@ -884,6 +974,24 @@ async fn run_install_or_patch_custom_node(
         let custom_nodes_dir = PathBuf::from(&installation.custom_nodes_dir);
         let existing_repo_match =
             find_existing_custom_node_repo_by_remote(&state, &installation, &resolved).await?;
+        if let (Some(requested), Some(repo)) = (
+            input
+                .target_local_dir_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            existing_repo_match.as_ref(),
+        ) {
+            let existing_name = Path::new(&repo.local_path)
+                .file_name()
+                .and_then(|value| value.to_str());
+            if existing_name != Some(requested) {
+                return Err(AppError::Conflict(format!(
+                    "matching repo already exists at {}; refusing to ignore requested directory {}",
+                    repo.local_path, requested
+                )));
+            }
+        }
         let requested_dir_name = match input
             .target_local_dir_name
             .clone()

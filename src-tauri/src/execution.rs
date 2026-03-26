@@ -1,4 +1,4 @@
-use regex::{Regex, RegexBuilder};
+use regex::RegexBuilder;
 use std::path::Path;
 use std::process::Output;
 use tokio::process::{Child, Command};
