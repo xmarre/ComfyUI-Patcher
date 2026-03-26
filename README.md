@@ -169,6 +169,10 @@ npm run tauri dev
 ### Build
 
 ```bash
+npm install
+# if you have an old Rust lockfile/target from a previously broken dependency resolution, remove them once
+rm -f src-tauri/Cargo.lock
+rm -rf src-tauri/target
 npm run build
 npm run tauri build
 ```
