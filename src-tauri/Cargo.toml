@@ -10,7 +10,7 @@ name = "comfyui_patcher_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "=2.5.6", default-features = false, features = [] }
+tauri-build = { version = "=2.5.6", features = [] }
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
