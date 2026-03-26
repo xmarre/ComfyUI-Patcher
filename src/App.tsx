@@ -78,7 +78,11 @@ export default function App() {
       }
       void refreshInstallations();
     }).then((fn) => {
-      if (!cancelled) unlisten = fn;
+      if (cancelled) {
+        fn();
+        return;
+      }
+      unlisten = fn;
     });
     return () => {
       cancelled = true;

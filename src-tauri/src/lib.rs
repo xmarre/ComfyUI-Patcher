@@ -13,6 +13,7 @@ use crate::errors::{AppError, AppResult};
 use crate::git::{
     apply_stash, clone_repo, ensure_clean_or_apply_strategy, fetch_origin, fetch_refspec, inspect_repo,
     is_git_repo, join_custom_node_path, reset_hard, submodule_update, switch_branch, switch_detached,
+    validate_custom_node_dir_name,
 };
 use crate::models::*;
 use crate::state::AppState;
@@ -437,11 +438,12 @@ async fn run_install_or_patch_custom_node(
     log_operation(&state, &app, &operation_id, "preflight", "info", "installing or patching custom node");
     let resolved = resolve_target_for_context(&state, &installation, &RepoKind::CustomNode, None, &input.input).await?;
     let custom_nodes_dir = PathBuf::from(&installation.custom_nodes_dir);
-    let base_dir_name = input
+    let requested_dir_name = input
         .target_local_dir_name
         .clone()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| resolved.suggested_local_dir_name.clone());
+    let base_dir_name = validate_custom_node_dir_name(&requested_dir_name)?;
     let mut target_path = join_custom_node_path(&custom_nodes_dir, &base_dir_name);
 
     let result = async {

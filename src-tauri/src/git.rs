@@ -2,7 +2,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::DirtyRepoStrategy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use tokio::process::Command;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -187,6 +187,72 @@ pub async fn is_git_repo(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+pub fn validate_custom_node_dir_name(dir_name: &str) -> AppResult<String> {
+    let trimmed = dir_name.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::InvalidInput(
+            "custom node directory name cannot be empty".to_string(),
+        ));
+    }
+
+    let path = Path::new(trimmed);
+    let mut components = path.components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(name)), None) => Ok(name.to_string_lossy().into_owned()),
+        _ => Err(AppError::InvalidInput(
+            "custom node directory name must be a single folder name inside custom_nodes".to_string(),
+        )),
+    }
+}
+
 pub fn join_custom_node_path(custom_nodes_dir: &Path, dir_name: &str) -> PathBuf {
     custom_nodes_dir.join(dir_name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_single_directory_name() {
+        assert_eq!(validate_custom_node_dir_name("foo-bar").unwrap(), "foo-bar");
+        assert_eq!(validate_custom_node_dir_name(" foo ").unwrap(), "foo");
+        assert_eq!(validate_custom_node_dir_name("foo/").unwrap(), "foo");
+    }
+
+    #[test]
+    fn rejects_empty_directory_name() {
+        assert!(matches!(
+            validate_custom_node_dir_name("   "),
+            Err(AppError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_non_local_directory_name() {
+        for invalid in ["../foo", "a/b", "."] {
+            assert!(matches!(
+                validate_custom_node_dir_name(invalid),
+                Err(AppError::InvalidInput(_))
+            ));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_windows_absolute_directory_name() {
+        assert!(matches!(
+            validate_custom_node_dir_name(r"C:\temp\foo"),
+            Err(AppError::InvalidInput(_))
+        ));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn rejects_unix_absolute_directory_name() {
+        assert!(matches!(
+            validate_custom_node_dir_name("/tmp/foo"),
+            Err(AppError::InvalidInput(_))
+        ));
+    }
 }
