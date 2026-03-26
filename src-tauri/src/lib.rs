@@ -732,7 +732,7 @@ async fn list_manager_custom_nodes(
     let limit = input.limit.unwrap_or(100).clamp(1, 500);
     let mut items = state
         .manager_registry
-        .search_entries(input.query.as_deref(), limit)
+        .search_entries(input.query.as_deref(), usize::MAX)
         .await
         .map_err(|e| e.to_string())?
         .into_iter()
@@ -775,6 +775,7 @@ async fn list_manager_custom_nodes(
             .then_with(|| left.title.to_ascii_lowercase().cmp(&right.title.to_ascii_lowercase()))
             .then_with(|| left.registry_id.cmp(&right.registry_id))
     });
+    items.truncate(limit);
     Ok(items)
 }
 

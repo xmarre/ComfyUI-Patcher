@@ -28,11 +28,22 @@ pub fn parse_wsl_unc_path(path: &Path) -> Option<WslPath> {
     Some(WslPath { distro, linux_path })
 }
 
-fn build_command(program: &str, args: &[String], cwd: Option<&Path>) -> Command {
+fn build_command(program: &str, args: &[String], cwd: Option<&Path>) -> std::io::Result<Command> {
     let cwd_wsl = cwd.and_then(parse_wsl_unc_path);
     let program_wsl = parse_wsl_unc_path(Path::new(program));
 
     if let Some(context) = cwd_wsl.as_ref().or(program_wsl.as_ref()) {
+        if let (Some(cwd_wsl), Some(program_wsl)) = (cwd_wsl.as_ref(), program_wsl.as_ref()) {
+            if cwd_wsl.distro != program_wsl.distro {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "WSL cwd distro '{}' does not match program distro '{}'",
+                        cwd_wsl.distro, program_wsl.distro
+                    ),
+                ));
+            }
+        }
         let mut command = Command::new("wsl.exe");
         command.arg("-d").arg(&context.distro);
         if let Some(cwd_wsl) = cwd_wsl.as_ref() {
@@ -46,7 +57,7 @@ fn build_command(program: &str, args: &[String], cwd: Option<&Path>) -> Command 
         };
         command.arg("--").arg(effective_program);
         command.args(args);
-        return command;
+        return Ok(command);
     }
 
     let mut command = Command::new(program);
@@ -54,7 +65,7 @@ fn build_command(program: &str, args: &[String], cwd: Option<&Path>) -> Command 
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
-    command
+    Ok(command)
 }
 
 pub async fn output_command(
@@ -62,11 +73,11 @@ pub async fn output_command(
     args: &[String],
     cwd: Option<&Path>,
 ) -> std::io::Result<Output> {
-    build_command(program, args, cwd).output().await
+    build_command(program, args, cwd)?.output().await
 }
 
 pub fn spawn_command(program: &str, args: &[String], cwd: Option<&Path>) -> std::io::Result<Child> {
-    build_command(program, args, cwd).spawn()
+    build_command(program, args, cwd)?.spawn()
 }
 
 #[cfg(test)]
@@ -114,11 +125,20 @@ mod tests {
     fn build_command_translates_wsl_unc_programs() {
         let cwd = Path::new(r"\\wsl.localhost\Ubuntu-22.04\home\toor\ComfyUI");
         let program = r"\\wsl.localhost\Ubuntu-22.04\home\toor\miniconda3\envs\comfy\bin\python";
-        let command = build_command(program, &["-m".to_string(), "pip".to_string()], Some(cwd));
+        let command = build_command(program, &["-m".to_string(), "pip".to_string()], Some(cwd))
+            .unwrap();
         let program_dbg = format!("{:?}", command.as_std().get_program());
         let args_dbg = format!("{:?}", command.as_std().get_args().collect::<Vec<_>>());
         assert!(program_dbg.contains("wsl.exe"));
         assert!(args_dbg.contains("/home/toor/miniconda3/envs/comfy/bin/python"));
         assert!(!args_dbg.contains(r"\\wsl.localhost\Ubuntu-22.04\home\toor\miniconda3\envs\comfy\bin\python"));
+    }
+
+    #[test]
+    fn build_command_rejects_mixed_wsl_distros() {
+        let cwd = Path::new(r"\\wsl.localhost\Ubuntu-22.04\home\toor\ComfyUI");
+        let program = r"\\wsl.localhost\Debian\home\toor\bin\python";
+        let err = build_command(program, &[], Some(cwd)).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 }
