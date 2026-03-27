@@ -21,6 +21,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "=1.0.146"
 tauri = { version = "=2.10.3", default-features = false, features = ["wry"] }
 thiserror = "2"
+toml = "0.8"
 tokio = { version = "=1.42.0", features = ["process", "rt-multi-thread", "macros", "sync", "time", "fs"] }
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }

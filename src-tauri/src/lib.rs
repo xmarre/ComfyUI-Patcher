@@ -382,6 +382,58 @@ fn absolutize_path_against(root: &Path, value: &str) -> AppResult<PathBuf> {
     }
 }
 
+fn normalize_python_executable(root: &Path, python_exe: Option<&str>) -> AppResult<PathBuf> {
+    match python_exe.map(str::trim) {
+        Some(value) if !value.is_empty() => {
+            let candidate = PathBuf::from(value);
+            if candidate.is_absolute() {
+                if !candidate.exists() {
+                    return Err(AppError::InvalidInput(format!(
+                        "python executable does not exist: {}",
+                        candidate.to_string_lossy()
+                    )));
+                }
+                return Ok(candidate.canonicalize()?);
+            }
+            if candidate.components().count() > 1 || value.contains(std::path::MAIN_SEPARATOR) {
+                let resolved = absolutize_path_against(root, value)?;
+                if !resolved.exists() {
+                    return Err(AppError::InvalidInput(format!(
+                        "python executable does not exist: {}",
+                        resolved.to_string_lossy()
+                    )));
+                }
+                return Ok(resolved.canonicalize()?);
+            }
+            Ok(candidate)
+        }
+        _ => Ok(infer_python(root).unwrap_or_else(|| PathBuf::from("python"))),
+    }
+}
+
+fn normalize_launch_profile(
+    root: &Path,
+    launch_profile: Option<LaunchProfile>,
+) -> AppResult<Option<LaunchProfile>> {
+    launch_profile
+        .map(|mut profile| {
+            if let Some(cwd) = profile
+                .cwd
+                .as_deref()
+                .map(str::trim)
+                .filter(|cwd| !cwd.is_empty())
+            {
+                profile.cwd = Some(
+                    absolutize_path_against(root, cwd)?
+                        .to_string_lossy()
+                        .to_string(),
+                );
+            }
+            Ok::<LaunchProfile, AppError>(profile)
+        })
+        .transpose()
+}
+
 async fn create_checkpoint_if_needed(
     state: &AppState,
     repo: &ManagedRepo,
@@ -651,58 +703,26 @@ async fn register_installation_impl(
     }
     let root = requested_root.canonicalize()?;
 
-    let python = match input.python_exe.as_deref().map(str::trim) {
-        Some(value) if !value.is_empty() => {
-            let candidate = PathBuf::from(value);
-            if candidate.is_absolute() {
-                if candidate.exists() {
-                    candidate.canonicalize()?
-                } else {
-                    candidate
-                }
-            } else if candidate.components().count() > 1
-                || value.contains(std::path::MAIN_SEPARATOR)
-            {
-                absolutize_path_against(&root, value)?
-            } else {
-                candidate
-            }
-        }
-        _ => infer_python(&root).unwrap_or_else(|| PathBuf::from("python")),
-    };
+    let python = normalize_python_executable(&root, input.python_exe.as_deref())?;
 
     let custom_nodes_dir = root.join("custom_nodes");
     std::fs::create_dir_all(&custom_nodes_dir)?;
 
-    let launch_profile = input
-        .launch_profile
-        .as_ref()
-        .map(|profile| {
-            let mut profile = profile.clone();
-            if let Some(cwd) = profile
-                .cwd
-                .as_deref()
-                .map(str::trim)
-                .filter(|cwd| !cwd.is_empty())
-            {
-                profile.cwd = Some(
-                    absolutize_path_against(&root, cwd)?
-                        .to_string_lossy()
-                        .to_string(),
-                );
-            }
-            Ok::<LaunchProfile, AppError>(profile)
-        })
-        .transpose()?;
+    let launch_profile = normalize_launch_profile(&root, input.launch_profile.clone())?;
+    let detected_env_kind = detect_env_kind(&python);
+    let root_string = root.to_string_lossy().to_string();
+    let python_string = python.to_string_lossy().to_string();
+    let custom_nodes_dir_string = custom_nodes_dir.to_string_lossy().to_string();
+    let is_root_git_repo = is_git_repo(&root).await;
 
-    let installation = state.db.create_installation(
+    let installation = state.db.upsert_installation_by_root(
         &input.name,
-        &root.to_string_lossy(),
-        &python.to_string_lossy(),
-        &custom_nodes_dir.to_string_lossy(),
+        &root_string,
+        &python_string,
+        &custom_nodes_dir_string,
         launch_profile.as_ref(),
-        &detect_env_kind(&python),
-        is_git_repo(&root).await,
+        &detected_env_kind,
+        is_root_git_repo,
     )?;
     let (core_repo, discovered_custom_nodes) =
         discover_repositories_for_installation(state, &installation).await?;
@@ -727,6 +747,58 @@ fn get_installation_detail(
     state
         .db
         .get_installation_detail(&installation_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn save_installation(
+    state: State<'_, AppState>,
+    input: SaveInstallationInput,
+) -> Result<Installation, String> {
+    let existing = state
+        .db
+        .get_installation(&input.installation_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "installation not found".to_string())?;
+    let root = PathBuf::from(&existing.comfy_root);
+    if !root.exists() || !root.is_dir() {
+        return Err("installation root no longer exists".to_string());
+    }
+    let root = root.canonicalize().map_err(|e| e.to_string())?;
+    let python = normalize_python_executable(&root, input.python_exe.as_deref())
+        .map_err(|e| e.to_string())?;
+    let launch_profile = normalize_launch_profile(&root, input.launch_profile)
+        .map_err(|e| e.to_string())?;
+    let installation = state
+        .db
+        .update_installation(
+            &existing.id,
+            &input.name,
+            &python.to_string_lossy(),
+            launch_profile.as_ref(),
+            &detect_env_kind(&python),
+            is_git_repo(&root).await,
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(installation)
+}
+
+#[tauri::command]
+async fn delete_installation(
+    state: State<'_, AppState>,
+    input: DeleteInstallationInput,
+) -> Result<(), String> {
+    let installation = state
+        .db
+        .get_installation(&input.installation_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "installation not found".to_string())?;
+    let lock = state.installation_lock(&installation.id).await;
+    let _guard = lock.lock().await;
+    let _ = state.processes.stop(&installation.id).await;
+    state
+        .db
+        .delete_installation(&installation.id)
         .map_err(|e| e.to_string())
 }
 
@@ -1986,6 +2058,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             register_installation,
+            save_installation,
+            delete_installation,
             list_installations,
             get_installation_detail,
             list_manager_custom_nodes,

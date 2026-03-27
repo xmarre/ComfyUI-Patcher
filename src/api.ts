@@ -9,8 +9,10 @@ import type {
   OperationStart,
   PatchCoreInput,
   PatchCustomNodeInput,
+  DeleteInstallationInput,
   RegisterInstallationInput,
   RegisterInstallationResult,
+  SaveInstallationInput,
   RepoCheckpoint,
   ResolveTargetInput,
   ResolvedTarget,
@@ -25,6 +27,10 @@ export const api = {
   listInstallations: () => invoke<Installation[]>("list_installations"),
   registerInstallation: (input: RegisterInstallationInput) =>
     invoke<RegisterInstallationResult>("register_installation", { input }),
+  saveInstallation: (input: SaveInstallationInput) =>
+    invoke<Installation>("save_installation", { input }),
+  deleteInstallation: (input: DeleteInstallationInput) =>
+    invoke<void>("delete_installation", { input }),
   getInstallationDetail: (installationId: string) =>
     invoke<InstallationDetail>("get_installation_detail", { installationId }),
   listManagerCustomNodes: (input: ListManagerCustomNodesInput) =>

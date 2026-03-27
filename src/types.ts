@@ -166,6 +166,17 @@ export type RegisterInstallationResult = {
   warnings: string[];
 };
 
+export type SaveInstallationInput = {
+  installationId: string;
+  name: string;
+  pythonExe?: string | null;
+  launchProfile?: LaunchProfile | null;
+};
+
+export type DeleteInstallationInput = {
+  installationId: string;
+};
+
 export type PatchCoreInput = {
   installationId: string;
   input: string;
