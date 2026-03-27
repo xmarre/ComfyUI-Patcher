@@ -60,6 +60,29 @@ export type InstallationDetail = {
   customNodeRepos: ManagedRepo[];
 };
 
+
+export type ManagerRegistryCustomNode = {
+  registryId: string;
+  title: string;
+  author: string | null;
+  description: string | null;
+  installType: string;
+  sourceInput: string | null;
+  canonicalRepoUrl: string | null;
+  isInstallable: boolean;
+  isInstalled: boolean;
+  hasAmbiguousInstallation: boolean;
+  installedRepoId: string | null;
+  installedDisplayName: string | null;
+  installedLocalPath: string | null;
+};
+
+export type ListManagerCustomNodesInput = {
+  installationId: string;
+  query?: string | null;
+  limit?: number | null;
+};
+
 export type ResolvedTarget = {
   sourceInput: string;
   targetKind: "branch" | "tag" | "commit" | "pr" | "default_branch" | "named_ref";

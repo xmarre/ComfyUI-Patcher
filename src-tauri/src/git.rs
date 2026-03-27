@@ -1,9 +1,9 @@
 use crate::errors::{AppError, AppResult};
+use crate::execution::output_command;
 use crate::models::DirtyRepoStrategy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
-use tokio::process::Command;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoStatus {
@@ -15,11 +15,8 @@ pub struct RepoStatus {
 }
 
 pub async fn run_git(path: &Path, args: &[&str]) -> AppResult<String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .output()
-        .await?;
+    let args_vec: Vec<String> = args.iter().map(|value| (*value).to_string()).collect();
+    let output = output_command("git", &args_vec, Some(path)).await?;
     if !output.status.success() {
         return Err(AppError::Git(format!(
             "{}\n{}",
@@ -31,11 +28,8 @@ pub async fn run_git(path: &Path, args: &[&str]) -> AppResult<String> {
 }
 
 pub async fn run_git_allow_fail(path: &Path, args: &[&str]) -> AppResult<Option<String>> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .output()
-        .await?;
+    let args_vec: Vec<String> = args.iter().map(|value| (*value).to_string()).collect();
+    let output = output_command("git", &args_vec, Some(path)).await?;
     if !output.status.success() {
         return Ok(None);
     }
@@ -45,7 +39,8 @@ pub async fn run_git_allow_fail(path: &Path, args: &[&str]) -> AppResult<Option<
 }
 
 async fn run_git_no_cwd(args: &[&str]) -> AppResult<String> {
-    let output = Command::new("git").args(args).output().await?;
+    let args_vec: Vec<String> = args.iter().map(|value| (*value).to_string()).collect();
+    let output = output_command("git", &args_vec, None).await?;
     if !output.status.success() {
         return Err(AppError::Git(format!(
             "{}\n{}",
@@ -144,10 +139,12 @@ pub async fn clone_repo(url: &str, dest: &Path) -> AppResult<()> {
         .parent()
         .ok_or_else(|| AppError::InvalidInput("destination has no parent".to_string()))?;
     std::fs::create_dir_all(parent)?;
-    let output = Command::new("git")
-        .args(["clone", url, &dest.to_string_lossy()])
-        .output()
-        .await?;
+    let dir_name = dest
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| AppError::InvalidInput("destination has no final directory name".to_string()))?;
+    let args = vec!["clone".to_string(), url.to_string(), dir_name.to_string()];
+    let output = output_command("git", &args, Some(parent)).await?;
     if !output.status.success() {
         return Err(AppError::Git(
             String::from_utf8_lossy(&output.stderr).to_string(),

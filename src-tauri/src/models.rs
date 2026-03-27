@@ -187,6 +187,33 @@ pub struct ResolveTargetInput {
     pub repo_id: Option<String>,
 }
 
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListManagerCustomNodesInput {
+    pub installation_id: String,
+    pub query: Option<String>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagerRegistryCustomNode {
+    pub registry_id: String,
+    pub title: String,
+    pub author: Option<String>,
+    pub description: Option<String>,
+    pub install_type: String,
+    pub source_input: Option<String>,
+    pub canonical_repo_url: Option<String>,
+    pub is_installable: bool,
+    pub is_installed: bool,
+    pub has_ambiguous_installation: bool,
+    pub installed_repo_id: Option<String>,
+    pub installed_display_name: Option<String>,
+    pub installed_local_path: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PatchCoreInput {

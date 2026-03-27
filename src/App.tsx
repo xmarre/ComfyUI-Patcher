@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import RepoCard from "./components/RepoCard";
 import OperationPanel from "./components/OperationPanel";
+import ManagerRegistryBrowser from "./components/ManagerRegistryBrowser";
 import type {
   Installation,
   InstallationDetail,
@@ -96,6 +97,7 @@ export default function App() {
   const [nodePreviewError, setNodePreviewError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [events, setEvents] = useState<OperationEvent[]>([]);
+  const [registryRefreshToken, setRegistryRefreshToken] = useState(0);
   const [registerForm, setRegisterForm] = useState({
     name: "Primary ComfyUI",
     comfyRoot: "",
@@ -183,6 +185,9 @@ export default function App() {
       .subscribeOperationEvents((event) => {
         if (cancelled) return;
         setEvents((prev) => [event, ...prev].slice(0, 100));
+        if (event.phase === "done" || event.phase === "error") {
+          setRegistryRefreshToken((value) => value + 1);
+        }
         const installationId = selectedInstallationIdRef.current;
         if (installationId) {
           void refreshDetail(installationId);
@@ -488,7 +493,7 @@ export default function App() {
             </section>
 
             <section className="card">
-              <h3>Install or patch custom node</h3>
+              <h3>Install or patch custom node manually</h3>
               <div className="row gap">
                 <input
                   className="grow"
@@ -541,6 +546,29 @@ export default function App() {
               ) : null}
               {nodePreviewError ? <div className="muted">{nodePreviewError}</div> : null}
             </section>
+
+            <ManagerRegistryBrowser
+              installationId={selectedInstallation.id}
+              refreshToken={registryRefreshToken}
+              onInstall={(sourceInput) =>
+                runAction(async () => {
+                  await api.installOrPatchCustomNode({
+                    installationId: selectedInstallation.id,
+                    input: sourceInput,
+                    existingRepoConflictStrategy: "install_with_suffix",
+                    dirtyRepoStrategy: "abort",
+                    setTrackedTarget: true,
+                    syncDependencies: true,
+                    restartAfterSuccess: false
+                  });
+                })
+              }
+              onUseSourceInput={(sourceInput) => {
+                setNodeInput(sourceInput);
+                setNodePreview(null);
+                setNodePreviewError(null);
+              }}
+            />
 
             <section className="grid two">
               <div className="card">
