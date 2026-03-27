@@ -61,13 +61,13 @@ async fn is_tracking_managed_dir(path: &Path) -> bool {
     path.is_dir() && path.join(".tracking").is_file() && !is_git_repo(path).await
 }
 
-fn choose_tracking_backup_path(path: &Path) -> PathBuf {
+fn choose_tracking_backup_path(path: &Path, backup_root: &Path) -> PathBuf {
     let name = path
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("custom-node")
         .to_string();
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = backup_root;
     let seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|value| value.as_secs())
@@ -1050,56 +1050,58 @@ async fn run_install_or_patch_custom_node(
         };
         let mut tracking_backup_path: Option<PathBuf> = None;
         let mut tracking_target_path: Option<PathBuf> = None;
+        let mut rollback_repo_id: Option<String> = None;
+        let mut rollback_checkpoint_id: Option<String> = None;
         let result = async {
-        let resolved = resolve_target_for_context(
-            &state,
-            &installation,
-            &RepoKind::CustomNode,
-            None,
-            &input.input,
-        )
-        .await?;
-        let custom_nodes_dir = PathBuf::from(&installation.custom_nodes_dir);
-        let existing_repo_match =
-            find_existing_custom_node_repo_by_remote(&state, &installation, &resolved).await?;
-        if let (Some(requested), Some(repo)) = (
-            input
-                .target_local_dir_name
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty()),
-            existing_repo_match.as_ref(),
-        ) {
-            let existing_name = Path::new(&repo.local_path)
-                .file_name()
-                .and_then(|value| value.to_str());
-            if existing_name != Some(requested) {
-                return Err(AppError::Conflict(format!(
-                    "matching repo already exists at {}; refusing to ignore requested directory {}",
-                    repo.local_path, requested
-                )));
-            }
-        }
-        let requested_dir_name = match input
-            .target_local_dir_name
-            .clone()
-            .filter(|value| !value.trim().is_empty())
-        {
-            Some(value) => value,
-            None => match existing_repo_match.as_ref() {
-                Some(repo) => Path::new(&repo.local_path)
+            let resolved = resolve_target_for_context(
+                &state,
+                &installation,
+                &RepoKind::CustomNode,
+                None,
+                &input.input,
+            )
+            .await?;
+            let custom_nodes_dir = PathBuf::from(&installation.custom_nodes_dir);
+            let existing_repo_match =
+                find_existing_custom_node_repo_by_remote(&state, &installation, &resolved).await?;
+            if let (Some(requested), Some(repo)) = (
+                input
+                    .target_local_dir_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty()),
+                existing_repo_match.as_ref(),
+            ) {
+                let existing_name = Path::new(&repo.local_path)
                     .file_name()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or(&resolved.suggested_local_dir_name)
-                    .to_string(),
-                None => preferred_custom_node_dir_name(&state, &resolved).await,
-            },
-        };
-        let base_dir_name = validate_custom_node_dir_name(&requested_dir_name)?;
-        let mut target_path = existing_repo_match
-            .as_ref()
-            .map(|repo| PathBuf::from(&repo.local_path))
-            .unwrap_or_else(|| join_custom_node_path(&custom_nodes_dir, &base_dir_name));
+                    .and_then(|value| value.to_str());
+                if existing_name != Some(requested) {
+                    return Err(AppError::Conflict(format!(
+                        "matching repo already exists at {}; refusing to ignore requested directory {}",
+                        repo.local_path, requested
+                    )));
+                }
+            }
+            let requested_dir_name = match input
+                .target_local_dir_name
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+            {
+                Some(value) => value,
+                None => match existing_repo_match.as_ref() {
+                    Some(repo) => Path::new(&repo.local_path)
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or(&resolved.suggested_local_dir_name)
+                        .to_string(),
+                    None => preferred_custom_node_dir_name(&state, &resolved).await,
+                },
+            };
+            let base_dir_name = validate_custom_node_dir_name(&requested_dir_name)?;
+            let mut target_path = existing_repo_match
+                .as_ref()
+                .map(|repo| PathBuf::from(&repo.local_path))
+                .unwrap_or_else(|| join_custom_node_path(&custom_nodes_dir, &base_dir_name));
 
         if let Some(repo) = existing_repo_match.as_ref() {
             log_operation(
@@ -1207,7 +1209,11 @@ async fn run_install_or_patch_custom_node(
                             .to_string(),
                     ));
                 }
-                let backup_path = choose_tracking_backup_path(&target_path);
+                let backup_root = PathBuf::from(&installation.comfy_root)
+                    .join(".comfyui-patcher-backups")
+                    .join("custom_nodes");
+                std::fs::create_dir_all(&backup_root)?;
+                let backup_path = choose_tracking_backup_path(&target_path, &backup_root);
                 log_operation(
                     &state,
                     &app,
@@ -1276,6 +1282,9 @@ async fn run_install_or_patch_custom_node(
             status.is_detached,
             status.is_dirty,
         )?;
+        if tracking_backup_path.is_some() {
+            rollback_repo_id = Some(repo.id.clone());
+        }
         let repo_lock = state.repo_lock(&repo.id).await;
         let _guard = repo_lock.lock().await;
         let checkpoint =
@@ -1289,6 +1298,9 @@ async fn run_install_or_patch_custom_node(
             "info",
             format!("checkpoint {} created", checkpoint.id),
         );
+        if tracking_backup_path.is_some() {
+            rollback_checkpoint_id = Some(checkpoint.id.clone());
+        }
         apply_resolved_target(&state, &app, &operation_id, &repo, &resolved).await?;
         maybe_sync_dependencies(
             &state,
@@ -1330,6 +1342,22 @@ async fn run_install_or_patch_custom_node(
             "info",
             "custom node install completed",
         );
+        if let Some(backup_path) = tracking_backup_path.as_ref() {
+            if let Err(remove_err) = std::fs::remove_dir_all(backup_path) {
+                log_operation(
+                    &state,
+                    &app,
+                    &operation_id,
+                    "done",
+                    "warn",
+                    format!(
+                        "managed install succeeded, but failed to remove tracking backup {}: {}",
+                        backup_path.to_string_lossy(),
+                        remove_err
+                    ),
+                );
+            }
+        }
         Ok::<(), AppError>(())
         }
         .await;
@@ -1362,6 +1390,33 @@ async fn run_install_or_patch_custom_node(
                             "restored tracking-managed backup {} after install error",
                             backup_path.to_string_lossy()
                         ),
+                    );
+                }
+            }
+            if let Some(checkpoint_id) = rollback_checkpoint_id.as_ref() {
+                if let Err(db_err) = state.db.delete_checkpoint(checkpoint_id) {
+                    log_operation(
+                        &state,
+                        &app,
+                        &operation_id,
+                        "error",
+                        "error",
+                        format!(
+                            "failed to delete rollback checkpoint {}: {}",
+                            checkpoint_id, db_err
+                        ),
+                    );
+                }
+            }
+            if let Some(repo_id) = rollback_repo_id.as_ref() {
+                if let Err(db_err) = state.db.delete_repo(repo_id) {
+                    log_operation(
+                        &state,
+                        &app,
+                        &operation_id,
+                        "error",
+                        "error",
+                        format!("failed to delete rollback repo {}: {}", repo_id, db_err),
                     );
                 }
             }

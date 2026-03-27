@@ -230,6 +230,21 @@ impl Database {
             .ok_or_else(|| AppError::Db("failed to reload repo".to_string()))
     }
 
+    pub fn delete_repo(&self, repo_id: &str) -> AppResult<()> {
+        let conn = self.connect()?;
+        conn.execute("DELETE FROM managed_repos WHERE id = ?1", params![repo_id])?;
+        Ok(())
+    }
+
+    pub fn delete_checkpoint(&self, checkpoint_id: &str) -> AppResult<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            "DELETE FROM repo_checkpoints WHERE id = ?1",
+            params![checkpoint_id],
+        )?;
+        Ok(())
+    }
+
     pub fn update_repo_state(
         &self,
         repo_id: &str,
