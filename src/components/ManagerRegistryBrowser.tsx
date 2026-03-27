@@ -114,8 +114,8 @@ export default function ManagerRegistryBrowser({
       {loading ? <div className="muted">Loading registry entries…</div> : null}
 
       <div className="small muted">
-        Showing {visibleEntries.length} of {filteredEntries.length} matching entries
-        {filteredEntries.length !== entries.length ? ` (from ${entries.length} total)` : ""}.
+        Showing {visibleEntries.length} of {filteredEntries.length} loaded matching entries
+        {filteredEntries.length !== entries.length ? ` (from ${entries.length} loaded)` : ""}.
       </div>
 
       <div className="list registry-list">
