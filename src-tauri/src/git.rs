@@ -244,6 +244,38 @@ fn normalize_linux_path(input: &str) -> String {
     }
 }
 
+fn canonicalize_wsl_linux_path(path: &Path) -> Option<(String, String)> {
+    let parsed = parse_wsl_unc_path(path)?;
+    let canonical_linux_path = std::fs::canonicalize(path)
+        .ok()
+        .as_deref()
+        .and_then(parse_wsl_unc_path)
+        .map(|value| normalize_linux_path(&value.linux_path))
+        .unwrap_or_else(|| normalize_linux_path(&parsed.linux_path));
+    Some((parsed.distro, canonical_linux_path))
+}
+
+fn canonicalize_wsl_repo_root_for_distro(distro: &str, repo_root: &str) -> String {
+    let normalized_repo_root = normalize_linux_path(repo_root);
+    let unc_path = if normalized_repo_root == "/" {
+        format!(r"\\wsl.localhost\{distro}")
+    } else {
+        format!(
+            r"\\wsl.localhost\{distro}\{}",
+            normalized_repo_root
+                .trim_start_matches('/')
+                .replace('/', "\\")
+        )
+    };
+
+    std::fs::canonicalize(Path::new(&unc_path))
+        .ok()
+        .as_deref()
+        .and_then(parse_wsl_unc_path)
+        .map(|value| normalize_linux_path(&value.linux_path))
+        .unwrap_or(normalized_repo_root)
+}
+
 #[cfg(windows)]
 fn normalize_native_path(path: &Path) -> String {
     path.to_string_lossy()
@@ -266,8 +298,8 @@ pub async fn is_git_repo(path: &Path) -> bool {
         return false;
     };
 
-    if let Some(wsl) = parse_wsl_unc_path(path) {
-        return normalize_linux_path(&wsl.linux_path) == normalize_linux_path(&repo_root);
+    if let Some((distro, canonical_linux_path)) = canonicalize_wsl_linux_path(path) {
+        return canonical_linux_path == canonicalize_wsl_repo_root_for_distro(&distro, &repo_root);
     }
 
     let canonical_path = match std::fs::canonicalize(path) {
