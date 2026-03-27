@@ -125,6 +125,48 @@ impl ManagerRegistryClient {
         aliases
     }
 
+    pub async fn expected_dir_name_for_entry(
+        &self,
+        entry: &ManagerCustomNodeEntry,
+    ) -> Option<String> {
+        if let Some(reference) = entry.canonical_git_remote() {
+            let suggested_local_dir_name = repo_name_from_url(&reference)
+                .map(|value| slugify(&value))
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "custom-node".to_string());
+            let resolved = ResolvedTarget {
+                source_input: reference.clone(),
+                target_kind: TargetKind::DefaultBranch,
+                canonical_repo_url: reference.clone(),
+                fetch_url: reference.clone(),
+                checkout_ref: "HEAD".to_string(),
+                resolved_sha: None,
+                pr_number: None,
+                pr_base_repo_url: None,
+                pr_head_repo_url: None,
+                pr_head_ref: None,
+                summary_label: reference.clone(),
+                suggested_local_dir_name,
+            };
+            if let Ok(Some(value)) = self.preferred_dir_name_for_target(&resolved).await {
+                if !value.is_empty() {
+                    return Some(value);
+                }
+            }
+        }
+
+        entry.id
+            .as_deref()
+            .map(slugify)
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                entry.title
+                    .as_deref()
+                    .map(slugify)
+                    .filter(|value| !value.is_empty())
+            })
+    }
+
     pub async fn preferred_dir_name_for_target(
         &self,
         resolved: &ResolvedTarget,

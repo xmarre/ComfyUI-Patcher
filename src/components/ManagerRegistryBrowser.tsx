@@ -133,6 +133,8 @@ export default function ManagerRegistryBrowser({
                 <span className="badge">{entry.installType}</span>
                 {entry.hasAmbiguousInstallation ? (
                   <span className="badge warn">duplicate installs</span>
+                ) : entry.isPresentNonGit ? (
+                  <span className="badge ok">present</span>
                 ) : entry.isInstalled ? (
                   <span className="badge ok">installed</span>
                 ) : entry.isInstallable ? (
@@ -155,6 +157,12 @@ export default function ManagerRegistryBrowser({
               </div>
             ) : null}
 
+            {entry.isPresentNonGit && entry.presentLocalPath ? (
+              <div className="small muted">
+                Present as non-git folder at <span className="mono">{entry.presentLocalPath}</span>
+              </div>
+            ) : null}
+
             {entry.hasAmbiguousInstallation ? (
               <div className="small muted">
                 Multiple local directories match this remote. Resolve duplicates manually before patching.
@@ -163,11 +171,18 @@ export default function ManagerRegistryBrowser({
 
             <div className="row gap registry-actions">
               <button
-                disabled={!entry.isInstallable || !entry.sourceInput || entry.hasAmbiguousInstallation}
+                disabled={
+                  !entry.isInstallable ||
+                  !entry.sourceInput ||
+                  entry.hasAmbiguousInstallation ||
+                  entry.isPresentNonGit
+                }
                 onClick={() => entry.sourceInput && void onInstall(entry.sourceInput)}
               >
                 {entry.hasAmbiguousInstallation
                   ? "Resolve duplicates first"
+                  : entry.isPresentNonGit
+                    ? "Manual migration needed"
                   : entry.isInstalled
                     ? "Patch existing"
                     : "Install"}
