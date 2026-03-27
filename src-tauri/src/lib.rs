@@ -57,6 +57,35 @@ fn log_operation(
     emit_operation(app, operation_id, phase, level, message);
 }
 
+async fn is_tracking_managed_dir(path: &Path) -> bool {
+    path.is_dir() && path.join(".tracking").is_file() && !is_git_repo(path).await
+}
+
+fn choose_tracking_backup_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("custom-node")
+        .to_string();
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_secs())
+        .unwrap_or(0);
+    for attempt in 0..1000usize {
+        let suffix = if attempt == 0 {
+            format!("{name}.tracking-backup-{seconds}")
+        } else {
+            format!("{name}.tracking-backup-{seconds}-{attempt}")
+        };
+        let candidate = parent.join(suffix);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    parent.join(format!("{name}.tracking-backup"))
+}
+
 async fn discover_repositories_for_installation(
     state: &AppState,
     installation: &Installation,
@@ -716,6 +745,7 @@ async fn list_manager_custom_nodes(
         .await
         .map_err(|e| e.to_string())?;
 
+    let mut tracking_managed_dirs: HashMap<String, String> = HashMap::new();
     let mut present_non_git_dirs: HashMap<String, String> = HashMap::new();
     let custom_nodes_dir = PathBuf::from(&installation.custom_nodes_dir);
     if custom_nodes_dir.exists() {
@@ -726,16 +756,18 @@ async fn list_manager_custom_nodes(
             if !path.is_dir() {
                 continue;
             }
-            if is_git_repo(&path).await {
-                continue;
-            }
             let Some(dir_name) = path.file_name().and_then(|value| value.to_str()) else {
                 continue;
             };
-            present_non_git_dirs.insert(
-                dir_name.to_ascii_lowercase(),
-                path.to_string_lossy().to_string(),
-            );
+            let key = dir_name.to_ascii_lowercase();
+            if is_git_repo(&path).await {
+                continue;
+            }
+            if path.join(".tracking").is_file() {
+                tracking_managed_dirs.insert(key, path.to_string_lossy().to_string());
+            } else {
+                present_non_git_dirs.insert(key, path.to_string_lossy().to_string());
+            }
         }
     }
 
@@ -782,6 +814,10 @@ async fn list_manager_custom_nodes(
             .as_ref()
             .and_then(|remote| installed_by_remote.get(remote));
         let expected_dir_names = state.manager_registry.expected_dir_names_for_entry(&entry);
+        let tracking_local_path = expected_dir_names
+            .iter()
+            .find_map(|value| tracking_managed_dirs.get(&value.to_ascii_lowercase()))
+            .cloned();
         let present_local_path = expected_dir_names
             .iter()
             .find_map(|value| present_non_git_dirs.get(&value.to_ascii_lowercase()))
@@ -797,7 +833,9 @@ async fn list_manager_custom_nodes(
             source_input,
             canonical_repo_url,
             is_installable,
-            is_installed: installed_state.is_some() || present_local_path.is_some(),
+            is_installed: installed_state.is_some() || tracking_local_path.is_some(),
+            is_tracking_managed: tracking_local_path.is_some(),
+            tracking_local_path,
             is_present_non_git: present_local_path.is_some(),
             present_local_path,
             has_ambiguous_installation,
@@ -1003,6 +1041,16 @@ async fn run_install_or_patch_custom_node(
         "installing or patching custom node",
     );
     let result = async {
+        let restore_tracking_backup = |backup_path: &Path, target_path: &Path| -> AppResult<()> {
+            if target_path.exists() {
+                std::fs::remove_dir_all(target_path)?;
+            }
+            std::fs::rename(backup_path, target_path)?;
+            Ok(())
+        };
+        let mut tracking_backup_path: Option<PathBuf> = None;
+        let mut tracking_target_path: Option<PathBuf> = None;
+        let result = async {
         let resolved = resolve_target_for_context(
             &state,
             &installation,
@@ -1152,28 +1200,53 @@ async fn run_install_or_patch_custom_node(
                 return Ok::<(), AppError>(());
             }
 
-            match input.existing_repo_conflict_strategy {
-                ExistingRepoConflictStrategy::Abort => {
+            if is_tracking_managed_dir(&target_path).await {
+                if !input.adopt_tracking_install {
                     return Err(AppError::Conflict(
-                        "target custom node directory already exists and is not a git repo"
+                        "target custom node directory is a tracking-managed install; enable tracking adoption to replace it with a managed git clone"
                             .to_string(),
                     ));
                 }
-                ExistingRepoConflictStrategy::Replace => {
-                    std::fs::remove_dir_all(&target_path)?;
-                }
-                ExistingRepoConflictStrategy::InstallWithSuffix => {
-                    let mut idx = 2usize;
-                    loop {
-                        let candidate = join_custom_node_path(
-                            &custom_nodes_dir,
-                            &format!("{base_dir_name}-{idx}"),
-                        );
-                        if !candidate.exists() {
-                            target_path = candidate;
-                            break;
+                let backup_path = choose_tracking_backup_path(&target_path);
+                log_operation(
+                    &state,
+                    &app,
+                    &operation_id,
+                    "preflight",
+                    "info",
+                    format!(
+                        "backing up tracking-managed install {} to {} before adopting it as a git repo",
+                        target_path.to_string_lossy(),
+                        backup_path.to_string_lossy()
+                    ),
+                );
+                std::fs::rename(&target_path, &backup_path)?;
+                tracking_target_path = Some(target_path.clone());
+                tracking_backup_path = Some(backup_path);
+            } else {
+                match input.existing_repo_conflict_strategy {
+                    ExistingRepoConflictStrategy::Abort => {
+                        return Err(AppError::Conflict(
+                            "target custom node directory already exists and is not a git repo"
+                                .to_string(),
+                        ));
+                    }
+                    ExistingRepoConflictStrategy::Replace => {
+                        std::fs::remove_dir_all(&target_path)?;
+                    }
+                    ExistingRepoConflictStrategy::InstallWithSuffix => {
+                        let mut idx = 2usize;
+                        loop {
+                            let candidate = join_custom_node_path(
+                                &custom_nodes_dir,
+                                &format!("{base_dir_name}-{idx}"),
+                            );
+                            if !candidate.exists() {
+                                target_path = candidate;
+                                break;
+                            }
+                            idx += 1;
                         }
-                        idx += 1;
                     }
                 }
             }
@@ -1257,6 +1330,44 @@ async fn run_install_or_patch_custom_node(
             "info",
             "custom node install completed",
         );
+        Ok::<(), AppError>(())
+        }
+        .await;
+
+        if let Err(err) = result {
+            if let (Some(backup_path), Some(target_path)) =
+                (tracking_backup_path.as_ref(), tracking_target_path.as_ref())
+            {
+                if let Err(restore_err) = restore_tracking_backup(backup_path, target_path) {
+                    log_operation(
+                        &state,
+                        &app,
+                        &operation_id,
+                        "error",
+                        "error",
+                        format!(
+                            "failed to restore tracking-managed backup {} after install error: {}",
+                            backup_path.to_string_lossy(),
+                            restore_err
+                        ),
+                    );
+                } else {
+                    log_operation(
+                        &state,
+                        &app,
+                        &operation_id,
+                        "preflight",
+                        "warn",
+                        format!(
+                            "restored tracking-managed backup {} after install error",
+                            backup_path.to_string_lossy()
+                        ),
+                    );
+                }
+            }
+            return Err(err);
+        }
+
         Ok::<(), AppError>(())
     }
     .await;

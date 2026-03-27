@@ -5,7 +5,7 @@ import type { ManagerRegistryCustomNode } from "../types";
 type Props = {
   installationId: string;
   refreshToken: number;
-  onInstall: (sourceInput: string) => Promise<void>;
+  onInstall: (entry: ManagerRegistryCustomNode) => Promise<void>;
   onUseSourceInput: (sourceInput: string) => void;
 };
 
@@ -92,6 +92,9 @@ export default function ManagerRegistryBrowser({
 
   const hasGitInstallation = (entry: ManagerRegistryCustomNode) =>
     Boolean(entry.installedRepoId || entry.installedLocalPath);
+  const hasTrackingInstallation = (entry: ManagerRegistryCustomNode) => entry.isTrackingManaged;
+  const shouldOfferTrackingAdoption = (entry: ManagerRegistryCustomNode) =>
+    hasTrackingInstallation(entry) && !hasGitInstallation(entry);
 
   return (
     <div className="card">
@@ -136,10 +139,10 @@ export default function ManagerRegistryBrowser({
                 <span className="badge">{entry.installType}</span>
                 {entry.hasAmbiguousInstallation ? (
                   <span className="badge warn">duplicate installs</span>
-                ) : hasGitInstallation(entry) ? (
+                ) : hasGitInstallation(entry) || hasTrackingInstallation(entry) ? (
                   <span className="badge ok">installed</span>
                 ) : entry.isPresentNonGit ? (
-                  <span className="badge ok">present</span>
+                  <span className="badge">present</span>
                 ) : entry.isInstallable ? (
                   <span className="badge">available</span>
                 ) : (
@@ -154,15 +157,21 @@ export default function ManagerRegistryBrowser({
               {entry.canonicalRepoUrl ?? entry.sourceInput ?? "No source URL available"}
             </div>
 
-            {entry.isInstalled && entry.installedLocalPath ? (
+            {hasGitInstallation(entry) && entry.installedLocalPath ? (
               <div className="small muted">
-                Installed at <span className="mono">{entry.installedLocalPath}</span>
+                Installed as git repo at <span className="mono">{entry.installedLocalPath}</span>
+              </div>
+            ) : null}
+
+            {hasTrackingInstallation(entry) && entry.trackingLocalPath ? (
+              <div className="small muted">
+                Managed via .tracking at <span className="mono">{entry.trackingLocalPath}</span>
               </div>
             ) : null}
 
             {entry.isPresentNonGit && entry.presentLocalPath ? (
               <div className="small muted">
-                {hasGitInstallation(entry) ? "Also present" : "Present"} as non-git folder at <span className="mono">{entry.presentLocalPath}</span>
+                Unmanaged folder also present at <span className="mono">{entry.presentLocalPath}</span>
               </div>
             ) : null}
 
@@ -178,16 +187,18 @@ export default function ManagerRegistryBrowser({
                   !entry.isInstallable ||
                   !entry.sourceInput ||
                   entry.hasAmbiguousInstallation ||
-                  (entry.isPresentNonGit && !hasGitInstallation(entry))
+                  (!hasGitInstallation(entry) && !hasTrackingInstallation(entry) && entry.isPresentNonGit)
                 }
-                onClick={() => entry.sourceInput && void onInstall(entry.sourceInput)}
+                onClick={() => void onInstall(entry)}
               >
                 {entry.hasAmbiguousInstallation
                   ? "Resolve duplicates first"
-                  : entry.isPresentNonGit && !hasGitInstallation(entry)
-                    ? "Manual migration needed"
+                  : shouldOfferTrackingAdoption(entry)
+                    ? "Adopt tracked install"
                   : hasGitInstallation(entry)
                     ? "Patch existing"
+                  : entry.isPresentNonGit
+                    ? "Manual migration needed"
                     : "Install"}
               </button>
               {entry.sourceInput && entry.isInstallable ? (

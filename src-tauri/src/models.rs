@@ -208,6 +208,8 @@ pub struct ManagerRegistryCustomNode {
     pub canonical_repo_url: Option<String>,
     pub is_installable: bool,
     pub is_installed: bool,
+    pub is_tracking_managed: bool,
+    pub tracking_local_path: Option<String>,
     pub is_present_non_git: bool,
     pub present_local_path: Option<String>,
     pub has_ambiguous_installation: bool,
@@ -238,6 +240,8 @@ pub struct PatchCustomNodeInput {
     pub set_tracked_target: bool,
     pub sync_dependencies: bool,
     pub restart_after_success: bool,
+    #[serde(default)]
+    pub adopt_tracking_install: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
