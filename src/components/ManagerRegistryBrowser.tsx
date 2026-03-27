@@ -66,6 +66,9 @@ export default function ManagerRegistryBrowser({
   }
 
   useEffect(() => {
+    setEntries([]);
+    setError(null);
+    setVisibleCount(PAGE_SIZE);
     requestSeq.current += 1;
     void refresh();
   }, [installationId, refreshToken]);
