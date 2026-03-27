@@ -4,8 +4,8 @@ use crate::models::{ResolvedTarget, TargetKind};
 use crate::util::slugify;
 use regex::Regex;
 use serde::Deserialize;
+use std::{borrow::Cow, collections::HashMap, sync::Arc};
 use std::time::{Duration, Instant};
-use std::{borrow::Cow, sync::Arc};
 use tokio::sync::Mutex;
 
 const MANAGER_REGISTRY_URL: &str =
@@ -16,6 +16,7 @@ const REGISTRY_TTL: Duration = Duration::from_secs(60 * 30);
 pub struct ManagerRegistryClient {
     client: reqwest::Client,
     cache: Arc<Mutex<Option<RegistryCache>>>,
+    remote_alias_cache: Arc<Mutex<HashMap<String, Vec<String>>>>,
 }
 
 #[derive(Clone)]
@@ -49,6 +50,7 @@ impl ManagerRegistryClient {
         Ok(Self {
             client,
             cache: Arc::new(Mutex::new(None)),
+            remote_alias_cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -89,6 +91,38 @@ impl ManagerRegistryClient {
         entries.sort_by_key(|entry| entry.sort_key().to_ascii_lowercase());
         entries.truncate(limit);
         Ok(entries)
+    }
+
+    pub async fn remote_aliases(&self, canonical_remote: &str) -> Vec<String> {
+        let canonical_remote = match canonicalize_remote(canonical_remote) {
+            Some(value) => value,
+            None => return Vec::new(),
+        };
+
+        if let Some(cached) = self
+            .remote_alias_cache
+            .lock()
+            .await
+            .get(&canonical_remote)
+            .cloned()
+        {
+            return cached;
+        }
+
+        let mut aliases = vec![canonical_remote.clone()];
+        if let Ok(response) = self.client.get(&canonical_remote).send().await {
+            if let Some(final_remote) = canonicalize_remote(response.url().as_str()) {
+                if !aliases.iter().any(|value| value == &final_remote) {
+                    aliases.push(final_remote);
+                }
+            }
+        }
+
+        self.remote_alias_cache
+            .lock()
+            .await
+            .insert(canonical_remote, aliases.clone());
+        aliases
     }
 
     pub async fn preferred_dir_name_for_target(

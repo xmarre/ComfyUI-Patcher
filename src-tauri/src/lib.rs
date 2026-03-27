@@ -285,8 +285,15 @@ async fn find_existing_custom_node_repo_by_remote(
                 continue;
             }
             let status = inspect_repo(&path).await?;
-            let live_remote = status.origin_url.as_deref().and_then(canonicalize_remote);
-            if live_remote.as_deref() != Some(target_remote.as_str()) {
+            let Some(live_remote) = status.origin_url.as_deref().and_then(canonicalize_remote) else {
+                continue;
+            };
+            let remote_aliases = if live_remote == target_remote {
+                vec![live_remote.clone()]
+            } else {
+                state.manager_registry.remote_aliases(&live_remote).await
+            };
+            if !remote_aliases.iter().any(|value| value == &target_remote) {
                 continue;
             }
             let repo = state.db.upsert_repo(
@@ -712,17 +719,20 @@ async fn list_manager_custom_nodes(
     let mut installed_by_remote: HashMap<String, Option<ManagedRepo>> = HashMap::new();
     for repo in discovered_custom_nodes {
         if let Some(remote) = repo.canonical_remote.as_deref().and_then(canonicalize_remote) {
-            match installed_by_remote.entry(remote) {
-                Entry::Vacant(slot) => {
-                    slot.insert(Some(repo));
-                }
-                Entry::Occupied(mut slot) => {
-                    let same_repo = slot
-                        .get()
-                        .as_ref()
-                        .is_some_and(|existing| existing.id == repo.id);
-                    if !same_repo {
-                        slot.insert(None);
+            let remote_aliases = state.manager_registry.remote_aliases(&remote).await;
+            for alias in remote_aliases {
+                match installed_by_remote.entry(alias) {
+                    Entry::Vacant(slot) => {
+                        slot.insert(Some(repo.clone()));
+                    }
+                    Entry::Occupied(mut slot) => {
+                        let same_repo = slot
+                            .get()
+                            .as_ref()
+                            .is_some_and(|existing| existing.id == repo.id);
+                        if !same_repo {
+                            slot.insert(None);
+                        }
                     }
                 }
             }
