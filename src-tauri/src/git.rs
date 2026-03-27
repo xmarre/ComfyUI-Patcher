@@ -1,5 +1,5 @@
 use crate::errors::{AppError, AppResult};
-use crate::execution::output_command;
+use crate::execution::{output_command, parse_wsl_unc_path};
 use crate::models::DirtyRepoStrategy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -234,13 +234,88 @@ pub async fn apply_stash(path: &Path, stash_id: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn normalize_linux_path(input: &str) -> String {
+    let normalized = input.replace('\\', "/");
+    let trimmed = normalized.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn canonicalize_wsl_linux_path(path: &Path) -> Option<(String, String)> {
+    let parsed = parse_wsl_unc_path(path)?;
+    let canonical_linux_path = std::fs::canonicalize(path)
+        .ok()
+        .as_deref()
+        .and_then(parse_wsl_unc_path)
+        .map(|value| normalize_linux_path(&value.linux_path))
+        .unwrap_or_else(|| normalize_linux_path(&parsed.linux_path));
+    Some((parsed.distro, canonical_linux_path))
+}
+
+fn canonicalize_wsl_repo_root_for_distro(distro: &str, repo_root: &str) -> String {
+    let normalized_repo_root = normalize_linux_path(repo_root);
+    let unc_path = if normalized_repo_root == "/" {
+        format!(r"\\wsl.localhost\{distro}")
+    } else {
+        format!(
+            r"\\wsl.localhost\{distro}\{}",
+            normalized_repo_root
+                .trim_start_matches('/')
+                .replace('/', "\\")
+        )
+    };
+
+    std::fs::canonicalize(Path::new(&unc_path))
+        .ok()
+        .as_deref()
+        .and_then(parse_wsl_unc_path)
+        .map(|value| normalize_linux_path(&value.linux_path))
+        .unwrap_or(normalized_repo_root)
+}
+
+#[cfg(windows)]
+fn normalize_native_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
+}
+
+#[cfg(not(windows))]
+fn normalize_native_path(path: &Path) -> String {
+    path.to_string_lossy().trim_end_matches('/').to_string()
+}
+
 pub async fn is_git_repo(path: &Path) -> bool {
-    run_git_allow_fail(path, &["rev-parse", "--is-inside-work-tree"])
+    let Some(repo_root) = run_git_allow_fail(path, &["rev-parse", "--show-toplevel"])
         .await
         .ok()
         .flatten()
-        .map(|value| value == "true")
-        .unwrap_or(false)
+    else {
+        return false;
+    };
+
+    if let Some((distro, canonical_linux_path)) = canonicalize_wsl_linux_path(path) {
+        return canonical_linux_path == canonicalize_wsl_repo_root_for_distro(&distro, &repo_root);
+    }
+
+    let canonical_path = match std::fs::canonicalize(path) {
+        Ok(path) => path,
+        Err(_) => return false,
+    };
+    let repo_root_path = Path::new(&repo_root);
+    if !repo_root_path.is_absolute() {
+        return false;
+    }
+    let canonical_repo_root = match std::fs::canonicalize(repo_root_path) {
+        Ok(path) => path,
+        Err(_) => return false,
+    };
+
+    normalize_native_path(&canonical_path) == normalize_native_path(&canonical_repo_root)
 }
 
 pub fn validate_custom_node_dir_name(dir_name: &str) -> AppResult<String> {

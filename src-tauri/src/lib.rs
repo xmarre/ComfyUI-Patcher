@@ -729,7 +729,7 @@ async fn list_manager_custom_nodes(
         }
     }
 
-    let limit = input.limit.unwrap_or(100).clamp(1, 500);
+    let limit = input.limit.unwrap_or(1000).clamp(1, 10000);
     let mut items = state
         .manager_registry
         .search_entries(input.query.as_deref(), usize::MAX)

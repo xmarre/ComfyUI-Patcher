@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import type { ManagerRegistryCustomNode } from "../types";
 
@@ -14,6 +14,22 @@ function toErrorMessage(error: unknown): string {
   return String(error);
 }
 
+const FETCH_LIMIT = 10000;
+const PAGE_SIZE = 250;
+
+function entrySearchText(entry: ManagerRegistryCustomNode): string {
+  return [
+    entry.title,
+    entry.registryId,
+    entry.author ?? "",
+    entry.description ?? "",
+    entry.canonicalRepoUrl ?? "",
+    entry.sourceInput ?? ""
+  ]
+    .join("\n")
+    .toLocaleLowerCase();
+}
+
 export default function ManagerRegistryBrowser({
   installationId,
   refreshToken,
@@ -22,25 +38,25 @@ export default function ManagerRegistryBrowser({
 }: Props) {
   const [query, setQuery] = useState("");
   const [entries, setEntries] = useState<ManagerRegistryCustomNode[]>([]);
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const requestSeq = useRef(0);
 
-  async function refresh(nextQuery: string) {
+  async function refresh() {
     const requestId = ++requestSeq.current;
     setLoading(true);
     setError(null);
     try {
       const next = await api.listManagerCustomNodes({
         installationId,
-        query: nextQuery.trim() || null,
-        limit: 120
+        query: null,
+        limit: FETCH_LIMIT
       });
       if (requestSeq.current !== requestId) return;
       setEntries(next);
     } catch (err) {
       if (requestSeq.current !== requestId) return;
-      setEntries([]);
       setError(toErrorMessage(err));
     } finally {
       if (requestSeq.current === requestId) {
@@ -50,12 +66,29 @@ export default function ManagerRegistryBrowser({
   }
 
   useEffect(() => {
+    setEntries([]);
+    setError(null);
+    setVisibleCount(PAGE_SIZE);
     requestSeq.current += 1;
-    const timeoutId = window.setTimeout(() => {
-      void refresh(query);
-    }, 180);
-    return () => window.clearTimeout(timeoutId);
-  }, [installationId, query, refreshToken]);
+    void refresh();
+  }, [installationId, refreshToken]);
+
+  useEffect(() => {
+    setVisibleCount(PAGE_SIZE);
+  }, [query, entries]);
+
+  const filteredEntries = useMemo(() => {
+    const normalizedQuery = query.trim().toLocaleLowerCase();
+    if (!normalizedQuery) {
+      return entries;
+    }
+    return entries.filter((entry) => entrySearchText(entry).includes(normalizedQuery));
+  }, [entries, query]);
+
+  const visibleEntries = useMemo(
+    () => filteredEntries.slice(0, visibleCount),
+    [filteredEntries, visibleCount]
+  );
 
   return (
     <div className="card">
@@ -66,7 +99,7 @@ export default function ManagerRegistryBrowser({
             Search the Manager catalog and install through ComfyUI Patcher.
           </div>
         </div>
-        <button className="secondary" onClick={() => void refresh(query)}>
+        <button className="secondary" onClick={() => void refresh()}>
           Refresh
         </button>
       </div>
@@ -80,8 +113,13 @@ export default function ManagerRegistryBrowser({
       {error ? <div className="muted">{error}</div> : null}
       {loading ? <div className="muted">Loading registry entries…</div> : null}
 
+      <div className="small muted">
+        Showing {visibleEntries.length} of {filteredEntries.length} loaded matching entries
+        {filteredEntries.length !== entries.length ? ` (from ${entries.length} loaded)` : ""}.
+      </div>
+
       <div className="list registry-list">
-        {entries.map((entry) => (
+        {visibleEntries.map((entry) => (
           <div key={`${entry.registryId}:${entry.canonicalRepoUrl ?? entry.sourceInput ?? entry.title}`} className="list-item registry-item">
             <div className="row between registry-item-header">
               <div>
@@ -147,7 +185,15 @@ export default function ManagerRegistryBrowser({
         ))}
       </div>
 
-      {!loading && !entries.length && !error ? (
+      {!loading && filteredEntries.length > visibleEntries.length ? (
+        <div className="row gap">
+          <button className="secondary" onClick={() => setVisibleCount((value) => value + PAGE_SIZE)}>
+            Show more
+          </button>
+        </div>
+      ) : null}
+
+      {!loading && !filteredEntries.length && !error ? (
         <div className="muted">No registry entries matched the current search.</div>
       ) : null}
     </div>
