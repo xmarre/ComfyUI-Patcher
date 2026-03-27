@@ -90,6 +90,9 @@ export default function ManagerRegistryBrowser({
     [filteredEntries, visibleCount]
   );
 
+  const hasGitInstallation = (entry: ManagerRegistryCustomNode) =>
+    Boolean(entry.installedRepoId || entry.installedLocalPath);
+
   return (
     <div className="card">
       <div className="row between registry-header">
@@ -133,10 +136,10 @@ export default function ManagerRegistryBrowser({
                 <span className="badge">{entry.installType}</span>
                 {entry.hasAmbiguousInstallation ? (
                   <span className="badge warn">duplicate installs</span>
+                ) : hasGitInstallation(entry) ? (
+                  <span className="badge ok">installed</span>
                 ) : entry.isPresentNonGit ? (
                   <span className="badge ok">present</span>
-                ) : entry.isInstalled ? (
-                  <span className="badge ok">installed</span>
                 ) : entry.isInstallable ? (
                   <span className="badge">available</span>
                 ) : (
@@ -159,7 +162,7 @@ export default function ManagerRegistryBrowser({
 
             {entry.isPresentNonGit && entry.presentLocalPath ? (
               <div className="small muted">
-                Present as non-git folder at <span className="mono">{entry.presentLocalPath}</span>
+                {hasGitInstallation(entry) ? "Also present" : "Present"} as non-git folder at <span className="mono">{entry.presentLocalPath}</span>
               </div>
             ) : null}
 
@@ -175,15 +178,15 @@ export default function ManagerRegistryBrowser({
                   !entry.isInstallable ||
                   !entry.sourceInput ||
                   entry.hasAmbiguousInstallation ||
-                  entry.isPresentNonGit
+                  (entry.isPresentNonGit && !hasGitInstallation(entry))
                 }
                 onClick={() => entry.sourceInput && void onInstall(entry.sourceInput)}
               >
                 {entry.hasAmbiguousInstallation
                   ? "Resolve duplicates first"
-                  : entry.isPresentNonGit
+                  : entry.isPresentNonGit && !hasGitInstallation(entry)
                     ? "Manual migration needed"
-                  : entry.isInstalled
+                  : hasGitInstallation(entry)
                     ? "Patch existing"
                     : "Install"}
               </button>

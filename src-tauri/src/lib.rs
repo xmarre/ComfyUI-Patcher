@@ -781,10 +781,10 @@ async fn list_manager_custom_nodes(
         let installed_state = canonical_repo_url
             .as_ref()
             .and_then(|remote| installed_by_remote.get(remote));
-        let expected_dir_name = state.manager_registry.expected_dir_name_for_entry(&entry).await;
-        let present_local_path = expected_dir_name
-            .as_deref()
-            .and_then(|value| present_non_git_dirs.get(&value.to_ascii_lowercase()))
+        let expected_dir_names = state.manager_registry.expected_dir_names_for_entry(&entry);
+        let present_local_path = expected_dir_names
+            .iter()
+            .find_map(|value| present_non_git_dirs.get(&value.to_ascii_lowercase()))
             .cloned();
         let installed = installed_state.and_then(|state| state.as_ref());
         let has_ambiguous_installation = matches!(installed_state, Some(None));
@@ -798,7 +798,7 @@ async fn list_manager_custom_nodes(
             canonical_repo_url,
             is_installable,
             is_installed: installed_state.is_some() || present_local_path.is_some(),
-            is_present_non_git: present_local_path.is_some() && installed_state.is_none(),
+            is_present_non_git: present_local_path.is_some(),
             present_local_path,
             has_ambiguous_installation,
             installed_repo_id: installed.map(|repo| repo.id.clone()),

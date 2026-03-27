@@ -125,46 +125,45 @@ impl ManagerRegistryClient {
         aliases
     }
 
-    pub async fn expected_dir_name_for_entry(
+    pub fn expected_dir_names_for_entry(
         &self,
         entry: &ManagerCustomNodeEntry,
-    ) -> Option<String> {
-        if let Some(reference) = entry.canonical_git_remote() {
-            let suggested_local_dir_name = repo_name_from_url(&reference)
-                .map(|value| slugify(&value))
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| "custom-node".to_string());
-            let resolved = ResolvedTarget {
-                source_input: reference.clone(),
-                target_kind: TargetKind::DefaultBranch,
-                canonical_repo_url: reference.clone(),
-                fetch_url: reference.clone(),
-                checkout_ref: "HEAD".to_string(),
-                resolved_sha: None,
-                pr_number: None,
-                pr_base_repo_url: None,
-                pr_head_repo_url: None,
-                pr_head_ref: None,
-                summary_label: reference.clone(),
-                suggested_local_dir_name,
-            };
-            if let Ok(Some(value)) = self.preferred_dir_name_for_target(&resolved).await {
-                if !value.is_empty() {
-                    return Some(value);
+    ) -> Vec<String> {
+        fn push_candidate(out: &mut Vec<String>, raw: &str) {
+            let slug = slugify(raw);
+            if slug.is_empty() {
+                return;
+            }
+            if !out.iter().any(|value| value == &slug) {
+                out.push(slug.clone());
+            }
+            for prefix in ["comfyui-", "comfyui_", "comfyui"] {
+                if let Some(stripped) = slug.strip_prefix(prefix) {
+                    let stripped = stripped.trim_start_matches(['-', '_']);
+                    if !stripped.is_empty() && !out.iter().any(|value| value == stripped) {
+                        out.push(stripped.to_string());
+                    }
                 }
             }
         }
 
-        entry.id
-            .as_deref()
-            .map(slugify)
-            .filter(|value| !value.is_empty())
-            .or_else(|| {
-                entry.title
-                    .as_deref()
-                    .map(slugify)
-                    .filter(|value| !value.is_empty())
-            })
+        let mut candidates = Vec::new();
+
+        if let Some(id) = entry.id.as_deref() {
+            push_candidate(&mut candidates, id);
+        }
+
+        if let Some(title) = entry.title.as_deref() {
+            push_candidate(&mut candidates, title);
+        }
+
+        if let Some(reference) = entry.canonical_git_remote() {
+            if let Some(repo_name) = repo_name_from_url(&reference) {
+                push_candidate(&mut candidates, &repo_name);
+            }
+        }
+
+        candidates
     }
 
     pub async fn preferred_dir_name_for_target(
