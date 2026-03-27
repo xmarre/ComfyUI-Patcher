@@ -550,16 +550,22 @@ export default function App() {
             <ManagerRegistryBrowser
               installationId={selectedInstallation.id}
               refreshToken={registryRefreshToken}
-              onInstall={(sourceInput) =>
+              onInstall={(entry) =>
                 runAction(async () => {
+                  const targetLocalDirName =
+                    entry.isTrackingManaged && !(entry.installedRepoId || entry.installedLocalPath)
+                      ? (entry.trackingLocalPath?.split(/[\\/]/).filter(Boolean).pop() ?? undefined)
+                      : undefined;
                   await api.installOrPatchCustomNode({
                     installationId: selectedInstallation.id,
-                    input: sourceInput,
+                    input: entry.sourceInput ?? "",
+                    targetLocalDirName,
                     existingRepoConflictStrategy: "install_with_suffix",
                     dirtyRepoStrategy: "abort",
                     setTrackedTarget: true,
                     syncDependencies: true,
-                    restartAfterSuccess: false
+                    restartAfterSuccess: false,
+                    adoptTrackingInstall: entry.isTrackingManaged && !(entry.installedRepoId || entry.installedLocalPath)
                   });
                 })
               }

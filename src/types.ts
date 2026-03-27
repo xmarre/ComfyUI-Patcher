@@ -71,6 +71,8 @@ export type ManagerRegistryCustomNode = {
   canonicalRepoUrl: string | null;
   isInstallable: boolean;
   isInstalled: boolean;
+  isTrackingManaged: boolean;
+  trackingLocalPath: string | null;
   isPresentNonGit: boolean;
   presentLocalPath: string | null;
   hasAmbiguousInstallation: boolean;
@@ -182,6 +184,7 @@ export type PatchCustomNodeInput = {
   setTrackedTarget: boolean;
   syncDependencies: boolean;
   restartAfterSuccess: boolean;
+  adoptTrackingInstall?: boolean;
 };
 
 export type UpdateRepoInput = {
