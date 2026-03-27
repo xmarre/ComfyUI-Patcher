@@ -125,6 +125,47 @@ impl ManagerRegistryClient {
         aliases
     }
 
+    pub fn expected_dir_names_for_entry(
+        &self,
+        entry: &ManagerCustomNodeEntry,
+    ) -> Vec<String> {
+        fn push_candidate(out: &mut Vec<String>, raw: &str) {
+            let slug = slugify(raw);
+            if slug.is_empty() {
+                return;
+            }
+            if !out.iter().any(|value| value == &slug) {
+                out.push(slug.clone());
+            }
+            for prefix in ["comfyui-", "comfyui_", "comfyui"] {
+                if let Some(stripped) = slug.strip_prefix(prefix) {
+                    let stripped = stripped.trim_start_matches(['-', '_']);
+                    if !stripped.is_empty() && !out.iter().any(|value| value == stripped) {
+                        out.push(stripped.to_string());
+                    }
+                }
+            }
+        }
+
+        let mut candidates = Vec::new();
+
+        if let Some(id) = entry.id.as_deref() {
+            push_candidate(&mut candidates, id);
+        }
+
+        if let Some(title) = entry.title.as_deref() {
+            push_candidate(&mut candidates, title);
+        }
+
+        if let Some(reference) = entry.canonical_git_remote() {
+            if let Some(repo_name) = repo_name_from_url(&reference) {
+                push_candidate(&mut candidates, &repo_name);
+            }
+        }
+
+        candidates
+    }
+
     pub async fn preferred_dir_name_for_target(
         &self,
         resolved: &ResolvedTarget,

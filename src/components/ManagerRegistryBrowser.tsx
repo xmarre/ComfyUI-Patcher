@@ -90,6 +90,9 @@ export default function ManagerRegistryBrowser({
     [filteredEntries, visibleCount]
   );
 
+  const hasGitInstallation = (entry: ManagerRegistryCustomNode) =>
+    Boolean(entry.installedRepoId || entry.installedLocalPath);
+
   return (
     <div className="card">
       <div className="row between registry-header">
@@ -133,8 +136,10 @@ export default function ManagerRegistryBrowser({
                 <span className="badge">{entry.installType}</span>
                 {entry.hasAmbiguousInstallation ? (
                   <span className="badge warn">duplicate installs</span>
-                ) : entry.isInstalled ? (
+                ) : hasGitInstallation(entry) ? (
                   <span className="badge ok">installed</span>
+                ) : entry.isPresentNonGit ? (
+                  <span className="badge ok">present</span>
                 ) : entry.isInstallable ? (
                   <span className="badge">available</span>
                 ) : (
@@ -155,6 +160,12 @@ export default function ManagerRegistryBrowser({
               </div>
             ) : null}
 
+            {entry.isPresentNonGit && entry.presentLocalPath ? (
+              <div className="small muted">
+                {hasGitInstallation(entry) ? "Also present" : "Present"} as non-git folder at <span className="mono">{entry.presentLocalPath}</span>
+              </div>
+            ) : null}
+
             {entry.hasAmbiguousInstallation ? (
               <div className="small muted">
                 Multiple local directories match this remote. Resolve duplicates manually before patching.
@@ -163,12 +174,19 @@ export default function ManagerRegistryBrowser({
 
             <div className="row gap registry-actions">
               <button
-                disabled={!entry.isInstallable || !entry.sourceInput || entry.hasAmbiguousInstallation}
+                disabled={
+                  !entry.isInstallable ||
+                  !entry.sourceInput ||
+                  entry.hasAmbiguousInstallation ||
+                  (entry.isPresentNonGit && !hasGitInstallation(entry))
+                }
                 onClick={() => entry.sourceInput && void onInstall(entry.sourceInput)}
               >
                 {entry.hasAmbiguousInstallation
                   ? "Resolve duplicates first"
-                  : entry.isInstalled
+                  : entry.isPresentNonGit && !hasGitInstallation(entry)
+                    ? "Manual migration needed"
+                  : hasGitInstallation(entry)
                     ? "Patch existing"
                     : "Install"}
               </button>

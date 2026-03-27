@@ -208,6 +208,8 @@ pub struct ManagerRegistryCustomNode {
     pub canonical_repo_url: Option<String>,
     pub is_installable: bool,
     pub is_installed: bool,
+    pub is_present_non_git: bool,
+    pub present_local_path: Option<String>,
     pub has_ambiguous_installation: bool,
     pub installed_repo_id: Option<String>,
     pub installed_display_name: Option<String>,

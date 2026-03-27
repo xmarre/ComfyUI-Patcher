@@ -71,6 +71,8 @@ export type ManagerRegistryCustomNode = {
   canonicalRepoUrl: string | null;
   isInstallable: boolean;
   isInstalled: boolean;
+  isPresentNonGit: boolean;
+  presentLocalPath: string | null;
   hasAmbiguousInstallation: boolean;
   installedRepoId: string | null;
   installedDisplayName: string | null;

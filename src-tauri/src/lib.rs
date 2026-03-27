@@ -716,6 +716,29 @@ async fn list_manager_custom_nodes(
         .await
         .map_err(|e| e.to_string())?;
 
+    let mut present_non_git_dirs: HashMap<String, String> = HashMap::new();
+    let custom_nodes_dir = PathBuf::from(&installation.custom_nodes_dir);
+    if custom_nodes_dir.exists() {
+        let entries = std::fs::read_dir(&custom_nodes_dir).map_err(|e| e.to_string())?;
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            if is_git_repo(&path).await {
+                continue;
+            }
+            let Some(dir_name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            present_non_git_dirs.insert(
+                dir_name.to_ascii_lowercase(),
+                path.to_string_lossy().to_string(),
+            );
+        }
+    }
+
     let mut installed_by_remote: HashMap<String, Option<ManagedRepo>> = HashMap::new();
     for repo in discovered_custom_nodes {
         if let Some(remote) = repo.canonical_remote.as_deref().and_then(canonicalize_remote) {
@@ -740,43 +763,49 @@ async fn list_manager_custom_nodes(
     }
 
     let limit = input.limit.unwrap_or(1000).clamp(1, 10000);
-    let mut items = state
+    let entries = state
         .manager_registry
         .search_entries(input.query.as_deref(), usize::MAX)
         .await
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(|entry| {
-            let install_type = entry.install_type_label();
-            let canonical_repo_url = entry.canonical_git_remote();
-            let is_installable = install_type == "git-clone" && canonical_repo_url.is_some();
-            let source_input = if is_installable {
-                canonical_repo_url.clone()
-            } else {
-                entry.source_input()
-            };
-            let installed_state = canonical_repo_url
-                .as_ref()
-                .and_then(|remote| installed_by_remote.get(remote));
-            let installed = installed_state.and_then(|state| state.as_ref());
-            let has_ambiguous_installation = matches!(installed_state, Some(None));
-            ManagerRegistryCustomNode {
-                registry_id: entry.registry_id(),
-                title: entry.title(),
-                author: entry.author(),
-                description: entry.description(),
-                install_type: install_type.clone(),
-                source_input,
-                canonical_repo_url,
-                is_installable,
-                is_installed: installed_state.is_some(),
-                has_ambiguous_installation,
-                installed_repo_id: installed.map(|repo| repo.id.clone()),
-                installed_display_name: installed.map(|repo| repo.display_name.clone()),
-                installed_local_path: installed.map(|repo| repo.local_path.clone()),
-            }
-        })
-        .collect::<Vec<_>>();
+        .map_err(|e| e.to_string())?;
+    let mut items = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let install_type = entry.install_type_label();
+        let canonical_repo_url = entry.canonical_git_remote();
+        let is_installable = install_type == "git-clone" && canonical_repo_url.is_some();
+        let source_input = if is_installable {
+            canonical_repo_url.clone()
+        } else {
+            entry.source_input()
+        };
+        let installed_state = canonical_repo_url
+            .as_ref()
+            .and_then(|remote| installed_by_remote.get(remote));
+        let expected_dir_names = state.manager_registry.expected_dir_names_for_entry(&entry);
+        let present_local_path = expected_dir_names
+            .iter()
+            .find_map(|value| present_non_git_dirs.get(&value.to_ascii_lowercase()))
+            .cloned();
+        let installed = installed_state.and_then(|state| state.as_ref());
+        let has_ambiguous_installation = matches!(installed_state, Some(None));
+        items.push(ManagerRegistryCustomNode {
+            registry_id: entry.registry_id(),
+            title: entry.title(),
+            author: entry.author(),
+            description: entry.description(),
+            install_type: install_type.clone(),
+            source_input,
+            canonical_repo_url,
+            is_installable,
+            is_installed: installed_state.is_some() || present_local_path.is_some(),
+            is_present_non_git: present_local_path.is_some(),
+            present_local_path,
+            has_ambiguous_installation,
+            installed_repo_id: installed.map(|repo| repo.id.clone()),
+            installed_display_name: installed.map(|repo| repo.display_name.clone()),
+            installed_local_path: installed.map(|repo| repo.local_path.clone()),
+        });
+    }
 
     items.sort_by(|left, right| {
         right
