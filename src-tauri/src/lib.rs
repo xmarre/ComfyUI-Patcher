@@ -20,7 +20,7 @@ use crate::git::{
 use crate::models::*;
 use crate::state::AppState;
 use crate::util::{detect_env_kind, infer_python};
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -135,6 +135,20 @@ async fn discover_repositories_for_installation(
                 status.is_dirty,
             )?;
             custom_node_repos.push(repo);
+        }
+    }
+
+    let mut discovered_paths: HashSet<String> = HashSet::new();
+    if let Some(repo) = core_repo.as_ref() {
+        discovered_paths.insert(repo.local_path.clone());
+    }
+    for repo in &custom_node_repos {
+        discovered_paths.insert(repo.local_path.clone());
+    }
+
+    for repo in state.db.list_repos_by_installation(&installation.id)? {
+        if !discovered_paths.contains(&repo.local_path) {
+            state.db.delete_repo(&repo.id)?;
         }
     }
 
@@ -382,6 +396,70 @@ fn absolutize_path_against(root: &Path, value: &str) -> AppResult<PathBuf> {
     }
 }
 
+async fn acquire_installation_repo_locks(
+    state: &AppState,
+    installation_id: &str,
+) -> AppResult<Vec<tokio::sync::OwnedMutexGuard<()>>> {
+    let mut repos = state.db.list_repos_by_installation(installation_id)?;
+    repos.sort_by(|left, right| left.id.cmp(&right.id));
+
+    let mut guards = Vec::with_capacity(repos.len());
+    for repo in repos {
+        let repo_lock = state.repo_lock(&repo.id).await;
+        guards.push(repo_lock.lock_owned().await);
+    }
+
+    Ok(guards)
+}
+
+fn normalize_python_executable(root: &Path, python_exe: Option<&str>) -> AppResult<PathBuf> {
+    match python_exe.map(str::trim) {
+        Some(value) if !value.is_empty() => {
+            let candidate = PathBuf::from(value);
+            if candidate.is_absolute() {
+                if !candidate.is_file() {
+                    return Err(AppError::InvalidInput(format!(
+                        "python executable is not a file: {}",
+                        candidate.to_string_lossy()
+                    )));
+                }
+                return Ok(candidate.canonicalize()?);
+            }
+            if candidate.components().count() > 1 || value.contains(std::path::MAIN_SEPARATOR) {
+                let resolved = absolutize_path_against(root, value)?;
+                if !resolved.is_file() {
+                    return Err(AppError::InvalidInput(format!(
+                        "python executable is not a file: {}",
+                        resolved.to_string_lossy()
+                    )));
+                }
+                return Ok(resolved.canonicalize()?);
+            }
+            Ok(candidate)
+        }
+        _ => Ok(infer_python(root).unwrap_or_else(|| PathBuf::from("python"))),
+    }
+}
+
+fn normalize_launch_profile(
+    root: &Path,
+    launch_profile: Option<LaunchProfile>,
+) -> AppResult<Option<LaunchProfile>> {
+    launch_profile
+        .map(|mut profile| {
+            profile.cwd = match profile.cwd.as_deref().map(str::trim) {
+                None | Some("") => None,
+                Some(cwd) => Some(
+                    absolutize_path_against(root, cwd)?
+                        .to_string_lossy()
+                        .to_string(),
+                ),
+            };
+            Ok::<LaunchProfile, AppError>(profile)
+        })
+        .transpose()
+}
+
 async fn create_checkpoint_if_needed(
     state: &AppState,
     repo: &ManagedRepo,
@@ -526,7 +604,7 @@ async fn maybe_sync_dependencies(
     if !enabled {
         return Ok(());
     }
-    let plan = plan_dependency_sync(installation, repo_path);
+    let plan = plan_dependency_sync(installation, repo_path)?;
     log_operation(
         state,
         app,
@@ -650,60 +728,59 @@ async fn register_installation_impl(
         ));
     }
     let root = requested_root.canonicalize()?;
+    let root_string = root.to_string_lossy().to_string();
+    let existing_installation = state.db.get_installation_by_root(&root_string)?;
+    let installation_lock = match existing_installation.as_ref() {
+        Some(existing) => Some(state.installation_lock(&existing.id).await),
+        None => None,
+    };
+    let _installation_guard = match installation_lock.as_ref() {
+        Some(lock) => Some(lock.lock().await),
+        None => None,
+    };
+    let existing_installation = match existing_installation {
+        Some(existing) => state.db.get_installation(&existing.id)?,
+        None => None,
+    };
 
-    let python = match input.python_exe.as_deref().map(str::trim) {
-        Some(value) if !value.is_empty() => {
-            let candidate = PathBuf::from(value);
-            if candidate.is_absolute() {
-                if candidate.exists() {
-                    candidate.canonicalize()?
-                } else {
-                    candidate
-                }
-            } else if candidate.components().count() > 1
-                || value.contains(std::path::MAIN_SEPARATOR)
-            {
-                absolutize_path_against(&root, value)?
-            } else {
-                candidate
-            }
-        }
-        _ => infer_python(&root).unwrap_or_else(|| PathBuf::from("python")),
+    let python = if input.python_exe.is_some() || existing_installation.is_none() {
+        Some(normalize_python_executable(
+            &root,
+            input.python_exe.as_deref(),
+        )?)
+    } else {
+        None
     };
 
     let custom_nodes_dir = root.join("custom_nodes");
     std::fs::create_dir_all(&custom_nodes_dir)?;
 
-    let launch_profile = input
-        .launch_profile
+    let launch_profile = if input.launch_profile.is_some() || existing_installation.is_none() {
+        normalize_launch_profile(&root, input.launch_profile.clone())?
+    } else {
+        None
+    };
+    let detected_env_kind = python.as_ref().map(|value| detect_env_kind(value));
+    let python_string = python
         .as_ref()
-        .map(|profile| {
-            let mut profile = profile.clone();
-            if let Some(cwd) = profile
-                .cwd
-                .as_deref()
-                .map(str::trim)
-                .filter(|cwd| !cwd.is_empty())
-            {
-                profile.cwd = Some(
-                    absolutize_path_against(&root, cwd)?
-                        .to_string_lossy()
-                        .to_string(),
-                );
-            }
-            Ok::<LaunchProfile, AppError>(profile)
-        })
-        .transpose()?;
+        .map(|value| value.to_string_lossy().to_string());
+    let custom_nodes_dir_string = custom_nodes_dir.to_string_lossy().to_string();
+    let is_root_git_repo = is_git_repo(&root).await;
 
-    let installation = state.db.create_installation(
+    let installation = state.db.upsert_installation_by_root(
         &input.name,
-        &root.to_string_lossy(),
-        &python.to_string_lossy(),
-        &custom_nodes_dir.to_string_lossy(),
+        &root_string,
+        python_string.as_deref(),
+        &custom_nodes_dir_string,
         launch_profile.as_ref(),
-        &detect_env_kind(&python),
-        is_git_repo(&root).await,
+        detected_env_kind.as_deref(),
+        is_root_git_repo,
     )?;
+    let _repo_guards = if existing_installation.is_some() {
+        acquire_installation_repo_locks(state, &installation.id).await?
+    } else {
+        Vec::new()
+    };
     let (core_repo, discovered_custom_nodes) =
         discover_repositories_for_installation(state, &installation).await?;
     Ok(RegisterInstallationResult {
@@ -727,6 +804,80 @@ fn get_installation_detail(
     state
         .db
         .get_installation_detail(&installation_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn save_installation(
+    state: State<'_, AppState>,
+    input: SaveInstallationInput,
+) -> Result<Installation, String> {
+    let installation_lock = state.installation_lock(&input.installation_id).await;
+    let _installation_guard = installation_lock.lock().await;
+    let existing = state
+        .db
+        .get_installation(&input.installation_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "installation not found".to_string())?;
+    let root = PathBuf::from(&existing.comfy_root);
+    if !root.exists() || !root.is_dir() {
+        return Err("installation root no longer exists".to_string());
+    }
+    let root = root.canonicalize().map_err(|e| e.to_string())?;
+    let (python_string, detected_env_kind) = if let Some(python_input) = input.python_exe.as_deref()
+    {
+        let python = normalize_python_executable(&root, Some(python_input))
+            .map_err(|e| e.to_string())?;
+        (
+            python.to_string_lossy().to_string(),
+            detect_env_kind(&python),
+        )
+    } else {
+        (existing.python_exe.clone(), existing.detected_env_kind.clone())
+    };
+    let launch_profile = if input.launch_profile.is_some() {
+        normalize_launch_profile(&root, input.launch_profile)
+            .map_err(|e| e.to_string())?
+    } else {
+        existing.launch_profile.clone()
+    };
+    let installation = state
+        .db
+        .update_installation(
+            &existing.id,
+            &input.name,
+            &python_string,
+            launch_profile.as_ref(),
+            &detected_env_kind,
+            is_git_repo(&root).await,
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(installation)
+}
+
+#[tauri::command]
+async fn delete_installation(
+    state: State<'_, AppState>,
+    input: DeleteInstallationInput,
+) -> Result<(), String> {
+    let installation = state
+        .db
+        .get_installation(&input.installation_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "installation not found".to_string())?;
+    let lock = state.installation_lock(&installation.id).await;
+    let _guard = lock.lock().await;
+    let _repo_guards = acquire_installation_repo_locks(&state, &installation.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    state
+        .processes
+        .stop(&installation.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    state
+        .db
+        .delete_installation(&installation.id)
         .map_err(|e| e.to_string())
 }
 
@@ -1986,6 +2137,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             register_installation,
+            save_installation,
+            delete_installation,
             list_installations,
             get_installation_detail,
             list_manager_custom_nodes,

@@ -180,6 +180,21 @@ pub struct RegisterInstallationResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SaveInstallationInput {
+    pub installation_id: String,
+    pub name: String,
+    pub python_exe: Option<String>,
+    pub launch_profile: Option<LaunchProfile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteInstallationInput {
+    pub installation_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResolveTargetInput {
     pub installation_id: String,
     pub kind: RepoKind,

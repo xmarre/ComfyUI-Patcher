@@ -344,6 +344,7 @@ dependencies = [
  "tauri-build",
  "thiserror 2.0.18",
  "tokio",
+ "toml 0.8.2",
  "url",
  "uuid",
 ]

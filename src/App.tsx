@@ -10,7 +10,8 @@ import type {
   ManagedRepo,
   OperationEvent,
   ResolveTargetInput,
-  ResolvedTarget
+  ResolvedTarget,
+  SaveInstallationInput
 } from "./types";
 
 const defaultLaunchProfile: LaunchProfile = {
@@ -106,6 +107,13 @@ export default function App() {
     launchArgs: defaultLaunchProfile.args.join(" "),
     launchCwd: ""
   });
+  const [installationForm, setInstallationForm] = useState({
+    name: "",
+    pythonExe: "",
+    launchCommand: defaultLaunchProfile.command,
+    launchArgs: defaultLaunchProfile.args.join(" "),
+    launchCwd: ""
+  });
 
   const detailRequestSeq = useRef(0);
   const corePreviewRequestSeq = useRef(0);
@@ -130,6 +138,27 @@ export default function App() {
     () => installations.find((item) => item.id === selectedInstallationId) ?? null,
     [installations, selectedInstallationId]
   );
+
+  useEffect(() => {
+    const installation = detail?.installation ?? selectedInstallation;
+    if (!installation) {
+      setInstallationForm({
+        name: "",
+        pythonExe: "",
+        launchCommand: defaultLaunchProfile.command,
+        launchArgs: defaultLaunchProfile.args.join(" "),
+        launchCwd: ""
+      });
+      return;
+    }
+    setInstallationForm({
+      name: installation.name,
+      pythonExe: installation.pythonExe,
+      launchCommand: installation.launchProfile?.command ?? defaultLaunchProfile.command,
+      launchArgs: (installation.launchProfile?.args ?? defaultLaunchProfile.args).join(" "),
+      launchCwd: installation.launchProfile?.cwd ?? installation.comfyRoot
+    });
+  }, [detail, selectedInstallation]);
 
   async function refreshInstallations() {
     const next = await api.listInstallations();
@@ -270,6 +299,10 @@ export default function App() {
   const customNodeRepos = detail?.customNodeRepos ?? [];
   const hasMatchingDetail =
     !!selectedInstallation && detail?.installation.id === selectedInstallation.id;
+  const existingInstallationProfile =
+    detail?.installation.launchProfile ??
+    selectedInstallation?.launchProfile ??
+    defaultLaunchProfile;
 
   return (
     <div className="app-shell">
@@ -293,6 +326,7 @@ export default function App() {
 
         <div className="card">
           <h3>Register installation</h3>
+          <div className="muted small">Re-registering the same ComfyUI root updates the existing entry instead of creating a duplicate.</div>
           <label>
             <span>Name</span>
             <input
@@ -361,7 +395,7 @@ export default function App() {
               })
             }
           >
-            Register
+            Register / Update by root
           </button>
           {actionError ? <div className="muted">{actionError}</div> : null}
         </div>
@@ -417,6 +451,133 @@ export default function App() {
                     Restart
                   </button>
                 </div>
+              </div>
+            </section>
+
+            <section className="card">
+              <div className="row between">
+                <div>
+                  <h3>Installation settings</h3>
+                  <div className="muted small">Root path is fixed for an existing installation. Delete and re-register if you need a different root.</div>
+                </div>
+                <div className="row gap">
+                  <button
+                    className="secondary"
+                    onClick={() =>
+                      setInstallationForm({
+                        name: detail?.installation.name ?? selectedInstallation.name,
+                        pythonExe: detail?.installation.pythonExe ?? selectedInstallation.pythonExe,
+                        launchCommand:
+                          detail?.installation.launchProfile?.command ??
+                          selectedInstallation.launchProfile?.command ??
+                          defaultLaunchProfile.command,
+                        launchArgs: (
+                          detail?.installation.launchProfile?.args ??
+                          selectedInstallation.launchProfile?.args ??
+                          defaultLaunchProfile.args
+                        ).join(" "),
+                        launchCwd:
+                          detail?.installation.launchProfile?.cwd ??
+                          selectedInstallation.launchProfile?.cwd ??
+                          selectedInstallation.comfyRoot
+                      })
+                    }
+                  >
+                    Reset
+                  </button>
+                  <button
+                    onClick={() =>
+                      void runAction(async () => {
+                        const payload: SaveInstallationInput = {
+                          installationId: selectedInstallation.id,
+                          name: installationForm.name,
+                          pythonExe: installationForm.pythonExe || null,
+                          launchProfile: {
+                            ...existingInstallationProfile,
+                            command: installationForm.launchCommand,
+                            args: parseLaunchArgs(installationForm.launchArgs),
+                            cwd: installationForm.launchCwd || selectedInstallation.comfyRoot
+                          }
+                        };
+                        await api.saveInstallation(payload);
+                        await refreshInstallations();
+                        await refreshDetail(selectedInstallation.id);
+                      })
+                    }
+                  >
+                    Save settings
+                  </button>
+                  <button
+                    className="secondary"
+                    onClick={() =>
+                      void runAction(async () => {
+                        if (!window.confirm(`Delete installation entry for ${selectedInstallation.name}? This only removes it from ComfyUI Patcher.`)) {
+                          return;
+                        }
+                        await api.deleteInstallation({ installationId: selectedInstallation.id });
+                        setCorePreview(null);
+                        setNodePreview(null);
+                        setCorePreviewError(null);
+                        setNodePreviewError(null);
+                        setDetail(null);
+                        const next = await api.listInstallations();
+                        setInstallations(next);
+                        setSelectedInstallationId(next[0]?.id ?? null);
+                      })
+                    }
+                  >
+                    Delete entry
+                  </button>
+                </div>
+              </div>
+              <div className="grid two">
+                <label>
+                  <span>Name</span>
+                  <input
+                    value={installationForm.name}
+                    onChange={(e) => setInstallationForm((v) => ({ ...v, name: e.target.value }))}
+                  />
+                </label>
+                <label>
+                  <span>ComfyUI root</span>
+                  <input value={selectedInstallation.comfyRoot} readOnly />
+                </label>
+                <label>
+                  <span>Python executable</span>
+                  <input
+                    value={installationForm.pythonExe}
+                    onChange={(e) =>
+                      setInstallationForm((v) => ({ ...v, pythonExe: e.target.value }))
+                    }
+                  />
+                </label>
+                <label>
+                  <span>Launch command</span>
+                  <input
+                    value={installationForm.launchCommand}
+                    onChange={(e) =>
+                      setInstallationForm((v) => ({ ...v, launchCommand: e.target.value }))
+                    }
+                  />
+                </label>
+                <label>
+                  <span>Launch args</span>
+                  <input
+                    value={installationForm.launchArgs}
+                    onChange={(e) =>
+                      setInstallationForm((v) => ({ ...v, launchArgs: e.target.value }))
+                    }
+                  />
+                </label>
+                <label>
+                  <span>Launch cwd</span>
+                  <input
+                    value={installationForm.launchCwd}
+                    onChange={(e) =>
+                      setInstallationForm((v) => ({ ...v, launchCwd: e.target.value }))
+                    }
+                  />
+                </label>
               </div>
             </section>
 

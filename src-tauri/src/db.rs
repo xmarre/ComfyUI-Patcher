@@ -4,7 +4,7 @@ use crate::models::{
     OperationStatus, RepoCheckpoint, RepoKind, TargetKind,
 };
 use crate::util::{new_id, now_rfc3339};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone)]
@@ -96,40 +96,148 @@ impl Database {
             );
             "#,
         )?;
+        let has_duplicate_roots = conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM installations
+                 GROUP BY comfy_root
+                 HAVING COUNT(*) > 1
+                 LIMIT 1
+             )",
+            [],
+            |row| row.get::<_, i64>(0),
+        )? != 0;
+        if !has_duplicate_roots {
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_installations_comfy_root
+                 ON installations (comfy_root)",
+                [],
+            )?;
+        }
         Ok(())
     }
 
-    pub fn create_installation(
+    pub fn update_installation(
         &self,
+        installation_id: &str,
         name: &str,
-        comfy_root: &str,
         python_exe: &str,
-        custom_nodes_dir: &str,
         launch_profile: Option<&LaunchProfile>,
         detected_env_kind: &str,
         is_git_repo: bool,
     ) -> AppResult<Installation> {
         let conn = self.connect()?;
-        let id = new_id();
-        let now = now_rfc3339();
         let launch_profile_json = launch_profile.map(serde_json::to_string).transpose()?;
         conn.execute(
-            "INSERT INTO installations
-            (id, name, comfy_root, python_exe, custom_nodes_dir, launch_profile_json, detected_env_kind, is_git_repo, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+            "UPDATE installations
+             SET name = ?2,
+                 python_exe = ?3,
+                 launch_profile_json = ?4,
+                 detected_env_kind = ?5,
+                 is_git_repo = ?6,
+                 updated_at = ?7
+             WHERE id = ?1",
             params![
-                id,
+                installation_id,
                 name,
-                comfy_root,
                 python_exe,
-                custom_nodes_dir,
                 launch_profile_json,
                 detected_env_kind,
                 is_git_repo as i64,
-                now
+                now_rfc3339()
             ],
         )?;
-        self.get_installation(&id)?
+        self.get_installation(installation_id)?
+            .ok_or_else(|| AppError::Db("failed to reload installation".to_string()))
+    }
+
+    pub fn upsert_installation_by_root(
+        &self,
+        name: &str,
+        comfy_root: &str,
+        python_exe: Option<&str>,
+        custom_nodes_dir: &str,
+        launch_profile: Option<&LaunchProfile>,
+        detected_env_kind: Option<&str>,
+        is_git_repo: bool,
+    ) -> AppResult<Installation> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = now_rfc3339();
+        let existing = {
+            let mut stmt = tx.prepare(
+                "SELECT id, name, comfy_root, python_exe, custom_nodes_dir, launch_profile_json, detected_env_kind, is_git_repo, created_at, updated_at
+                 FROM installations
+                 WHERE comfy_root = ?1
+                 ORDER BY updated_at DESC, created_at DESC
+                 LIMIT 1",
+            )?;
+            stmt.query_row(params![comfy_root], map_installation)
+                .optional()?
+        };
+
+        let installation_id = if let Some(existing) = existing {
+            let final_python_exe = python_exe.unwrap_or(existing.python_exe.as_str());
+            let final_launch_profile = launch_profile.or(existing.launch_profile.as_ref());
+            let final_launch_profile_json = final_launch_profile
+                .map(serde_json::to_string)
+                .transpose()?;
+            let final_detected_env_kind =
+                detected_env_kind.unwrap_or(existing.detected_env_kind.as_str());
+            tx.execute(
+                "UPDATE installations
+                 SET name = ?2,
+                     python_exe = ?3,
+                     launch_profile_json = ?4,
+                     detected_env_kind = ?5,
+                     is_git_repo = ?6,
+                 updated_at = ?7
+                 WHERE id = ?1",
+                params![
+                    existing.id,
+                    name,
+                    final_python_exe,
+                    final_launch_profile_json,
+                    final_detected_env_kind,
+                    is_git_repo as i64,
+                    now
+                ],
+            )?;
+            existing.id
+        } else {
+            let python_exe = python_exe.ok_or_else(|| {
+                AppError::InvalidInput(
+                    "python executable must be provided for new installations".to_string(),
+                )
+            })?;
+            let detected_env_kind = detected_env_kind.ok_or_else(|| {
+                AppError::InvalidInput(
+                    "detected environment kind must be provided for new installations".to_string(),
+                )
+            })?;
+            let launch_profile_json = launch_profile.map(serde_json::to_string).transpose()?;
+            let installation_id = new_id();
+            tx.execute(
+                "INSERT INTO installations
+                 (id, name, comfy_root, python_exe, custom_nodes_dir, launch_profile_json, detected_env_kind, is_git_repo, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+                params![
+                    installation_id,
+                    name,
+                    comfy_root,
+                    python_exe,
+                    custom_nodes_dir,
+                    launch_profile_json,
+                    detected_env_kind,
+                    is_git_repo as i64,
+                    now
+                ],
+            )?;
+            installation_id
+        };
+
+        tx.commit()?;
+        self.get_installation(&installation_id)?
             .ok_or_else(|| AppError::Db("failed to reload installation".to_string()))
     }
 
@@ -157,6 +265,47 @@ impl Database {
         stmt.query_row(params![id], map_installation)
             .optional()
             .map_err(Into::into)
+    }
+
+    pub fn get_installation_by_root(&self, comfy_root: &str) -> AppResult<Option<Installation>> {
+        let conn = self.connect()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, comfy_root, python_exe, custom_nodes_dir, launch_profile_json, detected_env_kind, is_git_repo, created_at, updated_at
+             FROM installations WHERE comfy_root = ?1
+             ORDER BY updated_at DESC, created_at DESC
+             LIMIT 1",
+        )?;
+        stmt.query_row(params![comfy_root], map_installation)
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn delete_installation(&self, installation_id: &str) -> AppResult<()> {
+        let conn = self.connect()?;
+        let tx = conn.unchecked_transaction()?;
+        let mut log_stmt = tx.prepare("SELECT log_file FROM operations WHERE installation_id = ?1")?;
+        let log_rows = log_stmt.query_map(params![installation_id], |row| row.get::<_, String>(0))?;
+        let mut log_files = Vec::new();
+        for row in log_rows {
+            log_files.push(row?);
+        }
+        drop(log_stmt);
+        tx.execute(
+            "DELETE FROM repo_checkpoints
+             WHERE operation_id IN (
+                 SELECT id FROM operations WHERE installation_id = ?1
+             )",
+            params![installation_id],
+        )?;
+        tx.execute("DELETE FROM operations WHERE installation_id = ?1", params![installation_id])?;
+        tx.execute("DELETE FROM managed_repos WHERE installation_id = ?1", params![installation_id])?;
+        tx.execute("DELETE FROM installations WHERE id = ?1", params![installation_id])?;
+        tx.commit()?;
+
+        for log_file in log_files {
+            let _ = std::fs::remove_file(log_file);
+        }
+        Ok(())
     }
 
     pub fn get_installation_detail(&self, installation_id: &str) -> AppResult<InstallationDetail> {
