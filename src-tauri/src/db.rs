@@ -249,6 +249,19 @@ impl Database {
             .map_err(Into::into)
     }
 
+    pub fn get_installation_by_root(&self, comfy_root: &str) -> AppResult<Option<Installation>> {
+        let conn = self.connect()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, comfy_root, python_exe, custom_nodes_dir, launch_profile_json, detected_env_kind, is_git_repo, created_at, updated_at
+             FROM installations WHERE comfy_root = ?1
+             ORDER BY updated_at DESC, created_at DESC
+             LIMIT 1",
+        )?;
+        stmt.query_row(params![comfy_root], map_installation)
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn delete_installation(&self, installation_id: &str) -> AppResult<()> {
         let conn = self.connect()?;
         let tx = conn.unchecked_transaction()?;
