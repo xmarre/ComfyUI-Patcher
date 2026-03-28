@@ -730,39 +730,57 @@ async fn register_installation_impl(
     let root = requested_root.canonicalize()?;
     let root_string = root.to_string_lossy().to_string();
     let existing_installation = state.db.get_installation_by_root(&root_string)?;
+    let installation_lock = match existing_installation.as_ref() {
+        Some(existing) => Some(state.installation_lock(&existing.id).await),
+        None => None,
+    };
+    let _installation_guard = match installation_lock.as_ref() {
+        Some(lock) => Some(lock.lock().await),
+        None => None,
+    };
+    let existing_installation = match existing_installation {
+        Some(existing) => state.db.get_installation(&existing.id)?,
+        None => None,
+    };
 
-    let python_input = input.python_exe.as_deref().or_else(|| {
-        existing_installation
-            .as_ref()
-            .map(|installation| installation.python_exe.as_str())
-    });
-    let python = normalize_python_executable(&root, python_input)?;
+    let python = if input.python_exe.is_some() || existing_installation.is_none() {
+        Some(normalize_python_executable(
+            &root,
+            input.python_exe.as_deref(),
+        )?)
+    } else {
+        None
+    };
 
     let custom_nodes_dir = root.join("custom_nodes");
     std::fs::create_dir_all(&custom_nodes_dir)?;
 
-    let launch_profile = normalize_launch_profile(
-        &root,
-        input.launch_profile.clone().or_else(|| {
-            existing_installation
-                .as_ref()
-                .and_then(|installation| installation.launch_profile.clone())
-        }),
-    )?;
-    let detected_env_kind = detect_env_kind(&python);
-    let python_string = python.to_string_lossy().to_string();
+    let launch_profile = if input.launch_profile.is_some() || existing_installation.is_none() {
+        normalize_launch_profile(&root, input.launch_profile.clone())?
+    } else {
+        None
+    };
+    let detected_env_kind = python.as_ref().map(|value| detect_env_kind(value));
+    let python_string = python
+        .as_ref()
+        .map(|value| value.to_string_lossy().to_string());
     let custom_nodes_dir_string = custom_nodes_dir.to_string_lossy().to_string();
     let is_root_git_repo = is_git_repo(&root).await;
 
     let installation = state.db.upsert_installation_by_root(
         &input.name,
         &root_string,
-        &python_string,
+        python_string.as_deref(),
         &custom_nodes_dir_string,
         launch_profile.as_ref(),
-        &detected_env_kind,
+        detected_env_kind.as_deref(),
         is_root_git_repo,
     )?;
+    let _repo_guards = if existing_installation.is_some() {
+        acquire_installation_repo_locks(state, &installation.id).await?
+    } else {
+        Vec::new()
+    };
     let (core_repo, discovered_custom_nodes) =
         discover_repositories_for_installation(state, &installation).await?;
     Ok(RegisterInstallationResult {
@@ -794,6 +812,8 @@ async fn save_installation(
     state: State<'_, AppState>,
     input: SaveInstallationInput,
 ) -> Result<Installation, String> {
+    let installation_lock = state.installation_lock(&input.installation_id).await;
+    let _installation_guard = installation_lock.lock().await;
     let existing = state
         .db
         .get_installation(&input.installation_id)
@@ -804,27 +824,31 @@ async fn save_installation(
         return Err("installation root no longer exists".to_string());
     }
     let root = root.canonicalize().map_err(|e| e.to_string())?;
-    let python_input = input
-        .python_exe
-        .as_deref()
-        .or(Some(existing.python_exe.as_str()));
-    let python = normalize_python_executable(&root, python_input)
-        .map_err(|e| e.to_string())?;
-    let launch_profile = normalize_launch_profile(
-        &root,
-        input
-            .launch_profile
-            .or_else(|| existing.launch_profile.clone()),
-    )
-        .map_err(|e| e.to_string())?;
+    let (python_string, detected_env_kind) = if let Some(python_input) = input.python_exe.as_deref()
+    {
+        let python = normalize_python_executable(&root, Some(python_input))
+            .map_err(|e| e.to_string())?;
+        (
+            python.to_string_lossy().to_string(),
+            detect_env_kind(&python),
+        )
+    } else {
+        (existing.python_exe.clone(), existing.detected_env_kind.clone())
+    };
+    let launch_profile = if input.launch_profile.is_some() {
+        normalize_launch_profile(&root, input.launch_profile)
+            .map_err(|e| e.to_string())?
+    } else {
+        existing.launch_profile.clone()
+    };
     let installation = state
         .db
         .update_installation(
             &existing.id,
             &input.name,
-            &python.to_string_lossy(),
+            &python_string,
             launch_profile.as_ref(),
-            &detect_env_kind(&python),
+            &detected_env_kind,
             is_git_repo(&root).await,
         )
         .map_err(|e| e.to_string())?;
