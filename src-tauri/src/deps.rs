@@ -23,17 +23,33 @@ struct PyprojectDocument {
     project: Option<PyprojectProject>,
 }
 
-fn pyproject_dependency_args(pyproject: &Path) -> Option<Vec<String>> {
-    let content = std::fs::read_to_string(pyproject).ok()?;
-    let document: PyprojectDocument = toml::from_str(&content).ok()?;
-    document.project?.dependencies.filter(|deps| !deps.is_empty())
+fn pyproject_dependency_args(pyproject: &Path) -> AppResult<Option<Vec<String>>> {
+    let content = std::fs::read_to_string(pyproject).map_err(|error| {
+        AppError::Dependency(format!(
+            "failed to read {}: {error}",
+            pyproject.display()
+        ))
+    })?;
+    let document: PyprojectDocument = toml::from_str(&content).map_err(|error| {
+        AppError::Dependency(format!(
+            "failed to parse {}: {error}",
+            pyproject.display()
+        ))
+    })?;
+    Ok(document
+        .project
+        .and_then(|project| project.dependencies)
+        .filter(|deps| !deps.is_empty()))
 }
 
-pub fn plan_dependency_sync(installation: &Installation, repo_path: &Path) -> DependencyPlan {
+pub fn plan_dependency_sync(
+    installation: &Installation,
+    repo_path: &Path,
+) -> AppResult<DependencyPlan> {
     let requirements = repo_path.join("requirements.txt");
     let pyproject = repo_path.join("pyproject.toml");
     if requirements.exists() {
-        DependencyPlan {
+        Ok(DependencyPlan {
             strategy: "requirements".to_string(),
             command: installation.python_exe.clone(),
             args: vec![
@@ -45,36 +61,37 @@ pub fn plan_dependency_sync(installation: &Installation, repo_path: &Path) -> De
             ],
             cwd: repo_path.to_string_lossy().to_string(),
             reason: "requirements.txt detected".to_string(),
-        }
+        })
     } else if pyproject.exists() {
-        if let Some(dependencies) = pyproject_dependency_args(&pyproject).filter(|deps| !deps.is_empty()) {
-            let mut args = vec!["-m".to_string(), "pip".to_string(), "install".to_string()];
-            args.extend(dependencies);
-            DependencyPlan {
-                strategy: "pyproject_dependencies".to_string(),
-                command: installation.python_exe.clone(),
-                args,
-                cwd: repo_path.to_string_lossy().to_string(),
-                reason: "pyproject.toml dependency metadata detected".to_string(),
+        match pyproject_dependency_args(&pyproject)? {
+            Some(dependencies) => {
+                let mut args = vec!["-m".to_string(), "pip".to_string(), "install".to_string()];
+                args.extend(dependencies);
+                Ok(DependencyPlan {
+                    strategy: "pyproject_dependencies".to_string(),
+                    command: installation.python_exe.clone(),
+                    args,
+                    cwd: repo_path.to_string_lossy().to_string(),
+                    reason: "pyproject.toml dependency metadata detected".to_string(),
+                })
             }
-        } else {
-            DependencyPlan {
+            None => Ok(DependencyPlan {
                 strategy: "none".to_string(),
                 command: String::new(),
                 args: Vec::new(),
                 cwd: repo_path.to_string_lossy().to_string(),
                 reason: "pyproject.toml detected, but no standalone dependency list was found"
                     .to_string(),
-            }
+            }),
         }
     } else {
-        DependencyPlan {
+        Ok(DependencyPlan {
             strategy: "none".to_string(),
             command: String::new(),
             args: Vec::new(),
             cwd: repo_path.to_string_lossy().to_string(),
             reason: "no supported dependency manifest found".to_string(),
-        }
+        })
     }
 }
 

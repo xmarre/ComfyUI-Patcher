@@ -578,7 +578,7 @@ async fn maybe_sync_dependencies(
     if !enabled {
         return Ok(());
     }
-    let plan = plan_dependency_sync(installation, repo_path);
+    let plan = plan_dependency_sync(installation, repo_path)?;
     log_operation(
         state,
         app,
