@@ -382,14 +382,30 @@ fn absolutize_path_against(root: &Path, value: &str) -> AppResult<PathBuf> {
     }
 }
 
+async fn acquire_installation_repo_locks(
+    state: &AppState,
+    installation_id: &str,
+) -> AppResult<Vec<tokio::sync::OwnedMutexGuard<()>>> {
+    let mut repos = state.db.list_repos_by_installation(installation_id)?;
+    repos.sort_by(|left, right| left.id.cmp(&right.id));
+
+    let mut guards = Vec::with_capacity(repos.len());
+    for repo in repos {
+        let repo_lock = state.repo_lock(&repo.id).await;
+        guards.push(repo_lock.lock_owned().await);
+    }
+
+    Ok(guards)
+}
+
 fn normalize_python_executable(root: &Path, python_exe: Option<&str>) -> AppResult<PathBuf> {
     match python_exe.map(str::trim) {
         Some(value) if !value.is_empty() => {
             let candidate = PathBuf::from(value);
             if candidate.is_absolute() {
-                if !candidate.exists() {
+                if !candidate.is_file() {
                     return Err(AppError::InvalidInput(format!(
-                        "python executable does not exist: {}",
+                        "python executable is not a file: {}",
                         candidate.to_string_lossy()
                     )));
                 }
@@ -397,9 +413,9 @@ fn normalize_python_executable(root: &Path, python_exe: Option<&str>) -> AppResu
             }
             if candidate.components().count() > 1 || value.contains(std::path::MAIN_SEPARATOR) {
                 let resolved = absolutize_path_against(root, value)?;
-                if !resolved.exists() {
+                if !resolved.is_file() {
                     return Err(AppError::InvalidInput(format!(
-                        "python executable does not exist: {}",
+                        "python executable is not a file: {}",
                         resolved.to_string_lossy()
                     )));
                 }
@@ -417,18 +433,14 @@ fn normalize_launch_profile(
 ) -> AppResult<Option<LaunchProfile>> {
     launch_profile
         .map(|mut profile| {
-            if let Some(cwd) = profile
-                .cwd
-                .as_deref()
-                .map(str::trim)
-                .filter(|cwd| !cwd.is_empty())
-            {
-                profile.cwd = Some(
+            profile.cwd = match profile.cwd.as_deref().map(str::trim) {
+                None | Some("") => None,
+                Some(cwd) => Some(
                     absolutize_path_against(root, cwd)?
                         .to_string_lossy()
                         .to_string(),
-                );
-            }
+                ),
+            };
             Ok::<LaunchProfile, AppError>(profile)
         })
         .transpose()
@@ -795,7 +807,14 @@ async fn delete_installation(
         .ok_or_else(|| "installation not found".to_string())?;
     let lock = state.installation_lock(&installation.id).await;
     let _guard = lock.lock().await;
-    let _ = state.processes.stop(&installation.id).await;
+    let _repo_guards = acquire_installation_repo_locks(&state, &installation.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    state
+        .processes
+        .stop(&installation.id)
+        .await
+        .map_err(|e| e.to_string())?;
     state
         .db
         .delete_installation(&installation.id)
