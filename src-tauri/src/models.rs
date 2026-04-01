@@ -25,6 +25,8 @@ pub enum OperationKind {
     UpdateRepo,
     UpdateAll,
     RollbackRepo,
+    StartInstallation,
+    StopInstallation,
     RestartInstallation,
 }
 
@@ -61,6 +63,7 @@ pub struct LaunchProfile {
     pub mode: String,
     pub command: String,
     pub args: Vec<String>,
+    pub extra_args: Option<Vec<String>>,
     pub cwd: Option<String>,
     pub env: Option<std::collections::HashMap<String, String>>,
     pub stop_command: Option<String>,
@@ -110,6 +113,7 @@ pub struct InstallationDetail {
     pub installation: Installation,
     pub core_repo: Option<ManagedRepo>,
     pub custom_node_repos: Vec<ManagedRepo>,
+    pub is_running: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -283,6 +287,18 @@ pub struct RollbackRepoInput {
     pub restore_stash: bool,
     pub sync_dependencies: bool,
     pub restart_after_success: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartInstallationInput {
+    pub installation_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StopInstallationInput {
+    pub installation_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

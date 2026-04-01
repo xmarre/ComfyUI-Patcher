@@ -17,6 +17,8 @@ import type {
   ResolveTargetInput,
   ResolvedTarget,
   RestartInstallationInput,
+  StartInstallationInput,
+  StopInstallationInput,
   RollbackRepoInput,
   UpdateAllInput,
   UpdateRepoInput,
@@ -47,6 +49,10 @@ export const api = {
     invoke<OperationStart>("update_all", { input }),
   rollbackRepo: (input: RollbackRepoInput) =>
     invoke<OperationStart>("rollback_repo", { input }),
+  startInstallation: (input: StartInstallationInput) =>
+    invoke<OperationStart>("start_installation", { input }),
+  stopInstallation: (input: StopInstallationInput) =>
+    invoke<OperationStart>("stop_installation", { input }),
   restartInstallation: (input: RestartInstallationInput) =>
     invoke<OperationStart>("restart_installation", { input }),
   listOperations: (installationId?: string | null) =>
