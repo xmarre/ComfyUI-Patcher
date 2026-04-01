@@ -460,12 +460,27 @@ fn normalize_launch_profile(
         .transpose()
 }
 
+fn is_default_register_launcher(root: &Path, launch_profile: &LaunchProfile) -> bool {
+    launch_profile.command == "python"
+        && launch_profile.args.as_slice() == ["main.py"]
+        && match launch_profile.cwd.as_deref() {
+            None => true,
+            Some(cwd) => Path::new(cwd) == root,
+        }
+}
+
 fn merge_launch_profile_overrides(
+    root: &Path,
     existing: Option<&LaunchProfile>,
     launch_profile: Option<LaunchProfile>,
 ) -> Option<LaunchProfile> {
     match (existing, launch_profile) {
         (Some(existing), Some(mut launch_profile)) => {
+            if is_default_register_launcher(root, &launch_profile) {
+                launch_profile.command = existing.command.clone();
+                launch_profile.args = existing.args.clone();
+                launch_profile.cwd = existing.cwd.clone();
+            }
             launch_profile.mode = existing.mode.clone();
             if launch_profile
                 .env
@@ -804,6 +819,7 @@ async fn register_installation_impl(
     let launch_profile = if input.launch_profile.is_some() || existing_installation.is_none() {
         let launch_profile = normalize_launch_profile(&root, input.launch_profile.clone())?;
         merge_launch_profile_overrides(
+            &root,
             existing_installation
                 .as_ref()
                 .and_then(|installation| installation.launch_profile.as_ref()),
@@ -929,11 +945,16 @@ async fn delete_installation(
         .await
         .map_err(|e| e.to_string())?;
     if let Some(profile) = installation.launch_profile.as_ref() {
-        state
-            .processes
-            .stop(&installation.id, profile)
-            .await
-            .map_err(|e| e.to_string())?;
+        match state.processes.stop(&installation.id, profile).await {
+            Ok(_) => {}
+            Err(_) => {
+                state
+                    .processes
+                    .force_stop(&installation.id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+        }
     } else {
         state
             .processes
@@ -2215,10 +2236,16 @@ async fn run_stop_installation(
             "info",
             "stopping installation",
         );
-        if !state.processes.stop(&installation.id, profile).await? {
-            return Err(AppError::Process(
-                "process not running for installation".to_string(),
-            ));
+        let stopped = state.processes.stop(&installation.id, profile).await?;
+        if !stopped {
+            log_operation(
+                &state,
+                &app,
+                &operation_id,
+                "stop",
+                "info",
+                "installation was already stopped",
+            );
         }
         state
             .db

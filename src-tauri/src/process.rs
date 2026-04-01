@@ -7,11 +7,15 @@ use std::process::Output;
 use std::sync::Arc;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
+use tokio::time::{timeout, Duration};
 
 #[derive(Clone)]
 pub struct ProcessRegistry {
     inner: Arc<Mutex<HashMap<String, Child>>>,
 }
+
+const STOP_HELPER_TIMEOUT: Duration = Duration::from_secs(15);
+const STOP_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
 
 impl ProcessRegistry {
     fn child_has_exited(child: &mut Child) -> AppResult<bool> {
@@ -68,6 +72,52 @@ impl ProcessRegistry {
             format!("exit status {}", output.status)
         };
         AppError::Process(format!("command '{}' failed: {}", program, detail))
+    }
+
+    async fn reinsert_child(&self, installation_id: &str, child: Child) {
+        let mut map = self.inner.lock().await;
+        map.insert(installation_id.to_string(), child);
+    }
+
+    async fn wait_for_child_exit(
+        &self,
+        installation_id: &str,
+        mut child: Child,
+        context: &str,
+    ) -> AppResult<bool> {
+        match timeout(STOP_WAIT_TIMEOUT, child.wait()).await {
+            Ok(Ok(_status)) => Ok(true),
+            Ok(Err(err)) => {
+                self.reinsert_child(installation_id, child).await;
+                Err(AppError::Process(format!(
+                    "failed waiting for process to exit after {}: {}",
+                    context, err
+                )))
+            }
+            Err(_) => {
+                self.reinsert_child(installation_id, child).await;
+                Err(AppError::Process(format!(
+                    "timed out waiting for process to exit after {}",
+                    context
+                )))
+            }
+        }
+    }
+
+    async fn kill_and_wait_child(
+        &self,
+        installation_id: &str,
+        mut child: Child,
+        context: &str,
+    ) -> AppResult<bool> {
+        if let Err(err) = child.start_kill() {
+            self.reinsert_child(installation_id, child).await;
+            return Err(AppError::Process(format!(
+                "failed to kill process after {}: {}",
+                context, err
+            )));
+        }
+        self.wait_for_child_exit(installation_id, child, context).await
     }
 
     fn spawn_profile_command(
@@ -134,20 +184,13 @@ impl ProcessRegistry {
     }
 
     fn restart_command(profile: &LaunchProfile) -> (&str, Vec<String>) {
-        if let Some(command) = profile.restart_command.as_deref() {
-            (
-                command,
-                Self::joined_args(
-                    profile.restart_args.as_deref().unwrap_or(&[]),
-                    profile.extra_args.as_deref(),
-                ),
-            )
-        } else {
-            (
-                &profile.command,
-                Self::joined_args(&profile.args, profile.extra_args.as_deref()),
-            )
-        }
+        (
+            profile.restart_command.as_deref().unwrap_or(&profile.command),
+            Self::joined_args(
+                profile.restart_args.as_deref().unwrap_or(&profile.args),
+                profile.extra_args.as_deref(),
+            ),
+        )
     }
 
     pub async fn is_running(&self, installation_id: &str) -> AppResult<bool> {
@@ -194,19 +237,12 @@ impl ProcessRegistry {
             let _ = map.remove(installation_id);
             return Ok(false);
         }
-        let mut child = map
+        let child = map
             .remove(installation_id)
             .ok_or_else(|| AppError::Process("process registry lost managed child".to_string()))?;
         drop(map);
-        child
-            .start_kill()
-            .map_err(|e| AppError::Process(e.to_string()))?;
-        if let Err(err) = child.wait().await {
-            let mut map = self.inner.lock().await;
-            map.insert(installation_id.to_string(), child);
-            return Err(AppError::Process(err.to_string()));
-        }
-        Ok(true)
+        self.kill_and_wait_child(installation_id, child, "kill request")
+            .await
     }
 
     pub async fn stop(&self, installation_id: &str, profile: &LaunchProfile) -> AppResult<bool> {
@@ -224,29 +260,40 @@ impl ProcessRegistry {
             .ok_or_else(|| AppError::Process("process registry lost managed child".to_string()))?;
         drop(map);
         if let Some(stop_command) = profile.stop_command.as_deref() {
-            if let Err(err) = Self::run_profile_command(
-                stop_command,
-                profile.stop_args.as_deref().unwrap_or(&[]),
-                profile.cwd.as_deref(),
-                profile.env.as_ref(),
+            match timeout(
+                STOP_HELPER_TIMEOUT,
+                Self::run_profile_command(
+                    stop_command,
+                    profile.stop_args.as_deref().unwrap_or(&[]),
+                    profile.cwd.as_deref(),
+                    profile.env.as_ref(),
+                ),
             )
             .await
             {
-                let mut map = self.inner.lock().await;
-                map.insert(installation_id.to_string(), child);
-                return Err(err);
+                Ok(Ok(())) => {
+                    if Self::child_has_exited(&mut child)? {
+                        return Ok(true);
+                    }
+                    return self
+                        .kill_and_wait_child(installation_id, child, "successful stop command")
+                        .await;
+                }
+                Ok(Err(err)) => {
+                    self.reinsert_child(installation_id, child).await;
+                    return Err(err);
+                }
+                Err(_) => {
+                    return self
+                        .kill_and_wait_child(installation_id, child, "stop command timeout")
+                        .await;
+                }
             }
         } else {
-            child
-                .start_kill()
-                .map_err(|e| AppError::Process(e.to_string()))?;
+            return self
+                .kill_and_wait_child(installation_id, child, "kill request")
+                .await;
         }
-        if let Err(err) = child.wait().await {
-            let mut map = self.inner.lock().await;
-            map.insert(installation_id.to_string(), child);
-            return Err(AppError::Process(err.to_string()));
-        }
-        Ok(true)
     }
 
     pub async fn restart(&self, installation_id: &str, profile: &LaunchProfile) -> AppResult<()> {
