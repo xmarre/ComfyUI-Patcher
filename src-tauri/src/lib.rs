@@ -460,6 +460,56 @@ fn normalize_launch_profile(
         .transpose()
 }
 
+fn is_default_register_launcher(root: &Path, launch_profile: &LaunchProfile) -> bool {
+    launch_profile.command == "python"
+        && launch_profile.args.as_slice() == ["main.py"]
+        && match launch_profile.cwd.as_deref() {
+            None => true,
+            Some(cwd) => Path::new(cwd) == root,
+        }
+}
+
+fn merge_launch_profile_overrides(
+    root: &Path,
+    existing: Option<&LaunchProfile>,
+    launch_profile: Option<LaunchProfile>,
+) -> Option<LaunchProfile> {
+    match (existing, launch_profile) {
+        (Some(existing), Some(mut launch_profile)) => {
+            if is_default_register_launcher(root, &launch_profile) {
+                launch_profile.command = existing.command.clone();
+                launch_profile.args = existing.args.clone();
+                launch_profile.cwd = existing.cwd.clone();
+            }
+            launch_profile.mode = existing.mode.clone();
+            if launch_profile
+                .env
+                .as_ref()
+                .is_none_or(|values| values.is_empty())
+            {
+                launch_profile.env = existing.env.clone();
+            }
+            if launch_profile.extra_args.is_none() {
+                launch_profile.extra_args = existing.extra_args.clone();
+            }
+            if launch_profile.stop_command.is_none() {
+                launch_profile.stop_command = existing.stop_command.clone();
+            }
+            if launch_profile.stop_args.is_none() {
+                launch_profile.stop_args = existing.stop_args.clone();
+            }
+            if launch_profile.restart_command.is_none() {
+                launch_profile.restart_command = existing.restart_command.clone();
+            }
+            if launch_profile.restart_args.is_none() {
+                launch_profile.restart_args = existing.restart_args.clone();
+            }
+            Some(launch_profile)
+        }
+        (_, launch_profile) => launch_profile,
+    }
+}
+
 async fn create_checkpoint_if_needed(
     state: &AppState,
     repo: &ManagedRepo,
@@ -637,6 +687,17 @@ async fn maybe_restart_installation(
     if !enabled {
         return Ok(());
     }
+    if !state.processes.is_running(&installation.id).await? {
+        log_operation(
+            state,
+            app,
+            operation_id,
+            "restart",
+            "info",
+            "restart skipped because installation is not running",
+        );
+        return Ok(());
+    }
     let profile = installation
         .launch_profile
         .as_ref()
@@ -756,7 +817,14 @@ async fn register_installation_impl(
     std::fs::create_dir_all(&custom_nodes_dir)?;
 
     let launch_profile = if input.launch_profile.is_some() || existing_installation.is_none() {
-        normalize_launch_profile(&root, input.launch_profile.clone())?
+        let launch_profile = normalize_launch_profile(&root, input.launch_profile.clone())?;
+        merge_launch_profile_overrides(
+            &root,
+            existing_installation
+                .as_ref()
+                .and_then(|installation| installation.launch_profile.as_ref()),
+            launch_profile,
+        )
     } else {
         None
     };
@@ -797,14 +865,20 @@ fn list_installations(state: State<'_, AppState>) -> Result<Vec<Installation>, S
 }
 
 #[tauri::command]
-fn get_installation_detail(
+async fn get_installation_detail(
     state: State<'_, AppState>,
     installation_id: String,
 ) -> Result<InstallationDetail, String> {
-    state
+    let mut detail = state
         .db
         .get_installation_detail(&installation_id)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    detail.is_running = state
+        .processes
+        .is_running(&installation_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(detail)
 }
 
 #[tauri::command]
@@ -870,11 +944,24 @@ async fn delete_installation(
     let _repo_guards = acquire_installation_repo_locks(&state, &installation.id)
         .await
         .map_err(|e| e.to_string())?;
-    state
-        .processes
-        .stop(&installation.id)
-        .await
-        .map_err(|e| e.to_string())?;
+    if let Some(profile) = installation.launch_profile.as_ref() {
+        match state.processes.stop(&installation.id, profile).await {
+            Ok(_) => {}
+            Err(_) => {
+                state
+                    .processes
+                    .force_stop(&installation.id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+    } else {
+        state
+            .processes
+            .force_stop(&installation.id)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
     state
         .db
         .delete_installation(&installation.id)
@@ -2011,6 +2098,190 @@ async fn run_rollback_repo(
 }
 
 #[tauri::command]
+async fn start_installation(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: StartInstallationInput,
+) -> Result<OperationStart, String> {
+    let installation = state
+        .db
+        .get_installation(&input.installation_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "installation not found".to_string())?;
+    let op = state
+        .db
+        .create_operation(
+            &installation.id,
+            None,
+            OperationKind::StartInstallation,
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+    let op_id = op.id.clone();
+    let state_handle = app.state::<AppState>().inner().clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = run_start_installation(app, state_handle, installation, op_id).await;
+    });
+    Ok(OperationStart {
+        operation_id: op.id,
+    })
+}
+
+async fn run_start_installation(
+    app: AppHandle,
+    state: AppState,
+    installation: Installation,
+    operation_id: String,
+) -> AppResult<()> {
+    state.db.set_operation_running(&operation_id)?;
+    let lock = state.installation_lock(&installation.id).await;
+    let _guard = lock.lock().await;
+    let result = async {
+        let profile = installation
+            .launch_profile
+            .as_ref()
+            .ok_or_else(|| AppError::Process("installation has no launch profile".to_string()))?;
+        log_operation(
+            &state,
+            &app,
+            &operation_id,
+            "start",
+            "info",
+            "starting installation",
+        );
+        state.processes.start(&installation.id, profile).await?;
+        state
+            .db
+            .finish_operation(&operation_id, OperationStatus::Succeeded, None, None)?;
+        log_operation(
+            &state,
+            &app,
+            &operation_id,
+            "done",
+            "info",
+            "start completed",
+        );
+        Ok::<(), AppError>(())
+    }
+    .await;
+    if let Err(err) = result {
+        state.db.finish_operation(
+            &operation_id,
+            OperationStatus::Failed,
+            Some(&err.to_string()),
+            None,
+        )?;
+        log_operation(
+            &state,
+            &app,
+            &operation_id,
+            "error",
+            "error",
+            err.to_string(),
+        );
+        return Err(err);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn stop_installation(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: StopInstallationInput,
+) -> Result<OperationStart, String> {
+    let installation = state
+        .db
+        .get_installation(&input.installation_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "installation not found".to_string())?;
+    let op = state
+        .db
+        .create_operation(
+            &installation.id,
+            None,
+            OperationKind::StopInstallation,
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+    let op_id = op.id.clone();
+    let state_handle = app.state::<AppState>().inner().clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = run_stop_installation(app, state_handle, installation, op_id).await;
+    });
+    Ok(OperationStart {
+        operation_id: op.id,
+    })
+}
+
+async fn run_stop_installation(
+    app: AppHandle,
+    state: AppState,
+    installation: Installation,
+    operation_id: String,
+) -> AppResult<()> {
+    state.db.set_operation_running(&operation_id)?;
+    let lock = state.installation_lock(&installation.id).await;
+    let _guard = lock.lock().await;
+    let result = async {
+        let profile = installation
+            .launch_profile
+            .as_ref()
+            .ok_or_else(|| AppError::Process("installation has no launch profile".to_string()))?;
+        log_operation(
+            &state,
+            &app,
+            &operation_id,
+            "stop",
+            "info",
+            "stopping installation",
+        );
+        let stopped = state.processes.stop(&installation.id, profile).await?;
+        if !stopped {
+            log_operation(
+                &state,
+                &app,
+                &operation_id,
+                "stop",
+                "info",
+                "installation was already stopped",
+            );
+        }
+        state
+            .db
+            .finish_operation(&operation_id, OperationStatus::Succeeded, None, None)?;
+        log_operation(
+            &state,
+            &app,
+            &operation_id,
+            "done",
+            "info",
+            "stop completed",
+        );
+        Ok::<(), AppError>(())
+    }
+    .await;
+    if let Err(err) = result {
+        state.db.finish_operation(
+            &operation_id,
+            OperationStatus::Failed,
+            Some(&err.to_string()),
+            None,
+        )?;
+        log_operation(
+            &state,
+            &app,
+            &operation_id,
+            "error",
+            "error",
+            err.to_string(),
+        );
+        return Err(err);
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn restart_installation(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -2148,6 +2419,8 @@ pub fn run() {
             update_repo,
             update_all,
             rollback_repo,
+            start_installation,
+            stop_installation,
             restart_installation,
             list_operations,
             get_operation_log,

@@ -9,12 +9,15 @@ export type OperationKind =
   | "update_repo"
   | "update_all"
   | "rollback_repo"
+  | "start_installation"
+  | "stop_installation"
   | "restart_installation";
 
 export type LaunchProfile = {
   mode: "managed_child" | "custom_command";
   command: string;
   args: string[];
+  extraArgs?: string[] | null;
   cwd?: string | null;
   env?: Record<string, string>;
   stopCommand?: string | null;
@@ -58,6 +61,7 @@ export type InstallationDetail = {
   installation: Installation;
   coreRepo: ManagedRepo | null;
   customNodeRepos: ManagedRepo[];
+  isRunning: boolean;
 };
 
 
@@ -144,6 +148,8 @@ export type OperationEvent = {
     | "dependency_plan"
     | "dependency_sync"
     | "state_refresh"
+    | "start"
+    | "stop"
     | "restart"
     | "done"
     | "error";
@@ -216,6 +222,14 @@ export type RollbackRepoInput = {
   restoreStash: boolean;
   syncDependencies: boolean;
   restartAfterSuccess: boolean;
+};
+
+export type StartInstallationInput = {
+  installationId: string;
+};
+
+export type StopInstallationInput = {
+  installationId: string;
 };
 
 export type RestartInstallationInput = {

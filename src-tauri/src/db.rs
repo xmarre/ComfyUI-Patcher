@@ -325,6 +325,7 @@ impl Database {
             installation,
             core_repo,
             custom_node_repos,
+            is_running: false,
         })
     }
 

@@ -81,6 +81,11 @@ function parseLaunchArgs(value: string): string[] {
   return args;
 }
 
+function parseOptionalArgs(value: string): string[] | null {
+  const args = parseLaunchArgs(value);
+  return args.length ? args : null;
+}
+
 function toErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
@@ -112,7 +117,12 @@ export default function App() {
     pythonExe: "",
     launchCommand: defaultLaunchProfile.command,
     launchArgs: defaultLaunchProfile.args.join(" "),
-    launchCwd: ""
+    extraArgs: "",
+    launchCwd: "",
+    stopCommand: "",
+    stopArgs: "",
+    restartCommand: "",
+    restartArgs: ""
   });
 
   const detailRequestSeq = useRef(0);
@@ -147,7 +157,12 @@ export default function App() {
         pythonExe: "",
         launchCommand: defaultLaunchProfile.command,
         launchArgs: defaultLaunchProfile.args.join(" "),
-        launchCwd: ""
+        extraArgs: "",
+        launchCwd: "",
+        stopCommand: "",
+        stopArgs: "",
+        restartCommand: "",
+        restartArgs: ""
       });
       return;
     }
@@ -156,7 +171,12 @@ export default function App() {
       pythonExe: installation.pythonExe,
       launchCommand: installation.launchProfile?.command ?? defaultLaunchProfile.command,
       launchArgs: (installation.launchProfile?.args ?? defaultLaunchProfile.args).join(" "),
-      launchCwd: installation.launchProfile?.cwd ?? installation.comfyRoot
+      extraArgs: (installation.launchProfile?.extraArgs ?? []).join(" "),
+      launchCwd: installation.launchProfile?.cwd ?? installation.comfyRoot,
+      stopCommand: installation.launchProfile?.stopCommand ?? "",
+      stopArgs: (installation.launchProfile?.stopArgs ?? []).join(" "),
+      restartCommand: installation.launchProfile?.restartCommand ?? "",
+      restartArgs: (installation.launchProfile?.restartArgs ?? []).join(" ")
     });
   }, [detail, selectedInstallation]);
 
@@ -442,6 +462,29 @@ export default function App() {
                   </button>
                   <button
                     className="secondary"
+                    disabled={detail?.isRunning ?? false}
+                    onClick={() =>
+                      void runAction(async () => {
+                        await api.startInstallation({ installationId: selectedInstallation.id });
+                      })
+                    }
+                  >
+                    Start
+                  </button>
+                  <button
+                    className="secondary"
+                    disabled={!(detail?.isRunning ?? false)}
+                    onClick={() =>
+                      void runAction(async () => {
+                        await api.stopInstallation({ installationId: selectedInstallation.id });
+                      })
+                    }
+                  >
+                    Stop
+                  </button>
+                  <button
+                    className="secondary"
+                    disabled={!(detail?.isRunning ?? false)}
                     onClick={() =>
                       void runAction(async () => {
                         await api.restartInstallation({ installationId: selectedInstallation.id });
@@ -476,10 +519,33 @@ export default function App() {
                           selectedInstallation.launchProfile?.args ??
                           defaultLaunchProfile.args
                         ).join(" "),
+                        extraArgs: (
+                          detail?.installation.launchProfile?.extraArgs ??
+                          selectedInstallation.launchProfile?.extraArgs ??
+                          []
+                        ).join(" "),
                         launchCwd:
                           detail?.installation.launchProfile?.cwd ??
                           selectedInstallation.launchProfile?.cwd ??
-                          selectedInstallation.comfyRoot
+                          selectedInstallation.comfyRoot,
+                        stopCommand:
+                          detail?.installation.launchProfile?.stopCommand ??
+                          selectedInstallation.launchProfile?.stopCommand ??
+                          "",
+                        stopArgs: (
+                          detail?.installation.launchProfile?.stopArgs ??
+                          selectedInstallation.launchProfile?.stopArgs ??
+                          []
+                        ).join(" "),
+                        restartCommand:
+                          detail?.installation.launchProfile?.restartCommand ??
+                          selectedInstallation.launchProfile?.restartCommand ??
+                          "",
+                        restartArgs: (
+                          detail?.installation.launchProfile?.restartArgs ??
+                          selectedInstallation.launchProfile?.restartArgs ??
+                          []
+                        ).join(" ")
                       })
                     }
                   >
@@ -496,7 +562,16 @@ export default function App() {
                             ...existingInstallationProfile,
                             command: installationForm.launchCommand,
                             args: parseLaunchArgs(installationForm.launchArgs),
-                            cwd: installationForm.launchCwd || selectedInstallation.comfyRoot
+                            extraArgs: parseOptionalArgs(installationForm.extraArgs),
+                            cwd: installationForm.launchCwd || selectedInstallation.comfyRoot,
+                            stopCommand: installationForm.stopCommand.trim() || null,
+                            stopArgs: installationForm.stopCommand.trim()
+                              ? parseOptionalArgs(installationForm.stopArgs)
+                              : null,
+                            restartCommand: installationForm.restartCommand.trim() || null,
+                            restartArgs: installationForm.restartCommand.trim()
+                              ? parseOptionalArgs(installationForm.restartArgs)
+                              : null
                           }
                         };
                         await api.saveInstallation(payload);
@@ -570,6 +645,15 @@ export default function App() {
                   />
                 </label>
                 <label>
+                  <span>Appended args</span>
+                  <input
+                    value={installationForm.extraArgs}
+                    onChange={(e) =>
+                      setInstallationForm((v) => ({ ...v, extraArgs: e.target.value }))
+                    }
+                  />
+                </label>
+                <label>
                   <span>Launch cwd</span>
                   <input
                     value={installationForm.launchCwd}
@@ -578,7 +662,44 @@ export default function App() {
                     }
                   />
                 </label>
+                <label>
+                  <span>Stop command</span>
+                  <input
+                    value={installationForm.stopCommand}
+                    onChange={(e) =>
+                      setInstallationForm((v) => ({ ...v, stopCommand: e.target.value }))
+                    }
+                  />
+                </label>
+                <label>
+                  <span>Stop args</span>
+                  <input
+                    value={installationForm.stopArgs}
+                    onChange={(e) =>
+                      setInstallationForm((v) => ({ ...v, stopArgs: e.target.value }))
+                    }
+                  />
+                </label>
+                <label>
+                  <span>Restart command</span>
+                  <input
+                    value={installationForm.restartCommand}
+                    onChange={(e) =>
+                      setInstallationForm((v) => ({ ...v, restartCommand: e.target.value }))
+                    }
+                  />
+                </label>
+                <label>
+                  <span>Restart args</span>
+                  <input
+                    value={installationForm.restartArgs}
+                    onChange={(e) =>
+                      setInstallationForm((v) => ({ ...v, restartArgs: e.target.value }))
+                    }
+                  />
+                </label>
               </div>
+              <div className="muted small">Appended args are passed after the base launch or restart args. If your launch command calls a shell script, that script should use <code>exec</code> for the final ComfyUI process, and forward <code>&quot;$@&quot;</code> if you want appended args to reach ComfyUI.</div>
             </section>
 
             <section className="card">
