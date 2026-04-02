@@ -1,7 +1,12 @@
 use regex::RegexBuilder;
 use std::path::Path;
-use std::process::Output;
+use std::process::{Output, Stdio};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use tokio::process::{Child, Command};
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WslPath {
@@ -88,6 +93,17 @@ fn build_command(program: &str, args: &[String], cwd: Option<&Path>) -> std::io:
     Ok(command)
 }
 
+pub(crate) fn configure_spawn_command(command: &mut Command) {
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::null());
+    command.stderr(Stdio::null());
+    command.kill_on_drop(true);
+    #[cfg(windows)]
+    {
+        command.as_std_mut().creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
 pub async fn output_command(
     program: &str,
     args: &[String],
@@ -97,7 +113,9 @@ pub async fn output_command(
 }
 
 pub fn spawn_command(program: &str, args: &[String], cwd: Option<&Path>) -> std::io::Result<Child> {
-    build_command(program, args, cwd)?.spawn()
+    let mut command = build_command(program, args, cwd)?;
+    configure_spawn_command(&mut command);
+    command.spawn()
 }
 
 #[cfg(test)]

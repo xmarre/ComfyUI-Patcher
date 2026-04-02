@@ -2400,7 +2400,7 @@ fn list_checkpoints(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .setup(|app| {
             let state = AppState::new(app.handle())?;
             app.manage(state);
@@ -2426,6 +2426,15 @@ pub fn run() {
             get_operation_log,
             list_checkpoints,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running ComfyUI Patcher");
+        .build(tauri::generate_context!())
+        .expect("error while building ComfyUI Patcher");
+
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::ExitRequested { .. } = event {
+            let state = app_handle.state::<AppState>().inner().clone();
+            tauri::async_runtime::block_on(async move {
+                state.processes.shutdown_all().await;
+            });
+        }
+    });
 }
