@@ -98,6 +98,7 @@ pub(crate) fn configure_managed_spawn_command(command: &mut Command) {
 }
 
 pub(crate) fn configure_hidden_output_command(command: &mut Command) {
+    command.kill_on_drop(true);
     command.stdin(Stdio::null());
     #[cfg(windows)]
     {
