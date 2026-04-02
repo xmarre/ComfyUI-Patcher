@@ -2147,6 +2147,8 @@ async fn install_or_patch_frontend(
     state: State<'_, AppState>,
     input: PatchFrontendInput,
 ) -> Result<OperationStart, String> {
+    let installation_lock = state.installation_lock(&input.installation_id).await;
+    let _installation_guard = installation_lock.lock().await;
     let mut installation = state
         .db
         .get_installation(&input.installation_id)
