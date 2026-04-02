@@ -1,5 +1,8 @@
 use crate::errors::{AppError, AppResult};
-use crate::execution::{configure_spawn_command, output_command, parse_wsl_unc_path, spawn_command};
+use crate::execution::{
+    configure_hidden_output_command, configure_managed_spawn_command, output_command,
+    parse_wsl_unc_path, spawn_command,
+};
 use crate::models::LaunchProfile;
 use std::collections::HashMap;
 use std::path::Path;
@@ -137,7 +140,7 @@ impl ProcessRegistry {
             if let Some(env) = env {
                 command.envs(env);
             }
-            configure_spawn_command(&mut command);
+            configure_managed_spawn_command(&mut command);
             return command
                 .spawn()
                 .map_err(|e| AppError::Process(e.to_string()));
@@ -162,6 +165,7 @@ impl ProcessRegistry {
             if let Some(env) = env {
                 command.envs(env);
             }
+            configure_hidden_output_command(&mut command);
             command
                 .output()
                 .await
