@@ -1185,7 +1185,10 @@ fn apply_managed_frontend_root(profile: &mut LaunchProfile, dist_path: &str) {
     }
 }
 
-fn effective_launch_profile(installation: &Installation) -> AppResult<LaunchProfile> {
+fn effective_launch_profile(
+    installation: &Installation,
+    require_managed_frontend_dist: bool,
+) -> AppResult<LaunchProfile> {
     let mut profile = installation
         .launch_profile
         .clone()
@@ -1195,10 +1198,13 @@ fn effective_launch_profile(installation: &Installation) -> AppResult<LaunchProf
     };
     let dist_path = PathBuf::from(&frontend_settings.dist_path);
     if !dist_path.exists() {
-        return Err(AppError::Process(format!(
-            "managed frontend dist does not exist: {}",
-            dist_path.to_string_lossy()
-        )));
+        if require_managed_frontend_dist {
+            return Err(AppError::Process(format!(
+                "managed frontend dist does not exist: {}",
+                dist_path.to_string_lossy()
+            )));
+        }
+        return Ok(profile);
     }
     apply_managed_frontend_root(&mut profile, &frontend_settings.dist_path);
     Ok(profile)
@@ -1514,7 +1520,12 @@ async fn maybe_restart_installation(
         );
         return Ok(());
     }
-    let profile = effective_launch_profile(installation)?;
+    let require_managed_frontend_dist = state
+        .db
+        .get_installation_detail(&installation.id)?
+        .frontend_repo
+        .is_some();
+    let profile = effective_launch_profile(installation, require_managed_frontend_dist)?;
     log_operation(
         state,
         app,
@@ -1723,12 +1734,12 @@ async fn save_installation(
         existing.launch_profile.clone()
     };
     let custom_nodes_dir = PathBuf::from(&existing.custom_nodes_dir);
-    let frontend_settings = normalize_frontend_settings(
-        &root,
-        &custom_nodes_dir,
-        input.frontend_settings,
-    )
-    .map_err(|e| e.to_string())?;
+    let frontend_settings = if input.frontend_settings.is_some() {
+        normalize_frontend_settings(&root, &custom_nodes_dir, input.frontend_settings)
+            .map_err(|e| e.to_string())?
+    } else {
+        existing.frontend_settings.clone()
+    };
     let installation = state
         .db
         .update_installation(
@@ -2245,7 +2256,10 @@ async fn run_install_or_patch_frontend(
                         ));
                     }
                     ExistingRepoConflictStrategy::Replace => {
-                        let backup_root = PathBuf::from(&installation.comfy_root)
+                        let backup_root = target_path
+                            .parent()
+                            .map(Path::to_path_buf)
+                            .unwrap_or_else(|| PathBuf::from(&installation.comfy_root))
                             .join(".comfyui-patcher-backups")
                             .join("frontend");
                         std::fs::create_dir_all(&backup_root)?;
@@ -3902,7 +3916,12 @@ async fn run_start_installation(
     let lock = state.installation_lock(&installation.id).await;
     let _guard = lock.lock().await;
     let result = async {
-        let profile = effective_launch_profile(&installation)?;
+        let require_managed_frontend_dist = state
+            .db
+            .get_installation_detail(&installation.id)?
+            .frontend_repo
+            .is_some();
+        let profile = effective_launch_profile(&installation, require_managed_frontend_dist)?;
         log_operation(
             &state,
             &app,
@@ -4083,7 +4102,12 @@ async fn run_restart_installation(
     let lock = state.installation_lock(&installation.id).await;
     let _guard = lock.lock().await;
     let result = async {
-        let profile = effective_launch_profile(&installation)?;
+        let require_managed_frontend_dist = state
+            .db
+            .get_installation_detail(&installation.id)?
+            .frontend_repo
+            .is_some();
+        let profile = effective_launch_profile(&installation, require_managed_frontend_dist)?;
         log_operation(
             &state,
             &app,
