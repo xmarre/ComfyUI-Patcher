@@ -21,7 +21,7 @@ use crate::models::*;
 use crate::state::AppState;
 use crate::util::{detect_env_kind, infer_python};
 use std::collections::{hash_map::Entry, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 const STACK_TRACKING_VERSION: u32 = 1;
@@ -1109,6 +1109,31 @@ fn absolutize_path_against(root: &Path, value: &str) -> AppResult<PathBuf> {
     }
 }
 
+fn normalize_path_components(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    let mut has_root = false;
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => {
+                normalized.push(component.as_os_str());
+                has_root = true;
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if normalized.file_name().is_some() {
+                    normalized.pop();
+                } else if !has_root {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            Component::Normal(_) => normalized.push(component.as_os_str()),
+        }
+    }
+
+    normalized
+}
+
 
 fn normalize_frontend_settings(
     root: &Path,
@@ -1124,13 +1149,15 @@ fn normalize_frontend_settings(
         return Ok(None);
     }
 
-    let repo_root = absolutize_path_against(root, repo_root_input)?;
-    if repo_root == root {
+    let repo_root = normalize_path_components(&absolutize_path_against(root, repo_root_input)?);
+    let normalized_root = normalize_path_components(root);
+    let normalized_custom_nodes_dir = normalize_path_components(custom_nodes_dir);
+    if repo_root == normalized_root {
         return Err(AppError::InvalidInput(
             "managed frontend repo root cannot be the ComfyUI root".to_string(),
         ));
     }
-    if repo_root.starts_with(custom_nodes_dir) {
+    if repo_root.starts_with(&normalized_custom_nodes_dir) {
         return Err(AppError::InvalidInput(
             "managed frontend repo root cannot be inside custom_nodes".to_string(),
         ));
@@ -1140,7 +1167,7 @@ fn normalize_frontend_settings(
     let dist_path = if dist_input.is_empty() {
         repo_root.join("dist")
     } else {
-        absolutize_path_against(&repo_root, dist_input)?
+        normalize_path_components(&absolutize_path_against(&repo_root, dist_input)?)
     };
 
     Ok(Some(FrontendSettings {
@@ -1535,6 +1562,24 @@ async fn maybe_restart_installation(
         "restarting installation",
     );
     state.processes.restart(&installation.id, &profile).await?;
+    Ok(())
+}
+
+fn validate_frontend_restart_preconditions(
+    frontend_settings: &FrontendSettings,
+    is_running: bool,
+    sync_dependencies: bool,
+    restart_after_success: bool,
+) -> AppResult<()> {
+    if restart_after_success
+        && is_running
+        && !sync_dependencies
+        && !Path::new(&frontend_settings.dist_path).exists()
+    {
+        return Err(AppError::Conflict(
+            "restart_after_success on a running installation requires an existing managed frontend dist; enable dependency sync or build the frontend first".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -2155,6 +2200,12 @@ async fn run_install_or_patch_frontend(
         })?;
         let target_path = PathBuf::from(&frontend_settings.repo_root);
         let detail = state.db.get_installation_detail(&installation.id)?;
+        validate_frontend_restart_preconditions(
+            frontend_settings,
+            state.processes.is_running(&installation.id).await?,
+            input.sync_dependencies,
+            input.restart_after_success,
+        )?;
         let mut replaced_backup_path: Option<PathBuf> = None;
         let mut rollback_repo_id: Option<String> = None;
         let mut rollback_checkpoint_id: Option<String> = None;
@@ -2168,85 +2219,95 @@ async fn run_install_or_patch_frontend(
                 &input.input,
             )
             .await?;
+            let resolved_remote = canonical_target_remote(&resolved)?;
 
             if target_path.exists() {
+                let mut existing_git_repo = false;
                 if is_git_repo(&target_path).await {
-                    log_operation(
-                        &state,
-                        &app,
-                        &operation_id,
-                        "preflight",
-                        "info",
-                        format!(
-                            "reusing managed frontend directory {}",
-                            target_path.to_string_lossy()
-                        ),
-                    );
                     let status = inspect_repo(&target_path).await?;
-                    ensure_remote_matches(status.origin_url.as_deref(), &resolved)?;
-                    let repo = state.db.upsert_repo(
-                        &installation.id,
-                        RepoKind::Frontend,
-                        "ComfyUI Frontend",
-                        &target_path.to_string_lossy(),
-                        status.origin_url.as_deref(),
-                        status.head_sha.as_deref(),
-                        status.branch.as_deref(),
-                        status.is_detached,
-                        status.is_dirty,
-                    )?;
-                    let repo_lock = state.repo_lock(&repo.id).await;
-                    let _guard = repo_lock.lock().await;
-                    let tracked_state = build_requested_tracked_state_for_input(
-                        &state,
-                        &installation,
-                        &repo,
-                        &input.input,
-                        false,
-                    )
-                    .await?;
-                    let checkpoint = apply_repo_tracking_state(
-                        &state,
-                        &app,
-                        &operation_id,
-                        &installation,
-                        &repo,
-                        &tracked_state,
-                        &input.dirty_repo_strategy,
-                        input.sync_dependencies,
-                        input.set_tracked_target,
-                    )
-                    .await?;
-                    maybe_restart_installation(
-                        &state,
-                        &app,
-                        &operation_id,
-                        &installation,
-                        input.restart_after_success,
-                    )
-                    .await?;
-                    state.db.finish_operation(
-                        &operation_id,
-                        OperationStatus::Succeeded,
-                        None,
-                        Some(&checkpoint.id),
-                    )?;
-                    log_operation(
-                        &state,
-                        &app,
-                        &operation_id,
-                        "done",
-                        "info",
-                        "frontend patch completed",
-                    );
-                    return Ok::<(), AppError>(());
+                    let existing_remote = status.origin_url.as_deref().and_then(canonicalize_remote);
+                    if existing_remote.as_deref() == Some(resolved_remote.as_str()) {
+                        log_operation(
+                            &state,
+                            &app,
+                            &operation_id,
+                            "preflight",
+                            "info",
+                            format!(
+                                "reusing managed frontend directory {}",
+                                target_path.to_string_lossy()
+                            ),
+                        );
+                        let repo = state.db.upsert_repo(
+                            &installation.id,
+                            RepoKind::Frontend,
+                            "ComfyUI Frontend",
+                            &target_path.to_string_lossy(),
+                            status.origin_url.as_deref(),
+                            status.head_sha.as_deref(),
+                            status.branch.as_deref(),
+                            status.is_detached,
+                            status.is_dirty,
+                        )?;
+                        let repo_lock = state.repo_lock(&repo.id).await;
+                        let _guard = repo_lock.lock().await;
+                        let tracked_state = build_requested_tracked_state_for_input(
+                            &state,
+                            &installation,
+                            &repo,
+                            &input.input,
+                            false,
+                        )
+                        .await?;
+                        let checkpoint = apply_repo_tracking_state(
+                            &state,
+                            &app,
+                            &operation_id,
+                            &installation,
+                            &repo,
+                            &tracked_state,
+                            &input.dirty_repo_strategy,
+                            input.sync_dependencies,
+                            input.set_tracked_target,
+                        )
+                        .await?;
+                        maybe_restart_installation(
+                            &state,
+                            &app,
+                            &operation_id,
+                            &installation,
+                            input.restart_after_success,
+                        )
+                        .await?;
+                        state.db.finish_operation(
+                            &operation_id,
+                            OperationStatus::Succeeded,
+                            None,
+                            Some(&checkpoint.id),
+                        )?;
+                        log_operation(
+                            &state,
+                            &app,
+                            &operation_id,
+                            "done",
+                            "info",
+                            "frontend patch completed",
+                        );
+                        return Ok::<(), AppError>(());
+                    }
+                    existing_git_repo = true;
                 }
 
                 match input.existing_repo_conflict_strategy {
                     ExistingRepoConflictStrategy::Abort => {
                         return Err(AppError::Conflict(
-                            "managed frontend repo root already exists and is not a git repository"
-                                .to_string(),
+                            if existing_git_repo {
+                                "managed frontend repo root already contains a different git repository"
+                                    .to_string()
+                            } else {
+                                "managed frontend repo root already exists and is not a git repository"
+                                    .to_string()
+                            },
                         ));
                     }
                     ExistingRepoConflictStrategy::InstallWithSuffix => {
