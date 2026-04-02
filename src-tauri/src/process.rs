@@ -1,5 +1,5 @@
 use crate::errors::{AppError, AppResult};
-use crate::execution::{output_command, parse_wsl_unc_path, spawn_command};
+use crate::execution::{configure_spawn_command, output_command, parse_wsl_unc_path, spawn_command};
 use crate::models::LaunchProfile;
 use std::collections::HashMap;
 use std::path::Path;
@@ -137,6 +137,7 @@ impl ProcessRegistry {
             if let Some(env) = env {
                 command.envs(env);
             }
+            configure_spawn_command(&mut command);
             return command
                 .spawn()
                 .map_err(|e| AppError::Process(e.to_string()));
@@ -204,6 +205,17 @@ impl ProcessRegistry {
             return Ok(false);
         }
         Ok(true)
+    }
+
+    pub async fn shutdown_all(&self) {
+        let children = {
+            let mut map = self.inner.lock().await;
+            map.drain().collect::<Vec<_>>()
+        };
+        for (_installation_id, mut child) in children {
+            let _ = child.start_kill();
+            let _ = timeout(STOP_WAIT_TIMEOUT, child.wait()).await;
+        }
     }
 
     pub async fn start(&self, installation_id: &str, profile: &LaunchProfile) -> AppResult<()> {
