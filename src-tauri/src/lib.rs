@@ -2405,6 +2405,26 @@ fn list_checkpoints(
         .map_err(|e| e.to_string())
 }
 
+async fn shutdown_managed_installations(state: AppState) {
+    let installations = match state.db.list_installations() {
+        Ok(installations) => installations,
+        Err(_) => {
+            state.processes.shutdown_all().await;
+            return;
+        }
+    };
+
+    for installation in installations {
+        if let Some(profile) = installation.launch_profile.as_ref() {
+            if state.processes.stop(&installation.id, profile).await.is_err() {
+                let _ = state.processes.force_stop(&installation.id).await;
+            }
+        } else {
+            let _ = state.processes.force_stop(&installation.id).await;
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -2440,7 +2460,7 @@ pub fn run() {
         if let tauri::RunEvent::ExitRequested { .. } = event {
             let state = app_handle.state::<AppState>().inner().clone();
             tauri::async_runtime::block_on(async move {
-                state.processes.shutdown_all().await;
+                shutdown_managed_installations(state).await;
             });
         }
     });
