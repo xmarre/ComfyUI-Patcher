@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum RepoKind {
     Core,
+    Frontend,
     CustomNode,
 }
 
@@ -20,6 +21,8 @@ pub enum OperationStatus {
 #[serde(rename_all = "snake_case")]
 pub enum OperationKind {
     PatchCore,
+    InstallFrontend,
+    PatchFrontend,
     InstallCustomNode,
     PatchCustomNode,
     ManageRepoStack,
@@ -123,6 +126,29 @@ pub enum OverlayMoveDirection {
     Down,
 }
 
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FrontendPackageManager {
+    Auto,
+    Npm,
+    Pnpm,
+    Yarn,
+}
+
+fn default_frontend_package_manager() -> FrontendPackageManager {
+    FrontendPackageManager::Auto
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrontendSettings {
+    pub repo_root: String,
+    pub dist_path: String,
+    #[serde(default = "default_frontend_package_manager")]
+    pub package_manager: FrontendPackageManager,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LaunchProfile {
@@ -147,6 +173,7 @@ pub struct Installation {
     pub python_exe: String,
     pub custom_nodes_dir: String,
     pub launch_profile: Option<LaunchProfile>,
+    pub frontend_settings: Option<FrontendSettings>,
     pub detected_env_kind: String,
     pub is_git_repo: bool,
     pub created_at: String,
@@ -180,6 +207,7 @@ pub struct ManagedRepo {
 pub struct InstallationDetail {
     pub installation: Installation,
     pub core_repo: Option<ManagedRepo>,
+    pub frontend_repo: Option<ManagedRepo>,
     pub custom_node_repos: Vec<ManagedRepo>,
     pub is_running: bool,
 }
@@ -244,6 +272,7 @@ pub struct RegisterInstallationInput {
     pub comfy_root: String,
     pub python_exe: Option<String>,
     pub launch_profile: Option<LaunchProfile>,
+    pub frontend_settings: Option<FrontendSettings>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -251,6 +280,7 @@ pub struct RegisterInstallationInput {
 pub struct RegisterInstallationResult {
     pub installation: Installation,
     pub core_repo: Option<ManagedRepo>,
+    pub frontend_repo: Option<ManagedRepo>,
     pub discovered_custom_nodes: Vec<ManagedRepo>,
     pub warnings: Vec<String>,
 }
@@ -262,6 +292,7 @@ pub struct SaveInstallationInput {
     pub name: String,
     pub python_exe: Option<String>,
     pub launch_profile: Option<LaunchProfile>,
+    pub frontend_settings: Option<FrontendSettings>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -315,6 +346,18 @@ pub struct ManagerRegistryCustomNode {
 pub struct PatchCoreInput {
     pub installation_id: String,
     pub input: String,
+    pub dirty_repo_strategy: DirtyRepoStrategy,
+    pub set_tracked_target: bool,
+    pub sync_dependencies: bool,
+    pub restart_after_success: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatchFrontendInput {
+    pub installation_id: String,
+    pub input: String,
+    pub existing_repo_conflict_strategy: ExistingRepoConflictStrategy,
     pub dirty_repo_strategy: DirtyRepoStrategy,
     pub set_tracked_target: bool,
     pub sync_dependencies: bool,

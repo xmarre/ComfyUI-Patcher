@@ -10,6 +10,7 @@ import type {
   OperationRecord,
   OperationStart,
   PatchCoreInput,
+  PatchFrontendInput,
   PatchCustomNodeInput,
   RemoveRepoOverlayInput,
   DeleteInstallationInput,
@@ -46,6 +47,8 @@ export const api = {
     invoke<ResolvedTarget>("resolve_target", { input }),
   patchCore: (input: PatchCoreInput) =>
     invoke<OperationStart>("patch_core", { input }),
+  installOrPatchFrontend: (input: PatchFrontendInput) =>
+    invoke<OperationStart>("install_or_patch_frontend", { input }),
   installOrPatchCustomNode: (input: PatchCustomNodeInput) =>
     invoke<OperationStart>("install_or_patch_custom_node", { input }),
   setRepoBaseTarget: (input: SetRepoBaseTargetInput) =>
