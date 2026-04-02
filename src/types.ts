@@ -6,12 +6,16 @@ export type OperationKind =
   | "patch_core"
   | "install_custom_node"
   | "patch_custom_node"
+  | "manage_repo_stack"
   | "update_repo"
   | "update_all"
   | "rollback_repo"
   | "start_installation"
   | "stop_installation"
   | "restart_installation";
+
+export type OverlayApplyStatus = "pending" | "applied" | "disabled" | "conflict" | "error";
+export type OverlayMoveDirection = "up" | "down";
 
 export type LaunchProfile = {
   mode: "managed_child" | "custom_command";
@@ -53,6 +57,7 @@ export type ManagedRepo = {
   trackedTargetKind: "branch" | "tag" | "commit" | "pr" | "default_branch" | "named_ref" | null;
   trackedTargetInput: string | null;
   trackedTargetResolvedSha: string | null;
+  trackedState: TrackedRepoState | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -100,10 +105,44 @@ export type ResolvedTarget = {
   resolvedSha: string | null;
   prNumber: number | null;
   prBaseRepoUrl: string | null;
+  prBaseRef: string | null;
   prHeadRepoUrl: string | null;
   prHeadRef: string | null;
   summaryLabel: string;
   suggestedLocalDirName: string;
+};
+
+export type TrackedBaseTarget = {
+  sourceInput: string;
+  targetKind: "branch" | "tag" | "commit" | "pr" | "default_branch" | "named_ref";
+  canonicalRepoUrl: string;
+  checkoutRef: string;
+  resolvedSha: string | null;
+  summaryLabel: string;
+};
+
+export type TrackedPrOverlay = {
+  id: string;
+  sourceInput: string;
+  canonicalRepoUrl: string;
+  prNumber: number;
+  prBaseRepoUrl: string;
+  prBaseRef: string;
+  prHeadRepoUrl: string | null;
+  prHeadRef: string | null;
+  resolvedSha: string | null;
+  summaryLabel: string;
+  position: number;
+  enabled: boolean;
+  lastApplyStatus: OverlayApplyStatus | null;
+  lastError: string | null;
+};
+
+export type TrackedRepoState = {
+  version: number;
+  base: TrackedBaseTarget;
+  overlays: TrackedPrOverlay[];
+  materializedBranch: string | null;
 };
 
 export type OperationRecord = {
@@ -206,6 +245,44 @@ export type PatchCustomNodeInput = {
 
 export type UpdateRepoInput = {
   repoId: string;
+  dirtyRepoStrategy: DirtyRepoStrategy;
+  syncDependencies: boolean;
+};
+
+export type SetRepoBaseTargetInput = {
+  repoId: string;
+  input: string;
+  clearOverlays: boolean;
+  dirtyRepoStrategy: DirtyRepoStrategy;
+  syncDependencies: boolean;
+};
+
+export type AddRepoOverlayInput = {
+  repoId: string;
+  input: string;
+  dirtyRepoStrategy: DirtyRepoStrategy;
+  syncDependencies: boolean;
+};
+
+export type SetRepoOverlayEnabledInput = {
+  repoId: string;
+  overlayId: string;
+  enabled: boolean;
+  dirtyRepoStrategy: DirtyRepoStrategy;
+  syncDependencies: boolean;
+};
+
+export type RemoveRepoOverlayInput = {
+  repoId: string;
+  overlayId: string;
+  dirtyRepoStrategy: DirtyRepoStrategy;
+  syncDependencies: boolean;
+};
+
+export type MoveRepoOverlayInput = {
+  repoId: string;
+  overlayId: string;
+  direction: OverlayMoveDirection;
   dirtyRepoStrategy: DirtyRepoStrategy;
   syncDependencies: boolean;
 };

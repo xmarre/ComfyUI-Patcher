@@ -714,6 +714,7 @@ export default function App() {
 
             <section className="card">
               <h3>Patch core ComfyUI</h3>
+              <div className="muted small">PR URLs append to the tracked overlay stack for this checkout. If the repo already has overlays, change the base from the repo card instead of this Apply button.</div>
               <div className="row gap">
                 <input
                   className="grow"
@@ -768,6 +769,68 @@ export default function App() {
               {coreRepo ? (
                 <RepoCard
                   repo={coreRepo}
+                  onUpdate={() =>
+                    void runAction(async () => {
+                      await api.updateRepo({
+                        repoId: coreRepo.id,
+                        dirtyRepoStrategy: "abort",
+                        syncDependencies: true
+                      });
+                    })
+                  }
+                  onSetBaseTarget={(input, clearOverlays) =>
+                    void runAction(async () => {
+                      await api.setRepoBaseTarget({
+                        repoId: coreRepo.id,
+                        input,
+                        clearOverlays,
+                        dirtyRepoStrategy: "abort",
+                        syncDependencies: true
+                      });
+                    })
+                  }
+                  onAddOverlay={(input) =>
+                    void runAction(async () => {
+                      await api.addRepoOverlay({
+                        repoId: coreRepo.id,
+                        input,
+                        dirtyRepoStrategy: "abort",
+                        syncDependencies: true
+                      });
+                    })
+                  }
+                  onSetOverlayEnabled={(overlayId, enabled) =>
+                    void runAction(async () => {
+                      await api.setRepoOverlayEnabled({
+                        repoId: coreRepo.id,
+                        overlayId,
+                        enabled,
+                        dirtyRepoStrategy: "abort",
+                        syncDependencies: true
+                      });
+                    })
+                  }
+                  onRemoveOverlay={(overlayId) =>
+                    void runAction(async () => {
+                      await api.removeRepoOverlay({
+                        repoId: coreRepo.id,
+                        overlayId,
+                        dirtyRepoStrategy: "abort",
+                        syncDependencies: true
+                      });
+                    })
+                  }
+                  onMoveOverlay={(overlayId, direction) =>
+                    void runAction(async () => {
+                      await api.moveRepoOverlay({
+                        repoId: coreRepo.id,
+                        overlayId,
+                        direction,
+                        dirtyRepoStrategy: "abort",
+                        syncDependencies: true
+                      });
+                    })
+                  }
                   onRollback={() =>
                     void runAction(async () => {
                       await api.rollbackRepo({
@@ -786,6 +849,7 @@ export default function App() {
 
             <section className="card">
               <h3>Install or patch custom node manually</h3>
+              <div className="muted small">On an existing managed repo, PR URLs append to that repo's overlay stack. If the repo already has overlays, change the base from the repo card instead of this Install / Patch button.</div>
               <div className="row gap">
                 <input
                   className="grow"
@@ -877,6 +941,59 @@ export default function App() {
                       <RepoCard
                         key={repo.id}
                         repo={repo}
+                        onSetBaseTarget={(input, clearOverlays) =>
+                          void runAction(async () => {
+                            await api.setRepoBaseTarget({
+                              repoId: repo.id,
+                              input,
+                              clearOverlays,
+                              dirtyRepoStrategy: "abort",
+                              syncDependencies: true
+                            });
+                          })
+                        }
+                        onAddOverlay={(input) =>
+                          void runAction(async () => {
+                            await api.addRepoOverlay({
+                              repoId: repo.id,
+                              input,
+                              dirtyRepoStrategy: "abort",
+                              syncDependencies: true
+                            });
+                          })
+                        }
+                        onSetOverlayEnabled={(overlayId, enabled) =>
+                          void runAction(async () => {
+                            await api.setRepoOverlayEnabled({
+                              repoId: repo.id,
+                              overlayId,
+                              enabled,
+                              dirtyRepoStrategy: "abort",
+                              syncDependencies: true
+                            });
+                          })
+                        }
+                        onRemoveOverlay={(overlayId) =>
+                          void runAction(async () => {
+                            await api.removeRepoOverlay({
+                              repoId: repo.id,
+                              overlayId,
+                              dirtyRepoStrategy: "abort",
+                              syncDependencies: true
+                            });
+                          })
+                        }
+                        onMoveOverlay={(overlayId, direction) =>
+                          void runAction(async () => {
+                            await api.moveRepoOverlay({
+                              repoId: repo.id,
+                              overlayId,
+                              direction,
+                              dirtyRepoStrategy: "abort",
+                              syncDependencies: true
+                            });
+                          })
+                        }
                         onUpdate={() =>
                           void runAction(async () => {
                             await api.updateRepo({

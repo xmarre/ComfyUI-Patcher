@@ -163,6 +163,16 @@ pub async fn fetch_refspec(path: &Path, remote: &str, refspec: &str) -> AppResul
     Ok(())
 }
 
+pub async fn merge_no_ff(path: &Path, target: &str, message: &str) -> AppResult<()> {
+    run_git(path, &["merge", "--no-ff", "--no-edit", "-m", message, target]).await?;
+    Ok(())
+}
+
+pub async fn merge_abort(path: &Path) -> AppResult<()> {
+    run_git(path, &["merge", "--abort"]).await?;
+    Ok(())
+}
+
 pub async fn switch_branch(path: &Path, branch: &str, start_point: Option<&str>) -> AppResult<()> {
     match start_point {
         Some(start) => run_git(path, &["switch", "-C", branch, start]).await?,
