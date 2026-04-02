@@ -1,7 +1,8 @@
 use crate::errors::{AppError, AppResult};
 use crate::models::{
-    Installation, InstallationDetail, LaunchProfile, ManagedRepo, OperationKind, OperationRecord,
-    OperationStatus, RepoCheckpoint, RepoKind, TargetKind, TrackedBaseTarget, TrackedRepoState,
+    FrontendSettings, Installation, InstallationDetail, LaunchProfile, ManagedRepo, OperationKind,
+    OperationRecord, OperationStatus, RepoCheckpoint, RepoKind, TargetKind, TrackedBaseTarget,
+    TrackedRepoState,
 };
 use crate::util::{new_id, now_rfc3339};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -41,6 +42,7 @@ impl Database {
                 python_exe TEXT NOT NULL,
                 custom_nodes_dir TEXT NOT NULL,
                 launch_profile_json TEXT,
+                frontend_settings_json TEXT,
                 detected_env_kind TEXT NOT NULL,
                 is_git_repo INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
@@ -96,6 +98,7 @@ impl Database {
             );
             "#,
         )?;
+        ensure_installation_frontend_settings_column(&conn)?;
         ensure_repo_checkpoint_tracking_columns(&conn)?;
         let has_duplicate_roots = conn.query_row(
             "SELECT EXISTS(
@@ -124,25 +127,29 @@ impl Database {
         name: &str,
         python_exe: &str,
         launch_profile: Option<&LaunchProfile>,
+        frontend_settings: Option<&FrontendSettings>,
         detected_env_kind: &str,
         is_git_repo: bool,
     ) -> AppResult<Installation> {
         let conn = self.connect()?;
         let launch_profile_json = launch_profile.map(serde_json::to_string).transpose()?;
+        let frontend_settings_json = frontend_settings.map(serde_json::to_string).transpose()?;
         conn.execute(
             "UPDATE installations
              SET name = ?2,
                  python_exe = ?3,
                  launch_profile_json = ?4,
-                 detected_env_kind = ?5,
-                 is_git_repo = ?6,
-                 updated_at = ?7
+                 frontend_settings_json = ?5,
+                 detected_env_kind = ?6,
+                 is_git_repo = ?7,
+                 updated_at = ?8
              WHERE id = ?1",
             params![
                 installation_id,
                 name,
                 python_exe,
                 launch_profile_json,
+                frontend_settings_json,
                 detected_env_kind,
                 is_git_repo as i64,
                 now_rfc3339()
@@ -159,6 +166,7 @@ impl Database {
         python_exe: Option<&str>,
         custom_nodes_dir: &str,
         launch_profile: Option<&LaunchProfile>,
+        frontend_settings: Option<&FrontendSettings>,
         detected_env_kind: Option<&str>,
         is_git_repo: bool,
     ) -> AppResult<Installation> {
@@ -167,7 +175,7 @@ impl Database {
         let now = now_rfc3339();
         let existing = {
             let mut stmt = tx.prepare(
-                "SELECT id, name, comfy_root, python_exe, custom_nodes_dir, launch_profile_json, detected_env_kind, is_git_repo, created_at, updated_at
+                "SELECT id, name, comfy_root, python_exe, custom_nodes_dir, launch_profile_json, frontend_settings_json, detected_env_kind, is_git_repo, created_at, updated_at
                  FROM installations
                  WHERE comfy_root = ?1
                  ORDER BY updated_at DESC, created_at DESC
@@ -183,6 +191,10 @@ impl Database {
             let final_launch_profile_json = final_launch_profile
                 .map(serde_json::to_string)
                 .transpose()?;
+            let final_frontend_settings = frontend_settings.or(existing.frontend_settings.as_ref());
+            let final_frontend_settings_json = final_frontend_settings
+                .map(serde_json::to_string)
+                .transpose()?;
             let final_detected_env_kind =
                 detected_env_kind.unwrap_or(existing.detected_env_kind.as_str());
             tx.execute(
@@ -190,15 +202,17 @@ impl Database {
                  SET name = ?2,
                      python_exe = ?3,
                      launch_profile_json = ?4,
-                     detected_env_kind = ?5,
-                     is_git_repo = ?6,
-                 updated_at = ?7
+                     frontend_settings_json = ?5,
+                     detected_env_kind = ?6,
+                     is_git_repo = ?7,
+                     updated_at = ?8
                  WHERE id = ?1",
                 params![
                     existing.id,
                     name,
                     final_python_exe,
                     final_launch_profile_json,
+                    final_frontend_settings_json,
                     final_detected_env_kind,
                     is_git_repo as i64,
                     now
@@ -217,11 +231,12 @@ impl Database {
                 )
             })?;
             let launch_profile_json = launch_profile.map(serde_json::to_string).transpose()?;
+            let frontend_settings_json = frontend_settings.map(serde_json::to_string).transpose()?;
             let installation_id = new_id();
             tx.execute(
                 "INSERT INTO installations
-                 (id, name, comfy_root, python_exe, custom_nodes_dir, launch_profile_json, detected_env_kind, is_git_repo, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+                 (id, name, comfy_root, python_exe, custom_nodes_dir, launch_profile_json, frontend_settings_json, detected_env_kind, is_git_repo, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
                 params![
                     installation_id,
                     name,
@@ -229,6 +244,7 @@ impl Database {
                     python_exe,
                     custom_nodes_dir,
                     launch_profile_json,
+                    frontend_settings_json,
                     detected_env_kind,
                     is_git_repo as i64,
                     now
@@ -245,7 +261,7 @@ impl Database {
     pub fn list_installations(&self) -> AppResult<Vec<Installation>> {
         let conn = self.connect()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, comfy_root, python_exe, custom_nodes_dir, launch_profile_json, detected_env_kind, is_git_repo, created_at, updated_at
+            "SELECT id, name, comfy_root, python_exe, custom_nodes_dir, launch_profile_json, frontend_settings_json, detected_env_kind, is_git_repo, created_at, updated_at
              FROM installations
              ORDER BY name ASC",
         )?;
@@ -260,7 +276,7 @@ impl Database {
     pub fn get_installation(&self, id: &str) -> AppResult<Option<Installation>> {
         let conn = self.connect()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, comfy_root, python_exe, custom_nodes_dir, launch_profile_json, detected_env_kind, is_git_repo, created_at, updated_at
+            "SELECT id, name, comfy_root, python_exe, custom_nodes_dir, launch_profile_json, frontend_settings_json, detected_env_kind, is_git_repo, created_at, updated_at
              FROM installations WHERE id = ?1",
         )?;
         stmt.query_row(params![id], map_installation)
@@ -271,7 +287,7 @@ impl Database {
     pub fn get_installation_by_root(&self, comfy_root: &str) -> AppResult<Option<Installation>> {
         let conn = self.connect()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, comfy_root, python_exe, custom_nodes_dir, launch_profile_json, detected_env_kind, is_git_repo, created_at, updated_at
+            "SELECT id, name, comfy_root, python_exe, custom_nodes_dir, launch_profile_json, frontend_settings_json, detected_env_kind, is_git_repo, created_at, updated_at
              FROM installations WHERE comfy_root = ?1
              ORDER BY updated_at DESC, created_at DESC
              LIMIT 1",
@@ -315,16 +331,19 @@ impl Database {
             .ok_or_else(|| AppError::NotFound("installation not found".to_string()))?;
         let repos = self.list_repos_by_installation(installation_id)?;
         let mut core_repo = None;
+        let mut frontend_repo = None;
         let mut custom_node_repos = Vec::new();
         for repo in repos {
             match repo.kind {
                 RepoKind::Core => core_repo = Some(repo),
+                RepoKind::Frontend => frontend_repo = Some(repo),
                 RepoKind::CustomNode => custom_node_repos.push(repo),
             }
         }
         Ok(InstallationDetail {
             installation,
             core_repo,
+            frontend_repo,
             custom_node_repos,
             is_running: false,
         })
@@ -738,6 +757,7 @@ impl Database {
 
 fn map_installation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Installation> {
     let launch_json: Option<String> = row.get(5)?;
+    let frontend_settings_json: Option<String> = row.get(6)?;
     Ok(Installation {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -748,10 +768,14 @@ fn map_installation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Installation> {
             .map(|json| serde_json::from_str(&json))
             .transpose()
             .map_err(to_sql_err)?,
-        detected_env_kind: row.get(6)?,
-        is_git_repo: row.get::<_, i64>(7)? != 0,
-        created_at: row.get(8)?,
-        updated_at: row.get(9)?,
+        frontend_settings: frontend_settings_json
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(to_sql_err)?,
+        detected_env_kind: row.get(7)?,
+        is_git_repo: row.get::<_, i64>(8)? != 0,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
     })
 }
 
@@ -880,6 +904,24 @@ fn map_checkpoint(row: &rusqlite::Row<'_>) -> rusqlite::Result<RepoCheckpoint> {
         stash_ref: row.get(11)?,
         created_at: row.get(12)?,
     })
+}
+
+fn ensure_installation_frontend_settings_column(conn: &Connection) -> AppResult<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(installations)")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    let mut columns = Vec::new();
+    for row in rows {
+        columns.push(row?);
+    }
+    drop(stmt);
+
+    if !columns.iter().any(|existing| existing == "frontend_settings_json") {
+        conn.execute(
+            "ALTER TABLE installations ADD COLUMN frontend_settings_json TEXT",
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 fn ensure_repo_checkpoint_tracking_columns(conn: &Connection) -> AppResult<()> {

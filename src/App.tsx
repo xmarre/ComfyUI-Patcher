@@ -4,6 +4,8 @@ import RepoCard from "./components/RepoCard";
 import OperationPanel from "./components/OperationPanel";
 import ManagerRegistryBrowser from "./components/ManagerRegistryBrowser";
 import type {
+  FrontendPackageManager,
+  FrontendSettings,
   Installation,
   InstallationDetail,
   LaunchProfile,
@@ -91,15 +93,46 @@ function toErrorMessage(error: unknown): string {
   return String(error);
 }
 
+const defaultFrontendPackageManager: FrontendPackageManager = "auto";
+
+const frontendPackageManagerOptions: Array<{
+  value: FrontendPackageManager;
+  label: string;
+}> = [
+  { value: "auto", label: "Auto-detect" },
+  { value: "npm", label: "npm" },
+  { value: "pnpm", label: "pnpm" },
+  { value: "yarn", label: "yarn" }
+];
+
+function buildFrontendSettingsPayload(form: {
+  frontendRepoRoot: string;
+  frontendDistPath: string;
+  frontendPackageManager: FrontendPackageManager;
+}): FrontendSettings | null {
+  const repoRoot = form.frontendRepoRoot.trim();
+  if (!repoRoot) {
+    return null;
+  }
+  return {
+    repoRoot,
+    distPath: form.frontendDistPath.trim(),
+    packageManager: form.frontendPackageManager
+  };
+}
+
 export default function App() {
   const [installations, setInstallations] = useState<Installation[]>([]);
   const [selectedInstallationId, setSelectedInstallationId] = useState<string | null>(null);
   const [detail, setDetail] = useState<InstallationDetail | null>(null);
   const [coreInput, setCoreInput] = useState("");
+  const [frontendInput, setFrontendInput] = useState("");
   const [nodeInput, setNodeInput] = useState("");
   const [corePreview, setCorePreview] = useState<ResolvedTarget | null>(null);
+  const [frontendPreview, setFrontendPreview] = useState<ResolvedTarget | null>(null);
   const [nodePreview, setNodePreview] = useState<ResolvedTarget | null>(null);
   const [corePreviewError, setCorePreviewError] = useState<string | null>(null);
+  const [frontendPreviewError, setFrontendPreviewError] = useState<string | null>(null);
   const [nodePreviewError, setNodePreviewError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [events, setEvents] = useState<OperationEvent[]>([]);
@@ -110,7 +143,10 @@ export default function App() {
     pythonExe: "",
     launchCommand: defaultLaunchProfile.command,
     launchArgs: defaultLaunchProfile.args.join(" "),
-    launchCwd: ""
+    launchCwd: "",
+    frontendRepoRoot: "",
+    frontendDistPath: "",
+    frontendPackageManager: defaultFrontendPackageManager
   });
   const [installationForm, setInstallationForm] = useState({
     name: "",
@@ -122,14 +158,19 @@ export default function App() {
     stopCommand: "",
     stopArgs: "",
     restartCommand: "",
-    restartArgs: ""
+    restartArgs: "",
+    frontendRepoRoot: "",
+    frontendDistPath: "",
+    frontendPackageManager: defaultFrontendPackageManager
   });
 
   const detailRequestSeq = useRef(0);
   const corePreviewRequestSeq = useRef(0);
+  const frontendPreviewRequestSeq = useRef(0);
   const nodePreviewRequestSeq = useRef(0);
   const selectedInstallationIdRef = useRef<string | null>(null);
   const coreInputRef = useRef("");
+  const frontendInputRef = useRef("");
   const nodeInputRef = useRef("");
 
   useEffect(() => {
@@ -139,6 +180,10 @@ export default function App() {
   useEffect(() => {
     coreInputRef.current = coreInput;
   }, [coreInput]);
+
+  useEffect(() => {
+    frontendInputRef.current = frontendInput;
+  }, [frontendInput]);
 
   useEffect(() => {
     nodeInputRef.current = nodeInput;
@@ -162,7 +207,10 @@ export default function App() {
         stopCommand: "",
         stopArgs: "",
         restartCommand: "",
-        restartArgs: ""
+        restartArgs: "",
+        frontendRepoRoot: "",
+        frontendDistPath: "",
+        frontendPackageManager: defaultFrontendPackageManager
       });
       return;
     }
@@ -176,7 +224,11 @@ export default function App() {
       stopCommand: installation.launchProfile?.stopCommand ?? "",
       stopArgs: (installation.launchProfile?.stopArgs ?? []).join(" "),
       restartCommand: installation.launchProfile?.restartCommand ?? "",
-      restartArgs: (installation.launchProfile?.restartArgs ?? []).join(" ")
+      restartArgs: (installation.launchProfile?.restartArgs ?? []).join(" "),
+      frontendRepoRoot: installation.frontendSettings?.repoRoot ?? "",
+      frontendDistPath: installation.frontendSettings?.distPath ?? "",
+      frontendPackageManager:
+        installation.frontendSettings?.packageManager ?? defaultFrontendPackageManager
     });
   }, [detail, selectedInstallation]);
 
@@ -232,8 +284,10 @@ export default function App() {
 
   useEffect(() => {
     setCorePreview(null);
+    setFrontendPreview(null);
     setNodePreview(null);
     setCorePreviewError(null);
+    setFrontendPreviewError(null);
     setNodePreviewError(null);
     void refreshDetail(selectedInstallationId, { clear: true });
   }, [selectedInstallationId]);
@@ -274,16 +328,25 @@ export default function App() {
   }, [coreInput]);
 
   useEffect(() => {
+    setFrontendPreview(null);
+    setFrontendPreviewError(null);
+    frontendPreviewRequestSeq.current += 1;
+  }, [frontendInput]);
+
+  useEffect(() => {
     setNodePreview(null);
     setNodePreviewError(null);
     nodePreviewRequestSeq.current += 1;
   }, [nodeInput]);
 
-  async function preview(input: ResolveTargetInput, target: "core" | "node") {
+  async function preview(input: ResolveTargetInput, target: "core" | "frontend" | "node") {
     if (!input.installationId || !input.input.trim()) {
       if (target === "core") {
         setCorePreview(null);
         setCorePreviewError(null);
+      } else if (target === "frontend") {
+        setFrontendPreview(null);
+        setFrontendPreviewError(null);
       } else {
         setNodePreview(null);
         setNodePreviewError(null);
@@ -292,7 +355,11 @@ export default function App() {
     }
 
     const requestSeq =
-      target === "core" ? ++corePreviewRequestSeq.current : ++nodePreviewRequestSeq.current;
+      target === "core"
+        ? ++corePreviewRequestSeq.current
+        : target === "frontend"
+          ? ++frontendPreviewRequestSeq.current
+          : ++nodePreviewRequestSeq.current;
 
     try {
       const resolved = await api.resolveTarget(input);
@@ -303,6 +370,11 @@ export default function App() {
         if (coreInputRef.current !== input.input) return;
         setCorePreview(resolved);
         setCorePreviewError(null);
+      } else if (target === "frontend") {
+        if (frontendPreviewRequestSeq.current !== requestSeq) return;
+        if (frontendInputRef.current !== input.input) return;
+        setFrontendPreview(resolved);
+        setFrontendPreviewError(null);
       } else {
         if (nodePreviewRequestSeq.current !== requestSeq) return;
         if (nodeInputRef.current !== input.input) return;
@@ -317,6 +389,11 @@ export default function App() {
         if (coreInputRef.current !== input.input) return;
         setCorePreview(null);
         setCorePreviewError(message);
+      } else if (target === "frontend") {
+        if (frontendPreviewRequestSeq.current !== requestSeq) return;
+        if (frontendInputRef.current !== input.input) return;
+        setFrontendPreview(null);
+        setFrontendPreviewError(message);
       } else {
         if (nodePreviewRequestSeq.current !== requestSeq) return;
         if (nodeInputRef.current !== input.input) return;
@@ -327,6 +404,7 @@ export default function App() {
   }
 
   const coreRepo = detail?.coreRepo ?? null;
+  const frontendRepo = detail?.frontendRepo ?? null;
   const customNodeRepos = detail?.customNodeRepos ?? [];
   const hasMatchingDetail =
     !!selectedInstallation && detail?.installation.id === selectedInstallation.id;
@@ -334,6 +412,10 @@ export default function App() {
     detail?.installation.launchProfile ??
     selectedInstallation?.launchProfile ??
     defaultLaunchProfile;
+  const savedFrontendSettings =
+    detail?.installation.frontendSettings ??
+    selectedInstallation?.frontendSettings ??
+    null;
 
   return (
     <div className="app-shell">
@@ -403,6 +485,44 @@ export default function App() {
               onChange={(e) => setRegisterForm((v) => ({ ...v, launchCwd: e.target.value }))}
             />
           </label>
+          <label>
+            <span>Managed frontend repo root</span>
+            <input
+              placeholder="Optional; separate checkout for ComfyUI_frontend"
+              value={registerForm.frontendRepoRoot}
+              onChange={(e) =>
+                setRegisterForm((v) => ({ ...v, frontendRepoRoot: e.target.value }))
+              }
+            />
+          </label>
+          <label>
+            <span>Managed frontend dist path</span>
+            <input
+              placeholder="Optional; defaults to &lt;frontend repo root&gt;/dist"
+              value={registerForm.frontendDistPath}
+              onChange={(e) =>
+                setRegisterForm((v) => ({ ...v, frontendDistPath: e.target.value }))
+              }
+            />
+          </label>
+          <label>
+            <span>Managed frontend package manager</span>
+            <select
+              value={registerForm.frontendPackageManager}
+              onChange={(e) =>
+                setRegisterForm((v) => ({
+                  ...v,
+                  frontendPackageManager: e.target.value as FrontendPackageManager
+                }))
+              }
+            >
+              {frontendPackageManagerOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
           <button
             onClick={() =>
               void runAction(async () => {
@@ -424,11 +544,14 @@ export default function App() {
                     args: launchArgs,
                     cwd: launchCwd,
                     env: {}
-                  }
+                  },
+                  frontendSettings: buildFrontendSettingsPayload(registerForm)
                 });
                 setCorePreview(null);
+                setFrontendPreview(null);
                 setNodePreview(null);
                 setCorePreviewError(null);
+                setFrontendPreviewError(null);
                 setNodePreviewError(null);
                 await refreshInstallations();
                 setSelectedInstallationId(result.installation.id);
@@ -565,7 +688,19 @@ export default function App() {
                           detail?.installation.launchProfile?.restartArgs ??
                           selectedInstallation.launchProfile?.restartArgs ??
                           []
-                        ).join(" ")
+                        ).join(" "),
+                        frontendRepoRoot:
+                          detail?.installation.frontendSettings?.repoRoot ??
+                          selectedInstallation.frontendSettings?.repoRoot ??
+                          "",
+                        frontendDistPath:
+                          detail?.installation.frontendSettings?.distPath ??
+                          selectedInstallation.frontendSettings?.distPath ??
+                          "",
+                        frontendPackageManager:
+                          detail?.installation.frontendSettings?.packageManager ??
+                          selectedInstallation.frontendSettings?.packageManager ??
+                          defaultFrontendPackageManager
                       })
                     }
                   >
@@ -592,7 +727,8 @@ export default function App() {
                             restartArgs: installationForm.restartCommand.trim()
                               ? parseOptionalArgs(installationForm.restartArgs)
                               : null
-                          }
+                          },
+                          frontendSettings: buildFrontendSettingsPayload(installationForm)
                         };
                         await api.saveInstallation(payload);
                         await refreshInstallations();
@@ -611,8 +747,10 @@ export default function App() {
                         }
                         await api.deleteInstallation({ installationId: selectedInstallation.id });
                         setCorePreview(null);
+                        setFrontendPreview(null);
                         setNodePreview(null);
                         setCorePreviewError(null);
+                        setFrontendPreviewError(null);
                         setNodePreviewError(null);
                         setDetail(null);
                         const next = await api.listInstallations();
@@ -719,8 +857,47 @@ export default function App() {
                     }
                   />
                 </label>
+                <label>
+                  <span>Managed frontend repo root</span>
+                  <input
+                    placeholder="Optional; separate checkout for ComfyUI_frontend"
+                    value={installationForm.frontendRepoRoot}
+                    onChange={(e) =>
+                      setInstallationForm((v) => ({ ...v, frontendRepoRoot: e.target.value }))
+                    }
+                  />
+                </label>
+                <label>
+                  <span>Managed frontend dist path</span>
+                  <input
+                    placeholder="Optional; defaults to &lt;frontend repo root&gt;/dist"
+                    value={installationForm.frontendDistPath}
+                    onChange={(e) =>
+                      setInstallationForm((v) => ({ ...v, frontendDistPath: e.target.value }))
+                    }
+                  />
+                </label>
+                <label>
+                  <span>Managed frontend package manager</span>
+                  <select
+                    value={installationForm.frontendPackageManager}
+                    onChange={(e) =>
+                      setInstallationForm((v) => ({
+                        ...v,
+                        frontendPackageManager: e.target.value as FrontendPackageManager
+                      }))
+                    }
+                  >
+                    {frontendPackageManagerOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
               </div>
               <div className="muted small">Appended args are passed after the base launch or restart args. If your launch command calls a shell script, that script should use <code>exec</code> for the final ComfyUI process, and forward <code>&quot;$@&quot;</code> if you want appended args to reach ComfyUI.</div>
+              <div className="muted small">When managed frontend settings are configured, Start and Restart strip any existing <code>--front-end-root</code> from the stored launch args, restart args, and appended args, then inject the managed dist path at runtime.</div>
             </section>
 
             <section className="card">
@@ -856,6 +1033,147 @@ export default function App() {
                 />
               ) : (
                 <div className="muted">No managed core repo is registered for this installation.</div>
+              )}
+            </section>
+
+            <section className="card">
+              <h3>Install or patch ComfyUI frontend</h3>
+              <div className="muted small">Frontend PRs and branches are managed in a dedicated checkout outside <code>custom_nodes</code>. Dependency sync installs Node dependencies, runs the frontend build, and Start/Restart inject the managed <code>--front-end-root</code> automatically.</div>
+              <div className="row gap">
+                <input
+                  className="grow"
+                  placeholder="Repository URL, branch URL, or PR URL"
+                  value={frontendInput}
+                  onChange={(e) => setFrontendInput(e.target.value)}
+                />
+                <button
+                  className="secondary"
+                  onClick={() =>
+                    void preview(
+                      {
+                        installationId: selectedInstallation.id,
+                        kind: "frontend",
+                        input: frontendInput,
+                        repoId: frontendRepo?.id ?? null
+                      },
+                      "frontend"
+                    )
+                  }
+                >
+                  Resolve
+                </button>
+                <button
+                  disabled={!savedFrontendSettings || !frontendInput.trim()}
+                  onClick={() =>
+                    void runAction(async () => {
+                      await api.installOrPatchFrontend({
+                        installationId: selectedInstallation.id,
+                        input: frontendInput,
+                        existingRepoConflictStrategy: "replace",
+                        dirtyRepoStrategy: "abort",
+                        setTrackedTarget: true,
+                        syncDependencies: true,
+                        restartAfterSuccess: false
+                      });
+                      setFrontendInput("");
+                      setFrontendPreview(null);
+                      setFrontendPreviewError(null);
+                    })
+                  }
+                >
+                  Install / Patch
+                </button>
+              </div>
+              {!savedFrontendSettings ? (
+                <div className="muted">Configure a managed frontend repo root in Installation settings before using this section.</div>
+              ) : null}
+              {frontendPreview ? (
+                <div className="preview">
+                  <div><strong>{frontendPreview.summaryLabel}</strong></div>
+                  <div className="mono small">{frontendPreview.canonicalRepoUrl}</div>
+                  <div className="mono small">{frontendPreview.resolvedSha ?? frontendPreview.checkoutRef}</div>
+                </div>
+              ) : null}
+              {frontendPreviewError ? <div className="muted">{frontendPreviewError}</div> : null}
+              {frontendRepo ? (
+                <RepoCard
+                  key={frontendRepo.id}
+                  repo={frontendRepo}
+                  onUpdate={() =>
+                    void runAction(async () => {
+                      await api.updateRepo({
+                        repoId: frontendRepo.id,
+                        dirtyRepoStrategy: "abort",
+                        syncDependencies: true
+                      });
+                    })
+                  }
+                  onSetBaseTarget={(input, clearOverlays) =>
+                    runActionOk(async () => {
+                      await api.setRepoBaseTarget({
+                        repoId: frontendRepo.id,
+                        input,
+                        clearOverlays,
+                        dirtyRepoStrategy: "abort",
+                        syncDependencies: true
+                      });
+                    })
+                  }
+                  onAddOverlay={(input) =>
+                    runActionOk(async () => {
+                      await api.addRepoOverlay({
+                        repoId: frontendRepo.id,
+                        input,
+                        dirtyRepoStrategy: "abort",
+                        syncDependencies: true
+                      });
+                    })
+                  }
+                  onSetOverlayEnabled={(overlayId, enabled) =>
+                    runActionOk(async () => {
+                      await api.setRepoOverlayEnabled({
+                        repoId: frontendRepo.id,
+                        overlayId,
+                        enabled,
+                        dirtyRepoStrategy: "abort",
+                        syncDependencies: true
+                      });
+                    })
+                  }
+                  onRemoveOverlay={(overlayId) =>
+                    runActionOk(async () => {
+                      await api.removeRepoOverlay({
+                        repoId: frontendRepo.id,
+                        overlayId,
+                        dirtyRepoStrategy: "abort",
+                        syncDependencies: true
+                      });
+                    })
+                  }
+                  onMoveOverlay={(overlayId, direction) =>
+                    runActionOk(async () => {
+                      await api.moveRepoOverlay({
+                        repoId: frontendRepo.id,
+                        overlayId,
+                        direction,
+                        dirtyRepoStrategy: "abort",
+                        syncDependencies: true
+                      });
+                    })
+                  }
+                  onRollback={() =>
+                    void runAction(async () => {
+                      await api.rollbackRepo({
+                        repoId: frontendRepo.id,
+                        restoreStash: true,
+                        syncDependencies: true,
+                        restartAfterSuccess: false
+                      });
+                    })
+                  }
+                />
+              ) : (
+                <div className="muted">No managed frontend repo is registered for this installation.</div>
               )}
             </section>
 

@@ -1,9 +1,11 @@
 export type DirtyRepoStrategy = "abort" | "stash" | "hard_reset";
 export type ExistingRepoConflictStrategy = "abort" | "replace" | "install_with_suffix";
-export type RepoKind = "core" | "custom_node";
+export type RepoKind = "core" | "frontend" | "custom_node";
 export type OperationStatus = "queued" | "running" | "succeeded" | "failed";
 export type OperationKind =
   | "patch_core"
+  | "install_frontend"
+  | "patch_frontend"
   | "install_custom_node"
   | "patch_custom_node"
   | "manage_repo_stack"
@@ -16,6 +18,14 @@ export type OperationKind =
 
 export type OverlayApplyStatus = "pending" | "applied" | "disabled" | "conflict" | "error";
 export type OverlayMoveDirection = "up" | "down";
+
+export type FrontendPackageManager = "auto" | "npm" | "pnpm" | "yarn";
+
+export type FrontendSettings = {
+  repoRoot: string;
+  distPath: string;
+  packageManager: FrontendPackageManager;
+};
 
 export type LaunchProfile = {
   mode: "managed_child" | "custom_command";
@@ -37,6 +47,7 @@ export type Installation = {
   pythonExe: string;
   customNodesDir: string;
   launchProfile: LaunchProfile | null;
+  frontendSettings: FrontendSettings | null;
   detectedEnvKind: "venv" | "conda" | "system" | "unknown";
   isGitRepo: boolean;
   createdAt: string;
@@ -65,6 +76,7 @@ export type ManagedRepo = {
 export type InstallationDetail = {
   installation: Installation;
   coreRepo: ManagedRepo | null;
+  frontendRepo: ManagedRepo | null;
   customNodeRepos: ManagedRepo[];
   isRunning: boolean;
 };
@@ -203,11 +215,13 @@ export type RegisterInstallationInput = {
   comfyRoot: string;
   pythonExe?: string | null;
   launchProfile?: LaunchProfile | null;
+  frontendSettings?: FrontendSettings | null;
 };
 
 export type RegisterInstallationResult = {
   installation: Installation;
   coreRepo: ManagedRepo | null;
+  frontendRepo: ManagedRepo | null;
   discoveredCustomNodes: ManagedRepo[];
   warnings: string[];
 };
@@ -217,6 +231,7 @@ export type SaveInstallationInput = {
   name: string;
   pythonExe?: string | null;
   launchProfile?: LaunchProfile | null;
+  frontendSettings?: FrontendSettings | null;
 };
 
 export type DeleteInstallationInput = {
@@ -226,6 +241,16 @@ export type DeleteInstallationInput = {
 export type PatchCoreInput = {
   installationId: string;
   input: string;
+  dirtyRepoStrategy: DirtyRepoStrategy;
+  setTrackedTarget: boolean;
+  syncDependencies: boolean;
+  restartAfterSuccess: boolean;
+};
+
+export type PatchFrontendInput = {
+  installationId: string;
+  input: string;
+  existingRepoConflictStrategy: ExistingRepoConflictStrategy;
   dirtyRepoStrategy: DirtyRepoStrategy;
   setTrackedTarget: boolean;
   syncDependencies: boolean;

@@ -97,9 +97,10 @@ fn choose_tracking_backup_path(path: &Path, backup_root: &Path) -> PathBuf {
 async fn discover_repositories_for_installation(
     state: &AppState,
     installation: &Installation,
-) -> AppResult<(Option<ManagedRepo>, Vec<ManagedRepo>)> {
+) -> AppResult<(Option<ManagedRepo>, Option<ManagedRepo>, Vec<ManagedRepo>)> {
     let root = PathBuf::from(&installation.comfy_root);
     let mut core_repo = None;
+    let mut frontend_repo = None;
     let mut custom_node_repos = Vec::new();
 
     if has_git_marker(&root) && is_git_repo(&root).await {
@@ -115,6 +116,24 @@ async fn discover_repositories_for_installation(
             status.is_detached,
             status.is_dirty,
         )?);
+    }
+
+    if let Some(frontend_settings) = installation.frontend_settings.as_ref() {
+        let frontend_root = PathBuf::from(&frontend_settings.repo_root);
+        if has_git_marker(&frontend_root) && is_git_repo(&frontend_root).await {
+            let status = inspect_repo(&frontend_root).await?;
+            frontend_repo = Some(state.db.upsert_repo(
+                &installation.id,
+                RepoKind::Frontend,
+                "ComfyUI Frontend",
+                &frontend_root.to_string_lossy(),
+                status.origin_url.as_deref(),
+                status.head_sha.as_deref(),
+                status.branch.as_deref(),
+                status.is_detached,
+                status.is_dirty,
+            )?);
+        }
     }
 
     let custom_nodes_dir = PathBuf::from(&installation.custom_nodes_dir);
@@ -150,6 +169,9 @@ async fn discover_repositories_for_installation(
     if let Some(repo) = core_repo.as_ref() {
         discovered_paths.insert(repo.local_path.clone());
     }
+    if let Some(repo) = frontend_repo.as_ref() {
+        discovered_paths.insert(repo.local_path.clone());
+    }
     for repo in &custom_node_repos {
         discovered_paths.insert(repo.local_path.clone());
     }
@@ -160,7 +182,7 @@ async fn discover_repositories_for_installation(
         }
     }
 
-    Ok((core_repo, custom_node_repos))
+    Ok((core_repo, frontend_repo, custom_node_repos))
 }
 
 async fn discover_custom_node_repos_best_effort(
@@ -269,6 +291,12 @@ async fn resolve_target_for_context(
                     .db
                     .get_installation_detail(&installation.id)?
                     .core_repo
+            }
+            RepoKind::Frontend => {
+                state
+                    .db
+                    .get_installation_detail(&installation.id)?
+                    .frontend_repo
             }
             RepoKind::CustomNode => None,
         },
@@ -832,6 +860,7 @@ async fn apply_repo_tracking_state(
             app,
             operation_id,
             installation,
+            repo,
             path,
             sync_dependencies,
         )
@@ -1078,6 +1107,101 @@ fn absolutize_path_against(root: &Path, value: &str) -> AppResult<PathBuf> {
     } else {
         Ok(absolute)
     }
+}
+
+
+fn normalize_frontend_settings(
+    root: &Path,
+    custom_nodes_dir: &Path,
+    frontend_settings: Option<FrontendSettings>,
+) -> AppResult<Option<FrontendSettings>> {
+    let Some(frontend_settings) = frontend_settings else {
+        return Ok(None);
+    };
+
+    let repo_root_input = frontend_settings.repo_root.trim();
+    if repo_root_input.is_empty() {
+        return Ok(None);
+    }
+
+    let repo_root = absolutize_path_against(root, repo_root_input)?;
+    if repo_root == root {
+        return Err(AppError::InvalidInput(
+            "managed frontend repo root cannot be the ComfyUI root".to_string(),
+        ));
+    }
+    if repo_root.starts_with(custom_nodes_dir) {
+        return Err(AppError::InvalidInput(
+            "managed frontend repo root cannot be inside custom_nodes".to_string(),
+        ));
+    }
+
+    let dist_input = frontend_settings.dist_path.trim();
+    let dist_path = if dist_input.is_empty() {
+        repo_root.join("dist")
+    } else {
+        absolutize_path_against(&repo_root, dist_input)?
+    };
+
+    Ok(Some(FrontendSettings {
+        repo_root: repo_root.to_string_lossy().to_string(),
+        dist_path: dist_path.to_string_lossy().to_string(),
+        package_manager: frontend_settings.package_manager,
+    }))
+}
+
+fn strip_frontend_root_args(args: &[String]) -> Vec<String> {
+    let mut stripped = Vec::with_capacity(args.len());
+    let mut index = 0usize;
+    while index < args.len() {
+        let current = &args[index];
+        if current == "--front-end-root" {
+            index += 1;
+            if index < args.len() {
+                index += 1;
+            }
+            continue;
+        }
+        if current.starts_with("--front-end-root=") {
+            index += 1;
+            continue;
+        }
+        stripped.push(current.clone());
+        index += 1;
+    }
+    stripped
+}
+
+fn apply_managed_frontend_root(profile: &mut LaunchProfile, dist_path: &str) {
+    profile.args = strip_frontend_root_args(&profile.args);
+    profile.extra_args = Some({
+        let mut extra = strip_frontend_root_args(profile.extra_args.as_deref().unwrap_or(&[]));
+        extra.push("--front-end-root".to_string());
+        extra.push(dist_path.to_string());
+        extra
+    });
+    if let Some(restart_args) = profile.restart_args.as_ref() {
+        profile.restart_args = Some(strip_frontend_root_args(restart_args));
+    }
+}
+
+fn effective_launch_profile(installation: &Installation) -> AppResult<LaunchProfile> {
+    let mut profile = installation
+        .launch_profile
+        .clone()
+        .ok_or_else(|| AppError::Process("installation has no launch profile".to_string()))?;
+    let Some(frontend_settings) = installation.frontend_settings.as_ref() else {
+        return Ok(profile);
+    };
+    let dist_path = PathBuf::from(&frontend_settings.dist_path);
+    if !dist_path.exists() {
+        return Err(AppError::Process(format!(
+            "managed frontend dist does not exist: {}",
+            dist_path.to_string_lossy()
+        )));
+    }
+    apply_managed_frontend_root(&mut profile, &frontend_settings.dist_path);
+    Ok(profile)
 }
 
 async fn acquire_installation_repo_locks(
@@ -1336,13 +1460,14 @@ async fn maybe_sync_dependencies(
     app: &AppHandle,
     operation_id: &str,
     installation: &Installation,
+    repo: &ManagedRepo,
     repo_path: &Path,
     enabled: bool,
 ) -> AppResult<()> {
     if !enabled {
         return Ok(());
     }
-    let plan = plan_dependency_sync(installation, repo_path)?;
+    let plan = plan_dependency_sync(installation, repo, repo_path)?;
     log_operation(
         state,
         app,
@@ -1351,17 +1476,20 @@ async fn maybe_sync_dependencies(
         "info",
         format!("dependency plan: {} ({})", plan.strategy, plan.reason),
     );
-    if plan.strategy != "none" {
+    if plan.steps.is_empty() {
+        return Ok(());
+    }
+    for step in &plan.steps {
         log_operation(
             state,
             app,
             operation_id,
             "dependency_sync",
             "info",
-            "running dependency sync",
+            format!("{} step: {} ({})", step.phase, step.strategy, step.reason),
         );
-        execute_dependency_sync(&plan).await?;
     }
+    execute_dependency_sync(&plan).await?;
     Ok(())
 }
 
@@ -1386,10 +1514,7 @@ async fn maybe_restart_installation(
         );
         return Ok(());
     }
-    let profile = installation
-        .launch_profile
-        .as_ref()
-        .ok_or_else(|| AppError::Process("installation has no launch profile".to_string()))?;
+    let profile = effective_launch_profile(installation)?;
     log_operation(
         state,
         app,
@@ -1398,7 +1523,7 @@ async fn maybe_restart_installation(
         "info",
         "restarting installation",
     );
-    state.processes.restart(&installation.id, profile).await?;
+    state.processes.restart(&installation.id, &profile).await?;
     Ok(())
 }
 
@@ -1497,6 +1622,17 @@ async fn register_installation_impl(
     } else {
         None
     };
+    let frontend_settings = if input.frontend_settings.is_some() || existing_installation.is_none() {
+        normalize_frontend_settings(
+            &root,
+            &custom_nodes_dir,
+            input.frontend_settings.clone(),
+        )?
+    } else {
+        existing_installation
+            .as_ref()
+            .and_then(|installation| installation.frontend_settings.clone())
+    };
     let detected_env_kind = python.as_ref().map(|value| detect_env_kind(value));
     let python_string = python
         .as_ref()
@@ -1510,6 +1646,7 @@ async fn register_installation_impl(
         python_string.as_deref(),
         &custom_nodes_dir_string,
         launch_profile.as_ref(),
+        frontend_settings.as_ref(),
         detected_env_kind.as_deref(),
         is_root_git_repo,
     )?;
@@ -1518,11 +1655,12 @@ async fn register_installation_impl(
     } else {
         Vec::new()
     };
-    let (core_repo, discovered_custom_nodes) =
+    let (core_repo, frontend_repo, discovered_custom_nodes) =
         discover_repositories_for_installation(state, &installation).await?;
     Ok(RegisterInstallationResult {
         installation,
         core_repo,
+        frontend_repo,
         discovered_custom_nodes,
         warnings: Vec::new(),
     })
@@ -1584,6 +1722,13 @@ async fn save_installation(
     } else {
         existing.launch_profile.clone()
     };
+    let custom_nodes_dir = PathBuf::from(&existing.custom_nodes_dir);
+    let frontend_settings = normalize_frontend_settings(
+        &root,
+        &custom_nodes_dir,
+        input.frontend_settings,
+    )
+    .map_err(|e| e.to_string())?;
     let installation = state
         .db
         .update_installation(
@@ -1591,10 +1736,22 @@ async fn save_installation(
             &input.name,
             &python_string,
             launch_profile.as_ref(),
+            frontend_settings.as_ref(),
             &detected_env_kind,
             is_git_repo(&root).await,
         )
         .map_err(|e| e.to_string())?;
+    let _repo_guards = acquire_installation_repo_locks(&state, &installation.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let _ = discover_repositories_for_installation(&state, &installation)
+        .await
+        .map_err(|e| e.to_string())?;
+    let installation = state
+        .db
+        .get_installation(&installation.id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "installation not found after save".to_string())?;
     Ok(installation)
 }
 
@@ -1880,6 +2037,407 @@ async fn run_patch_core(
         Ok::<(), AppError>(())
     }
     .await;
+    if let Err(err) = result {
+        state.db.finish_operation(
+            &operation_id,
+            OperationStatus::Failed,
+            Some(&err.to_string()),
+            None,
+        )?;
+        log_operation(
+            &state,
+            &app,
+            &operation_id,
+            "error",
+            "error",
+            err.to_string(),
+        );
+        return Err(err);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn install_or_patch_frontend(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: PatchFrontendInput,
+) -> Result<OperationStart, String> {
+    let installation = state
+        .db
+        .get_installation(&input.installation_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "installation not found".to_string())?;
+    let frontend_settings = installation
+        .frontend_settings
+        .as_ref()
+        .ok_or_else(|| {
+            "configure a managed frontend repo root in installation settings first".to_string()
+        })?;
+    if frontend_settings.repo_root.trim().is_empty() {
+        return Err("configure a managed frontend repo root in installation settings first".to_string());
+    }
+    let detail = state
+        .db
+        .get_installation_detail(&installation.id)
+        .map_err(|e| e.to_string())?;
+    let repo_id = detail.frontend_repo.as_ref().map(|repo| repo.id.as_str());
+    let operation_kind = if detail.frontend_repo.is_some() {
+        OperationKind::PatchFrontend
+    } else {
+        OperationKind::InstallFrontend
+    };
+    let op = state
+        .db
+        .create_operation(
+            &installation.id,
+            repo_id,
+            operation_kind,
+            Some(&input.input),
+        )
+        .map_err(|e| e.to_string())?;
+    let op_id = op.id.clone();
+    let state_handle = app.state::<AppState>().inner().clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = run_install_or_patch_frontend(app, state_handle, installation, input, op_id).await;
+    });
+    Ok(OperationStart {
+        operation_id: op.id,
+    })
+}
+
+async fn run_install_or_patch_frontend(
+    app: AppHandle,
+    state: AppState,
+    installation: Installation,
+    input: PatchFrontendInput,
+    operation_id: String,
+) -> AppResult<()> {
+    state.db.set_operation_running(&operation_id)?;
+    let installation_lock = state.installation_lock(&installation.id).await;
+    let _installation_guard = installation_lock.lock().await;
+    log_operation(
+        &state,
+        &app,
+        &operation_id,
+        "preflight",
+        "info",
+        "installing or patching managed frontend",
+    );
+    let result = async {
+        let restore_replaced_path = |backup_path: &Path, target_path: &Path| -> AppResult<()> {
+            if target_path.exists() {
+                if target_path.is_dir() {
+                    std::fs::remove_dir_all(target_path)?;
+                } else {
+                    std::fs::remove_file(target_path)?;
+                }
+            }
+            std::fs::rename(backup_path, target_path)?;
+            Ok(())
+        };
+        let frontend_settings = installation.frontend_settings.as_ref().ok_or_else(|| {
+            AppError::InvalidInput(
+                "configure a managed frontend repo root in installation settings first"
+                    .to_string(),
+            )
+        })?;
+        let target_path = PathBuf::from(&frontend_settings.repo_root);
+        let detail = state.db.get_installation_detail(&installation.id)?;
+        let mut replaced_backup_path: Option<PathBuf> = None;
+        let mut rollback_repo_id: Option<String> = None;
+        let mut rollback_checkpoint_id: Option<String> = None;
+
+        let result = async {
+            let resolved = resolve_target_for_context(
+                &state,
+                &installation,
+                &RepoKind::Frontend,
+                detail.frontend_repo.as_ref().map(|repo| repo.id.as_str()),
+                &input.input,
+            )
+            .await?;
+
+            if target_path.exists() {
+                if is_git_repo(&target_path).await {
+                    log_operation(
+                        &state,
+                        &app,
+                        &operation_id,
+                        "preflight",
+                        "info",
+                        format!(
+                            "reusing managed frontend directory {}",
+                            target_path.to_string_lossy()
+                        ),
+                    );
+                    let status = inspect_repo(&target_path).await?;
+                    ensure_remote_matches(status.origin_url.as_deref(), &resolved)?;
+                    let repo = state.db.upsert_repo(
+                        &installation.id,
+                        RepoKind::Frontend,
+                        "ComfyUI Frontend",
+                        &target_path.to_string_lossy(),
+                        status.origin_url.as_deref(),
+                        status.head_sha.as_deref(),
+                        status.branch.as_deref(),
+                        status.is_detached,
+                        status.is_dirty,
+                    )?;
+                    let repo_lock = state.repo_lock(&repo.id).await;
+                    let _guard = repo_lock.lock().await;
+                    let tracked_state = build_requested_tracked_state_for_input(
+                        &state,
+                        &installation,
+                        &repo,
+                        &input.input,
+                        false,
+                    )
+                    .await?;
+                    let checkpoint = apply_repo_tracking_state(
+                        &state,
+                        &app,
+                        &operation_id,
+                        &installation,
+                        &repo,
+                        &tracked_state,
+                        &input.dirty_repo_strategy,
+                        input.sync_dependencies,
+                        input.set_tracked_target,
+                    )
+                    .await?;
+                    maybe_restart_installation(
+                        &state,
+                        &app,
+                        &operation_id,
+                        &installation,
+                        input.restart_after_success,
+                    )
+                    .await?;
+                    state.db.finish_operation(
+                        &operation_id,
+                        OperationStatus::Succeeded,
+                        None,
+                        Some(&checkpoint.id),
+                    )?;
+                    log_operation(
+                        &state,
+                        &app,
+                        &operation_id,
+                        "done",
+                        "info",
+                        "frontend patch completed",
+                    );
+                    return Ok::<(), AppError>(());
+                }
+
+                match input.existing_repo_conflict_strategy {
+                    ExistingRepoConflictStrategy::Abort => {
+                        return Err(AppError::Conflict(
+                            "managed frontend repo root already exists and is not a git repository"
+                                .to_string(),
+                        ));
+                    }
+                    ExistingRepoConflictStrategy::InstallWithSuffix => {
+                        return Err(AppError::Conflict(
+                            "managed frontend repo root is fixed; choose Replace or configure a different frontend repo root in installation settings"
+                                .to_string(),
+                        ));
+                    }
+                    ExistingRepoConflictStrategy::Replace => {
+                        let backup_root = PathBuf::from(&installation.comfy_root)
+                            .join(".comfyui-patcher-backups")
+                            .join("frontend");
+                        std::fs::create_dir_all(&backup_root)?;
+                        let backup_path = choose_tracking_backup_path(&target_path, &backup_root);
+                        log_operation(
+                            &state,
+                            &app,
+                            &operation_id,
+                            "preflight",
+                            "info",
+                            format!(
+                                "backing up existing frontend path {} to {} before replacement",
+                                target_path.to_string_lossy(),
+                                backup_path.to_string_lossy()
+                            ),
+                        );
+                        std::fs::rename(&target_path, &backup_path)?;
+                        replaced_backup_path = Some(backup_path);
+                    }
+                }
+            } else {
+                log_operation(
+                    &state,
+                    &app,
+                    &operation_id,
+                    "preflight",
+                    "info",
+                    format!(
+                        "selected managed frontend directory {}",
+                        target_path.to_string_lossy()
+                    ),
+                );
+            }
+
+            log_operation(
+                &state,
+                &app,
+                &operation_id,
+                "clone",
+                "info",
+                format!("cloning {}", resolved.canonical_repo_url),
+            );
+            clone_repo(&resolved.fetch_url, &target_path).await?;
+            let status = inspect_repo(&target_path).await?;
+            let repo = state.db.upsert_repo(
+                &installation.id,
+                RepoKind::Frontend,
+                "ComfyUI Frontend",
+                &target_path.to_string_lossy(),
+                status.origin_url.as_deref(),
+                status.head_sha.as_deref(),
+                status.branch.as_deref(),
+                status.is_detached,
+                status.is_dirty,
+            )?;
+            if replaced_backup_path.is_some() {
+                rollback_repo_id = Some(repo.id.clone());
+            }
+            let repo_lock = state.repo_lock(&repo.id).await;
+            let _guard = repo_lock.lock().await;
+            let tracked_state = build_requested_tracked_state_for_input(
+                &state,
+                &installation,
+                &repo,
+                &input.input,
+                false,
+            )
+            .await?;
+            let checkpoint = apply_repo_tracking_state(
+                &state,
+                &app,
+                &operation_id,
+                &installation,
+                &repo,
+                &tracked_state,
+                &DirtyRepoStrategy::Abort,
+                input.sync_dependencies,
+                input.set_tracked_target,
+            )
+            .await?;
+            if replaced_backup_path.is_some() {
+                rollback_checkpoint_id = Some(checkpoint.id.clone());
+            }
+            maybe_restart_installation(
+                &state,
+                &app,
+                &operation_id,
+                &installation,
+                input.restart_after_success,
+            )
+            .await?;
+            state.db.finish_operation(
+                &operation_id,
+                OperationStatus::Succeeded,
+                None,
+                Some(&checkpoint.id),
+            )?;
+            log_operation(
+                &state,
+                &app,
+                &operation_id,
+                "done",
+                "info",
+                "frontend install completed",
+            );
+            if let Some(backup_path) = replaced_backup_path.as_ref() {
+                if let Err(remove_err) = if backup_path.is_dir() {
+                    std::fs::remove_dir_all(backup_path)
+                } else {
+                    std::fs::remove_file(backup_path)
+                } {
+                    log_operation(
+                        &state,
+                        &app,
+                        &operation_id,
+                        "done",
+                        "warn",
+                        format!(
+                            "managed frontend install succeeded, but failed to remove backup {}: {}",
+                            backup_path.to_string_lossy(),
+                            remove_err
+                        ),
+                    );
+                }
+            }
+            Ok::<(), AppError>(())
+        }
+        .await;
+
+        if let Err(err) = result {
+            if let Some(backup_path) = replaced_backup_path.as_ref() {
+                if let Err(restore_err) = restore_replaced_path(backup_path, &target_path) {
+                    log_operation(
+                        &state,
+                        &app,
+                        &operation_id,
+                        "error",
+                        "error",
+                        format!(
+                            "failed to restore frontend backup {} after install error: {}",
+                            backup_path.to_string_lossy(),
+                            restore_err
+                        ),
+                    );
+                } else {
+                    log_operation(
+                        &state,
+                        &app,
+                        &operation_id,
+                        "preflight",
+                        "warn",
+                        format!(
+                            "restored frontend backup {} after install error",
+                            backup_path.to_string_lossy()
+                        ),
+                    );
+                }
+            }
+            if let Some(checkpoint_id) = rollback_checkpoint_id.as_ref() {
+                if let Err(db_err) = state.db.delete_checkpoint(checkpoint_id) {
+                    log_operation(
+                        &state,
+                        &app,
+                        &operation_id,
+                        "error",
+                        "error",
+                        format!(
+                            "failed to delete rollback checkpoint {}: {}",
+                            checkpoint_id, db_err
+                        ),
+                    );
+                }
+            }
+            if let Some(repo_id) = rollback_repo_id.as_ref() {
+                if let Err(db_err) = state.db.delete_repo(repo_id) {
+                    log_operation(
+                        &state,
+                        &app,
+                        &operation_id,
+                        "error",
+                        "error",
+                        format!("failed to delete rollback repo {}: {}", repo_id, db_err),
+                    );
+                }
+            }
+            return Err(err);
+        }
+
+        Ok::<(), AppError>(())
+    }
+    .await;
+
     if let Err(err) = result {
         state.db.finish_operation(
             &operation_id,
@@ -3061,6 +3619,9 @@ async fn run_update_all(
         if let Some(core) = detail.core_repo {
             repos.push(core);
         }
+        if let Some(frontend) = detail.frontend_repo {
+            repos.push(frontend);
+        }
         repos.extend(detail.custom_node_repos);
         let mut checkpoints = Vec::new();
         let mut failures = Vec::new();
@@ -3250,6 +3811,7 @@ async fn run_rollback_repo(
             &app,
             &operation_id,
             &installation,
+            &repo,
             path,
             input.sync_dependencies,
         )
@@ -3340,10 +3902,7 @@ async fn run_start_installation(
     let lock = state.installation_lock(&installation.id).await;
     let _guard = lock.lock().await;
     let result = async {
-        let profile = installation
-            .launch_profile
-            .as_ref()
-            .ok_or_else(|| AppError::Process("installation has no launch profile".to_string()))?;
+        let profile = effective_launch_profile(&installation)?;
         log_operation(
             &state,
             &app,
@@ -3352,7 +3911,7 @@ async fn run_start_installation(
             "info",
             "starting installation",
         );
-        state.processes.start(&installation.id, profile).await?;
+        state.processes.start(&installation.id, &profile).await?;
         state
             .db
             .finish_operation(&operation_id, OperationStatus::Succeeded, None, None)?;
@@ -3429,7 +3988,7 @@ async fn run_stop_installation(
     let result = async {
         let profile = installation
             .launch_profile
-            .as_ref()
+            .clone()
             .ok_or_else(|| AppError::Process("installation has no launch profile".to_string()))?;
         log_operation(
             &state,
@@ -3439,7 +3998,7 @@ async fn run_stop_installation(
             "info",
             "stopping installation",
         );
-        let stopped = state.processes.stop(&installation.id, profile).await?;
+        let stopped = state.processes.stop(&installation.id, &profile).await?;
         if !stopped {
             log_operation(
                 &state,
@@ -3524,10 +4083,7 @@ async fn run_restart_installation(
     let lock = state.installation_lock(&installation.id).await;
     let _guard = lock.lock().await;
     let result = async {
-        let profile = installation
-            .launch_profile
-            .as_ref()
-            .ok_or_else(|| AppError::Process("installation has no launch profile".to_string()))?;
+        let profile = effective_launch_profile(&installation)?;
         log_operation(
             &state,
             &app,
@@ -3536,7 +4092,7 @@ async fn run_restart_installation(
             "info",
             "restarting installation",
         );
-        state.processes.restart(&installation.id, profile).await?;
+        state.processes.restart(&installation.id, &profile).await?;
         state
             .db
             .finish_operation(&operation_id, OperationStatus::Succeeded, None, None)?;
@@ -3638,6 +4194,7 @@ pub fn run() {
             list_manager_custom_nodes,
             resolve_target,
             patch_core,
+            install_or_patch_frontend,
             install_or_patch_custom_node,
             set_repo_base_target,
             add_repo_overlay,
