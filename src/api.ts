@@ -1,17 +1,22 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  AddRepoOverlayInput,
   InstallationDetail,
   ListManagerCustomNodesInput,
   ManagerRegistryCustomNode,
+  MoveRepoOverlayInput,
   OperationEvent,
   OperationRecord,
   OperationStart,
   PatchCoreInput,
   PatchCustomNodeInput,
+  RemoveRepoOverlayInput,
   DeleteInstallationInput,
   RegisterInstallationInput,
   RegisterInstallationResult,
+  SetRepoBaseTargetInput,
+  SetRepoOverlayEnabledInput,
   SaveInstallationInput,
   RepoCheckpoint,
   ResolveTargetInput,
@@ -43,6 +48,16 @@ export const api = {
     invoke<OperationStart>("patch_core", { input }),
   installOrPatchCustomNode: (input: PatchCustomNodeInput) =>
     invoke<OperationStart>("install_or_patch_custom_node", { input }),
+  setRepoBaseTarget: (input: SetRepoBaseTargetInput) =>
+    invoke<OperationStart>("set_repo_base_target", { input }),
+  addRepoOverlay: (input: AddRepoOverlayInput) =>
+    invoke<OperationStart>("add_repo_overlay", { input }),
+  setRepoOverlayEnabled: (input: SetRepoOverlayEnabledInput) =>
+    invoke<OperationStart>("set_repo_overlay_enabled", { input }),
+  removeRepoOverlay: (input: RemoveRepoOverlayInput) =>
+    invoke<OperationStart>("remove_repo_overlay", { input }),
+  moveRepoOverlay: (input: MoveRepoOverlayInput) =>
+    invoke<OperationStart>("move_repo_overlay", { input }),
   updateRepo: (input: UpdateRepoInput) =>
     invoke<OperationStart>("update_repo", { input }),
   updateAll: (input: UpdateAllInput) =>

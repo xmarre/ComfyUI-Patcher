@@ -18,7 +18,6 @@ pub struct GithubClient {
 
 #[derive(Debug, Deserialize)]
 struct PullHeadRepo {
-    clone_url: String,
     html_url: String,
 }
 
@@ -38,6 +37,8 @@ struct PullBaseRepo {
 
 #[derive(Debug, Deserialize)]
 struct PullBase {
+    #[serde(rename = "ref")]
+    ref_name: String,
     repo: PullBaseRepo,
 }
 
@@ -135,6 +136,7 @@ impl GithubClient {
                 resolved_sha: Some(pr_data.head.sha.clone()),
                 pr_number: Some(pr.number),
                 pr_base_repo_url: Some(canonical_repo_url),
+                pr_base_ref: Some(pr_data.base.ref_name.clone()),
                 pr_head_repo_url: Some(head_url),
                 pr_head_ref: Some(pr_data.head.ref_name.clone()),
                 summary_label: format!("PR #{} @ {}", pr_data.number, short_sha(&pr_data.head.sha)),
@@ -155,6 +157,7 @@ impl GithubClient {
                 resolved_sha: None,
                 pr_number: None,
                 pr_base_repo_url: None,
+                pr_base_ref: None,
                 pr_head_repo_url: None,
                 pr_head_ref: None,
                 summary_label: match target_kind {
@@ -181,6 +184,7 @@ impl GithubClient {
                 resolved_sha: Some(commit.sha.clone()),
                 pr_number: None,
                 pr_base_repo_url: None,
+                pr_base_ref: None,
                 pr_head_repo_url: None,
                 pr_head_ref: None,
                 summary_label: format!("commit {}", short_sha(&commit.sha)),
@@ -202,6 +206,7 @@ impl GithubClient {
                 resolved_sha: None,
                 pr_number: None,
                 pr_base_repo_url: None,
+                pr_base_ref: None,
                 pr_head_repo_url: None,
                 pr_head_ref: None,
                 summary_label: format!("default branch {}", metadata.default_branch),
@@ -231,6 +236,7 @@ impl GithubClient {
                     resolved_sha: None,
                     pr_number: None,
                     pr_base_repo_url: None,
+                    pr_base_ref: None,
                     pr_head_repo_url: None,
                     pr_head_ref: None,
                     summary_label: match kind {
@@ -261,6 +267,7 @@ impl GithubClient {
                     resolved_sha: Some(trimmed.to_string()),
                     pr_number: None,
                     pr_base_repo_url: None,
+                    pr_base_ref: None,
                     pr_head_repo_url: None,
                     pr_head_ref: None,
                     summary_label: format!("commit {}", short_sha(trimmed)),
@@ -292,6 +299,7 @@ impl GithubClient {
                 resolved_sha: Some(trimmed.to_string()),
                 pr_number: None,
                 pr_base_repo_url: None,
+                pr_base_ref: None,
                 pr_head_repo_url: None,
                 pr_head_ref: None,
                 summary_label: format!("commit {}", short_sha(trimmed)),

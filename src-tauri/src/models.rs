@@ -1,13 +1,13 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RepoKind {
     Core,
     CustomNode,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationStatus {
     Queued,
@@ -16,12 +16,13 @@ pub enum OperationStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationKind {
     PatchCore,
     InstallCustomNode,
     PatchCustomNode,
+    ManageRepoStack,
     UpdateRepo,
     UpdateAll,
     RollbackRepo,
@@ -30,7 +31,7 @@ pub enum OperationKind {
     RestartInstallation,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DirtyRepoStrategy {
     Abort,
@@ -38,7 +39,7 @@ pub enum DirtyRepoStrategy {
     HardReset,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExistingRepoConflictStrategy {
     Abort,
@@ -46,7 +47,7 @@ pub enum ExistingRepoConflictStrategy {
     InstallWithSuffix,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TargetKind {
     Branch,
@@ -55,6 +56,71 @@ pub enum TargetKind {
     Pr,
     DefaultBranch,
     NamedRef,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OverlayApplyStatus {
+    Pending,
+    Applied,
+    Disabled,
+    Conflict,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackedBaseTarget {
+    pub source_input: String,
+    pub target_kind: TargetKind,
+    pub canonical_repo_url: String,
+    pub checkout_ref: String,
+    pub resolved_sha: Option<String>,
+    pub summary_label: String,
+}
+
+fn default_overlay_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackedPrOverlay {
+    pub id: String,
+    pub source_input: String,
+    pub canonical_repo_url: String,
+    pub pr_number: u64,
+    pub pr_base_repo_url: String,
+    pub pr_base_ref: String,
+    pub pr_head_repo_url: Option<String>,
+    pub pr_head_ref: Option<String>,
+    pub resolved_sha: Option<String>,
+    pub summary_label: String,
+    pub position: usize,
+    #[serde(default = "default_overlay_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub last_apply_status: Option<OverlayApplyStatus>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackedRepoState {
+    pub version: u32,
+    pub base: TrackedBaseTarget,
+    #[serde(default)]
+    pub overlays: Vec<TrackedPrOverlay>,
+    #[serde(default)]
+    pub materialized_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OverlayMoveDirection {
+    Up,
+    Down,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +169,8 @@ pub struct ManagedRepo {
     pub tracked_target_kind: Option<TargetKind>,
     pub tracked_target_input: Option<String>,
     pub tracked_target_resolved_sha: Option<String>,
+    #[serde(default)]
+    pub tracked_state: Option<TrackedRepoState>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -127,6 +195,7 @@ pub struct ResolvedTarget {
     pub resolved_sha: Option<String>,
     pub pr_number: Option<u64>,
     pub pr_base_repo_url: Option<String>,
+    pub pr_base_ref: Option<String>,
     pub pr_head_repo_url: Option<String>,
     pub pr_head_ref: Option<String>,
     pub summary_label: String,
@@ -159,6 +228,10 @@ pub struct RepoCheckpoint {
     pub old_head_sha: String,
     pub old_branch: Option<String>,
     pub old_is_detached: bool,
+    pub has_tracked_target_snapshot: bool,
+    pub old_tracked_target_kind: Option<TargetKind>,
+    pub old_tracked_target_input: Option<String>,
+    pub old_tracked_target_resolved_sha: Option<String>,
     pub stash_created: bool,
     pub stash_ref: Option<String>,
     pub created_at: String,
@@ -267,6 +340,54 @@ pub struct PatchCustomNodeInput {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateRepoInput {
     pub repo_id: String,
+    pub dirty_repo_strategy: DirtyRepoStrategy,
+    pub sync_dependencies: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetRepoBaseTargetInput {
+    pub repo_id: String,
+    pub input: String,
+    pub clear_overlays: bool,
+    pub dirty_repo_strategy: DirtyRepoStrategy,
+    pub sync_dependencies: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddRepoOverlayInput {
+    pub repo_id: String,
+    pub input: String,
+    pub dirty_repo_strategy: DirtyRepoStrategy,
+    pub sync_dependencies: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetRepoOverlayEnabledInput {
+    pub repo_id: String,
+    pub overlay_id: String,
+    pub enabled: bool,
+    pub dirty_repo_strategy: DirtyRepoStrategy,
+    pub sync_dependencies: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveRepoOverlayInput {
+    pub repo_id: String,
+    pub overlay_id: String,
+    pub dirty_repo_strategy: DirtyRepoStrategy,
+    pub sync_dependencies: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveRepoOverlayInput {
+    pub repo_id: String,
+    pub overlay_id: String,
+    pub direction: OverlayMoveDirection,
     pub dirty_repo_strategy: DirtyRepoStrategy,
     pub sync_dependencies: bool,
 }

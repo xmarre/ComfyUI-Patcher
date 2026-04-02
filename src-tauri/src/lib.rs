@@ -14,8 +14,8 @@ use crate::deps::{execute_dependency_sync, plan_dependency_sync};
 use crate::errors::{AppError, AppResult};
 use crate::git::{
     apply_stash, canonicalize_remote, clone_repo, ensure_clean_or_apply_strategy, fetch_origin,
-    fetch_refspec, inspect_repo, is_git_repo, join_custom_node_path, reset_hard, submodule_update,
-    switch_branch, switch_detached, validate_custom_node_dir_name,
+    fetch_refspec, inspect_repo, is_git_repo, join_custom_node_path, merge_abort, merge_no_ff,
+    reset_hard, submodule_update, switch_branch, switch_detached, validate_custom_node_dir_name,
 };
 use crate::models::*;
 use crate::state::AppState;
@@ -23,6 +23,9 @@ use crate::util::{detect_env_kind, infer_python};
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager, State};
+
+const STACK_TRACKING_VERSION: u32 = 1;
+const STACK_BRANCH_NAME: &str = "patcher/stack";
 
 fn emit_operation(
     app: &AppHandle,
@@ -316,6 +319,682 @@ fn canonical_target_remote(resolved: &ResolvedTarget) -> AppResult<String> {
     })
 }
 
+fn make_tracked_base_target(resolved: &ResolvedTarget) -> AppResult<TrackedBaseTarget> {
+    if matches!(resolved.target_kind, TargetKind::Pr) {
+        return Err(AppError::Conflict(
+            "pull requests cannot be stored as a repo base target".to_string(),
+        ));
+    }
+    Ok(TrackedBaseTarget {
+        source_input: resolved.source_input.clone(),
+        target_kind: resolved.target_kind.clone(),
+        canonical_repo_url: canonical_target_remote(resolved)?,
+        checkout_ref: resolved.checkout_ref.clone(),
+        resolved_sha: resolved.resolved_sha.clone(),
+        summary_label: resolved.summary_label.clone(),
+    })
+}
+
+fn make_overlay_id(pr_number: u64) -> String {
+    format!("pr-{pr_number}")
+}
+
+fn make_tracked_overlay(resolved: &ResolvedTarget, position: usize) -> AppResult<TrackedPrOverlay> {
+    let pr_number = resolved
+        .pr_number
+        .ok_or_else(|| AppError::Github("missing PR number".to_string()))?;
+    let pr_base_repo_url = resolved
+        .pr_base_repo_url
+        .as_deref()
+        .and_then(canonicalize_remote)
+        .ok_or_else(|| AppError::Github("missing PR base repository".to_string()))?;
+    let pr_base_ref = resolved
+        .pr_base_ref
+        .clone()
+        .ok_or_else(|| AppError::Github("missing PR base ref".to_string()))?;
+    Ok(TrackedPrOverlay {
+        id: make_overlay_id(pr_number),
+        source_input: resolved.source_input.clone(),
+        canonical_repo_url: canonical_target_remote(resolved)?,
+        pr_number,
+        pr_base_repo_url,
+        pr_base_ref,
+        pr_head_repo_url: resolved
+            .pr_head_repo_url
+            .as_deref()
+            .and_then(canonicalize_remote),
+        pr_head_ref: resolved.pr_head_ref.clone(),
+        resolved_sha: resolved.resolved_sha.clone(),
+        summary_label: resolved.summary_label.clone(),
+        position,
+        enabled: true,
+        last_apply_status: None,
+        last_error: None,
+    })
+}
+
+fn normalize_overlay_positions(tracked_state: &mut TrackedRepoState) {
+    for (index, overlay) in tracked_state.overlays.iter_mut().enumerate() {
+        overlay.position = index;
+    }
+}
+
+fn branch_like_target_kind(kind: &TargetKind) -> bool {
+    matches!(
+        kind,
+        TargetKind::Branch | TargetKind::DefaultBranch | TargetKind::NamedRef
+    )
+}
+
+async fn load_repo_tracked_state(
+    state: &AppState,
+    installation: &Installation,
+    repo: &ManagedRepo,
+) -> AppResult<Option<TrackedRepoState>> {
+    if let Some(tracked_state) = repo.tracked_state.clone() {
+        return Ok(Some(tracked_state));
+    }
+
+    let Some(raw_input) = repo.tracked_target_input.as_deref().map(str::trim) else {
+        return Ok(None);
+    };
+    if raw_input.is_empty() {
+        return Ok(None);
+    }
+
+    let Some(target_kind) = repo.tracked_target_kind.as_ref() else {
+        return Err(AppError::InvalidInput(
+            "repo has tracked input but no tracked target kind".to_string(),
+        ));
+    };
+
+    if !matches!(target_kind, TargetKind::Pr) {
+        let canonical_repo_url = repo
+            .canonical_remote
+            .as_deref()
+            .and_then(canonicalize_remote)
+            .ok_or_else(|| {
+                AppError::Conflict(
+                    "tracked base target cannot be reconstructed because the repo remote is missing"
+                        .to_string(),
+                )
+            })?;
+        return Ok(Some(TrackedRepoState {
+            version: STACK_TRACKING_VERSION,
+            base: TrackedBaseTarget {
+                source_input: raw_input.to_string(),
+                target_kind: target_kind.clone(),
+                canonical_repo_url,
+                checkout_ref: raw_input.to_string(),
+                resolved_sha: repo.tracked_target_resolved_sha.clone(),
+                summary_label: raw_input.to_string(),
+            },
+            overlays: Vec::new(),
+            materialized_branch: None,
+        }));
+    }
+
+    let resolved =
+        resolve_target_for_context(state, installation, &repo.kind, Some(&repo.id), raw_input).await?;
+    ensure_remote_matches(repo.canonical_remote.as_deref(), &resolved)?;
+    let base_ref = resolved
+        .pr_base_ref
+        .clone()
+        .ok_or_else(|| AppError::Github("tracked PR is missing a base ref".to_string()))?;
+    let canonical_repo_url = resolved
+        .pr_base_repo_url
+        .as_deref()
+        .and_then(canonicalize_remote)
+        .or_else(|| canonicalize_remote(&resolved.canonical_repo_url))
+        .ok_or_else(|| AppError::Github("tracked PR base repo could not be canonicalized".to_string()))?;
+    Ok(Some(TrackedRepoState {
+        version: STACK_TRACKING_VERSION,
+        base: TrackedBaseTarget {
+            source_input: base_ref.clone(),
+            target_kind: TargetKind::Branch,
+            canonical_repo_url,
+            checkout_ref: base_ref.clone(),
+            resolved_sha: None,
+            summary_label: format!("branch {base_ref}"),
+        },
+        overlays: vec![make_tracked_overlay(&resolved, 0)?],
+        materialized_branch: Some(STACK_BRANCH_NAME.to_string()),
+    }))
+}
+
+async fn resolve_existing_base_target(
+    state: &AppState,
+    installation: &Installation,
+    repo: &ManagedRepo,
+    tracked_state: &TrackedRepoState,
+) -> AppResult<ResolvedTarget> {
+    let resolved = resolve_target_for_context(
+        state,
+        installation,
+        &repo.kind,
+        Some(&repo.id),
+        &tracked_state.base.source_input,
+    )
+    .await?;
+    if matches!(resolved.target_kind, TargetKind::Pr) {
+        return Err(AppError::Conflict(
+            "tracked repo base resolved to a pull request; base targets must be branch-like, tag, or commit targets"
+                .to_string(),
+        ));
+    }
+    ensure_remote_matches(repo.canonical_remote.as_deref(), &resolved)?;
+    Ok(resolved)
+}
+
+fn restore_checkpoint_error(primary: AppError, restore_error: AppError) -> AppError {
+    AppError::Git(format!(
+        "{}; additionally failed to restore the previous checkout: {}",
+        primary, restore_error
+    ))
+}
+
+async fn restore_checkpoint_state(
+    state: &AppState,
+    path: &Path,
+    repo_id: &str,
+    checkpoint: &RepoCheckpoint,
+    restore_stash: bool,
+) -> AppResult<()> {
+    let mut restore_errors = Vec::new();
+
+    if checkpoint.old_is_detached {
+        if let Err(err) = switch_detached(path, &checkpoint.old_head_sha).await {
+            restore_errors.push(format!("failed to restore detached HEAD: {err}"));
+        }
+    } else if let Some(branch) = checkpoint.old_branch.as_deref() {
+        if let Err(err) = switch_branch(path, branch, Some(&checkpoint.old_head_sha)).await {
+            restore_errors.push(format!("failed to restore branch '{}': {err}", branch));
+        }
+    } else {
+        if let Err(err) = switch_detached(path, &checkpoint.old_head_sha).await {
+            restore_errors.push(format!("failed to restore detached HEAD: {err}"));
+        }
+    }
+    if let Err(err) = reset_hard(path, &checkpoint.old_head_sha).await {
+        restore_errors.push(format!("failed to reset HEAD {}: {err}", checkpoint.old_head_sha));
+    }
+
+    if restore_stash && checkpoint.stash_created {
+        let Some(stash_ref) = checkpoint.stash_ref.as_deref() else {
+            restore_errors.push(
+                "checkpoint indicates a stash was created but no stash reference was stored"
+                    .to_string(),
+            );
+            if checkpoint.has_tracked_target_snapshot {
+                state.db.restore_repo_tracked_target(
+                    repo_id,
+                    checkpoint.old_tracked_target_kind.as_ref(),
+                    checkpoint.old_tracked_target_input.as_deref(),
+                    checkpoint.old_tracked_target_resolved_sha.as_deref(),
+                )?;
+            }
+            return Err(AppError::Git(restore_errors.join("; ")));
+        };
+        if let Err(err) = apply_stash(path, stash_ref).await {
+            restore_errors.push(format!("failed to restore stash: {err}"));
+        }
+    }
+
+    if checkpoint.has_tracked_target_snapshot {
+        if let Err(err) = state.db.restore_repo_tracked_target(
+            repo_id,
+            checkpoint.old_tracked_target_kind.as_ref(),
+            checkpoint.old_tracked_target_input.as_deref(),
+            checkpoint.old_tracked_target_resolved_sha.as_deref(),
+        ) {
+            restore_errors.push(format!("failed to restore tracked target metadata: {err}"));
+        }
+    }
+
+    if restore_errors.is_empty() {
+        Ok(())
+    } else {
+        Err(AppError::Git(restore_errors.join("; ")))
+    }
+}
+
+fn update_overlay_from_resolved(
+    overlay: &mut TrackedPrOverlay,
+    resolved: &ResolvedTarget,
+    position: usize,
+    status: OverlayApplyStatus,
+    last_error: Option<String>,
+) -> AppResult<()> {
+    let pr_number = resolved
+        .pr_number
+        .ok_or_else(|| AppError::Github("missing PR number".to_string()))?;
+    let pr_base_repo_url = resolved
+        .pr_base_repo_url
+        .as_deref()
+        .and_then(canonicalize_remote)
+        .ok_or_else(|| AppError::Github("missing PR base repository".to_string()))?;
+    let pr_base_ref = resolved
+        .pr_base_ref
+        .clone()
+        .ok_or_else(|| AppError::Github("missing PR base ref".to_string()))?;
+    overlay.id = make_overlay_id(pr_number);
+    overlay.source_input = resolved.source_input.clone();
+    overlay.canonical_repo_url = canonical_target_remote(resolved)?;
+    overlay.pr_number = pr_number;
+    overlay.pr_base_repo_url = pr_base_repo_url;
+    overlay.pr_base_ref = pr_base_ref;
+    overlay.pr_head_repo_url = resolved
+        .pr_head_repo_url
+        .as_deref()
+        .and_then(canonicalize_remote);
+    overlay.pr_head_ref = resolved.pr_head_ref.clone();
+    overlay.resolved_sha = resolved.resolved_sha.clone();
+    overlay.summary_label = resolved.summary_label.clone();
+    overlay.position = position;
+    overlay.last_apply_status = Some(status);
+    overlay.last_error = last_error;
+    Ok(())
+}
+
+async fn materialize_tracked_state(
+    state: &AppState,
+    app: &AppHandle,
+    operation_id: &str,
+    installation: &Installation,
+    repo: &ManagedRepo,
+    tracked_state: &TrackedRepoState,
+) -> Result<TrackedRepoState, (TrackedRepoState, AppError)> {
+    let path = Path::new(&repo.local_path);
+    let mut next_state = tracked_state.clone();
+    next_state.version = STACK_TRACKING_VERSION;
+    normalize_overlay_positions(&mut next_state);
+    for overlay in &mut next_state.overlays {
+        overlay.last_error = None;
+        overlay.last_apply_status = Some(if overlay.enabled {
+            OverlayApplyStatus::Pending
+        } else {
+            OverlayApplyStatus::Disabled
+        });
+    }
+
+    let base_resolved = match resolve_existing_base_target(state, installation, repo, &next_state).await {
+        Ok(resolved) => resolved,
+        Err(err) => return Err((next_state, err)),
+    };
+    next_state.base = match make_tracked_base_target(&base_resolved) {
+        Ok(base) => base,
+        Err(err) => return Err((next_state, err)),
+    };
+
+    if next_state.overlays.is_empty() {
+        next_state.materialized_branch = None;
+        if let Err(err) = apply_resolved_target(state, app, operation_id, repo, &base_resolved).await {
+            return Err((next_state, err));
+        }
+        return Ok(next_state);
+    }
+
+    if !branch_like_target_kind(&base_resolved.target_kind) {
+        return Err((
+            next_state,
+            AppError::Conflict(
+                "PR overlay stacks require a branch-like base target".to_string(),
+            ),
+        ));
+    }
+
+    log_operation(
+        state,
+        app,
+        operation_id,
+        "fetch",
+        "info",
+        format!("materializing stack from {}", next_state.base.summary_label),
+    );
+    if let Err(err) = fetch_origin(path).await {
+        return Err((next_state, err));
+    }
+    let remote_ref = format!("origin/{}", base_resolved.checkout_ref);
+    log_operation(
+        state,
+        app,
+        operation_id,
+        "checkout",
+        "info",
+        format!("resetting {} from {}", STACK_BRANCH_NAME, remote_ref),
+    );
+    if let Err(err) = switch_branch(path, STACK_BRANCH_NAME, Some(&remote_ref)).await {
+        return Err((next_state, err));
+    }
+    if let Err(err) = reset_hard(path, &remote_ref).await {
+        return Err((next_state, err));
+    }
+    next_state.materialized_branch = Some(STACK_BRANCH_NAME.to_string());
+
+    for (position, overlay) in next_state.overlays.iter_mut().enumerate() {
+        overlay.position = position;
+        if !overlay.enabled {
+            overlay.last_apply_status = Some(OverlayApplyStatus::Disabled);
+            overlay.last_error = None;
+            continue;
+        }
+
+        let overlay_resolved = match resolve_target_for_context(
+            state,
+            installation,
+            &repo.kind,
+            Some(&repo.id),
+            &overlay.source_input,
+        )
+        .await
+        {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                overlay.last_apply_status = Some(OverlayApplyStatus::Error);
+                overlay.last_error = Some(err.to_string());
+                return Err((next_state, err));
+            }
+        };
+
+        if !matches!(overlay_resolved.target_kind, TargetKind::Pr) {
+            let err = AppError::Conflict(format!(
+                "overlay '{}' no longer resolves to a pull request",
+                overlay.source_input
+            ));
+            overlay.last_apply_status = Some(OverlayApplyStatus::Error);
+            overlay.last_error = Some(err.to_string());
+            return Err((next_state, err));
+        }
+
+        if let Err(err) = ensure_remote_matches(repo.canonical_remote.as_deref(), &overlay_resolved) {
+            overlay.last_apply_status = Some(OverlayApplyStatus::Error);
+            overlay.last_error = Some(err.to_string());
+            return Err((next_state, err));
+        }
+
+        let overlay_base_ref = overlay_resolved.pr_base_ref.clone().unwrap_or_default();
+        if overlay_base_ref != base_resolved.checkout_ref {
+            let err = AppError::Conflict(format!(
+                "PR #{} targets base branch '{}' but this stack is based on '{}'",
+                overlay_resolved.pr_number.unwrap_or_default(),
+                overlay_base_ref,
+                base_resolved.checkout_ref
+            ));
+            overlay.last_apply_status = Some(OverlayApplyStatus::Conflict);
+            overlay.last_error = Some(err.to_string());
+            return Err((next_state, err));
+        }
+
+        if let Err(err) = update_overlay_from_resolved(
+            overlay,
+            &overlay_resolved,
+            position,
+            OverlayApplyStatus::Pending,
+            None,
+        ) {
+            overlay.last_apply_status = Some(OverlayApplyStatus::Error);
+            overlay.last_error = Some(err.to_string());
+            return Err((next_state, err));
+        }
+
+        let pr_number = overlay.pr_number;
+        let overlay_ref = format!("patcher/pr-{pr_number}");
+        let refspec = format!("pull/{pr_number}/head:{overlay_ref}");
+        log_operation(
+            state,
+            app,
+            operation_id,
+            "fetch",
+            "info",
+            format!("fetching PR #{pr_number}"),
+        );
+        if let Err(err) = fetch_refspec(path, "origin", &refspec).await {
+            overlay.last_apply_status = Some(OverlayApplyStatus::Error);
+            overlay.last_error = Some(err.to_string());
+            return Err((next_state, err));
+        }
+        log_operation(
+            state,
+            app,
+            operation_id,
+            "checkout",
+            "info",
+            format!("merging PR #{pr_number} into {}", STACK_BRANCH_NAME),
+        );
+        if let Err(err) = merge_no_ff(
+            path,
+            &overlay_ref,
+            &format!("patcher stack: merge PR #{pr_number}"),
+        )
+        .await
+        {
+            let merge_error = match merge_abort(path).await {
+                Ok(()) => err,
+                Err(abort_err) => restore_checkpoint_error(err, abort_err),
+            };
+            overlay.last_apply_status = Some(OverlayApplyStatus::Conflict);
+            overlay.last_error = Some(merge_error.to_string());
+            return Err((next_state, merge_error));
+        }
+        overlay.last_apply_status = Some(OverlayApplyStatus::Applied);
+        overlay.last_error = None;
+    }
+
+    log_operation(
+        state,
+        app,
+        operation_id,
+        "submodules",
+        "info",
+        "updating submodules",
+    );
+    let _ = submodule_update(path).await;
+    Ok(next_state)
+}
+
+async fn apply_repo_tracking_state(
+    state: &AppState,
+    app: &AppHandle,
+    operation_id: &str,
+    installation: &Installation,
+    repo: &ManagedRepo,
+    tracked_state: &TrackedRepoState,
+    dirty_repo_strategy: &DirtyRepoStrategy,
+    sync_dependencies: bool,
+    write_tracked_target: bool,
+) -> AppResult<RepoCheckpoint> {
+    let checkpoint =
+        create_checkpoint_if_needed(state, repo, operation_id, dirty_repo_strategy).await?;
+    log_operation(
+        state,
+        app,
+        operation_id,
+        "checkpoint",
+        "info",
+        format!("checkpoint {} created", checkpoint.id),
+    );
+
+    let path = Path::new(&repo.local_path);
+    let result = async {
+        let final_state = materialize_tracked_state(
+            state,
+            app,
+            operation_id,
+            installation,
+            repo,
+            tracked_state,
+        )
+        .await
+        .map_err(|(_, err)| err)?;
+
+        maybe_sync_dependencies(
+            state,
+            app,
+            operation_id,
+            installation,
+            path,
+            sync_dependencies,
+        )
+        .await?;
+        refresh_repo_state(state, &repo.id).await?;
+        let refreshed_repo = state.db.get_repo(&repo.id)?.ok_or_else(|| {
+            AppError::NotFound("managed repo not found after stack apply".to_string())
+        })?;
+        if write_tracked_target {
+            state.db.set_repo_tracked_state(
+                &repo.id,
+                Some(&final_state),
+                refreshed_repo.current_head_sha.as_deref(),
+            )?;
+        }
+
+        Ok::<(), AppError>(())
+    }
+    .await;
+
+    match result {
+        Ok(()) => Ok(checkpoint),
+        Err(err) => {
+            let restore_result =
+                restore_checkpoint_state(state, path, &repo.id, &checkpoint, true).await;
+            if let Err(refresh_err) = refresh_repo_state(state, &repo.id).await {
+                log_operation(
+                    state,
+                    app,
+                    operation_id,
+                    "error",
+                    "warn",
+                    format!("failed to refresh repo state after stack error: {refresh_err}"),
+                );
+            }
+            match restore_result {
+                Ok(()) => Err(err),
+                Err(restore_err) => Err(restore_checkpoint_error(err, restore_err)),
+            }
+        }
+    }
+}
+
+async fn build_requested_tracked_state_for_input(
+    state: &AppState,
+    installation: &Installation,
+    repo: &ManagedRepo,
+    input: &str,
+    clear_overlays_on_base_change: bool,
+) -> AppResult<TrackedRepoState> {
+    let resolved =
+        resolve_target_for_context(state, installation, &repo.kind, Some(&repo.id), input).await?;
+    ensure_remote_matches(repo.canonical_remote.as_deref(), &resolved)?;
+
+    if matches!(resolved.target_kind, TargetKind::Pr) {
+        let Some(base_ref) = resolved.pr_base_ref.clone() else {
+            return Err(AppError::Github("resolved PR is missing a base ref".to_string()));
+        };
+        let canonical_repo_url = resolved
+            .pr_base_repo_url
+            .as_deref()
+            .and_then(canonicalize_remote)
+            .or_else(|| canonicalize_remote(&resolved.canonical_repo_url))
+            .ok_or_else(|| AppError::Github("resolved PR base repo could not be canonicalized".to_string()))?;
+        let mut tracked_state = match load_repo_tracked_state(state, installation, repo).await? {
+            Some(mut existing) => {
+                let existing_base = resolve_existing_base_target(state, installation, repo, &existing).await?;
+                existing.base = make_tracked_base_target(&existing_base)?;
+                if !branch_like_target_kind(&existing.base.target_kind) {
+                    return Err(AppError::Conflict(
+                        "PR overlays require a branch-like base target".to_string(),
+                    ));
+                }
+                if existing.base.checkout_ref != base_ref {
+                    return Err(AppError::Conflict(format!(
+                        "PR overlays for this repo must target base branch '{}', but this PR targets '{}'",
+                        existing.base.checkout_ref, base_ref
+                    )));
+                }
+                existing
+            }
+            None => TrackedRepoState {
+                version: STACK_TRACKING_VERSION,
+                base: TrackedBaseTarget {
+                    source_input: base_ref.clone(),
+                    target_kind: TargetKind::Branch,
+                    canonical_repo_url,
+                    checkout_ref: base_ref.clone(),
+                    resolved_sha: None,
+                    summary_label: format!("branch {base_ref}"),
+                },
+                overlays: Vec::new(),
+                materialized_branch: Some(STACK_BRANCH_NAME.to_string()),
+            },
+        };
+        let overlay = make_tracked_overlay(&resolved, tracked_state.overlays.len())?;
+        if tracked_state
+            .overlays
+            .iter()
+            .any(|existing| existing.pr_number == overlay.pr_number)
+        {
+            return Ok(tracked_state);
+        }
+        tracked_state.overlays.push(overlay);
+        normalize_overlay_positions(&mut tracked_state);
+        tracked_state.materialized_branch = Some(STACK_BRANCH_NAME.to_string());
+        return Ok(tracked_state);
+    }
+
+    build_base_tracked_state_for_input(
+        state,
+        installation,
+        repo,
+        &resolved,
+        clear_overlays_on_base_change,
+    )
+    .await
+}
+
+async fn build_base_tracked_state_for_input(
+    state: &AppState,
+    installation: &Installation,
+    repo: &ManagedRepo,
+    resolved: &ResolvedTarget,
+    clear_overlays_on_base_change: bool,
+) -> AppResult<TrackedRepoState> {
+    if matches!(resolved.target_kind, TargetKind::Pr) {
+        return Err(AppError::Conflict(
+            "pull requests cannot be applied through the base-target flow".to_string(),
+        ));
+    }
+
+    let existing_state = load_repo_tracked_state(state, installation, repo).await?;
+    if existing_state
+        .as_ref()
+        .is_some_and(|tracked| !tracked.overlays.is_empty() && !clear_overlays_on_base_change)
+    {
+        return Err(AppError::Conflict(
+            "repo already tracks PR overlays; use the explicit base replacement flow to clear them before changing the base target"
+                .to_string(),
+        ));
+    }
+
+    Ok(TrackedRepoState {
+        version: STACK_TRACKING_VERSION,
+        base: make_tracked_base_target(resolved)?,
+        overlays: Vec::new(),
+        materialized_branch: None,
+    })
+}
+
+fn overlay_index(tracked_state: &TrackedRepoState, overlay_id: &str) -> AppResult<usize> {
+    tracked_state
+        .overlays
+        .iter()
+        .position(|overlay| overlay.id == overlay_id)
+        .ok_or_else(|| AppError::NotFound(format!("overlay '{}' not found", overlay_id)))
+}
+
+fn stack_operation_summary(action: &str, repo: &ManagedRepo) -> String {
+    format!("{action} for {}", repo.display_name)
+}
+
 async fn find_existing_custom_node_repo_by_remote(
     state: &AppState,
     installation: &Installation,
@@ -540,6 +1219,10 @@ async fn create_checkpoint_if_needed(
         &head,
         status.branch.as_deref(),
         status.is_detached,
+        true,
+        repo.tracked_target_kind.as_ref(),
+        repo.tracked_target_input.as_deref(),
+        repo.tracked_target_resolved_sha.as_deref(),
         false,
         None,
     )?;
@@ -730,45 +1413,26 @@ async fn apply_repo_target_update(
     sync_dependencies: bool,
     write_tracked_target: bool,
 ) -> AppResult<RepoCheckpoint> {
-    let resolved = resolve_target_for_context(
+    let tracked_state = build_requested_tracked_state_for_input(
         state,
         installation,
-        &repo.kind,
-        Some(&repo.id),
+        repo,
         target_input,
+        false,
     )
     .await?;
-    ensure_remote_matches(repo.canonical_remote.as_deref(), &resolved)?;
-    let checkpoint =
-        create_checkpoint_if_needed(state, repo, operation_id, dirty_repo_strategy).await?;
-    log_operation(
-        state,
-        app,
-        operation_id,
-        "checkpoint",
-        "info",
-        format!("checkpoint {} created", checkpoint.id),
-    );
-    apply_resolved_target(state, app, operation_id, repo, &resolved).await?;
-    maybe_sync_dependencies(
+    apply_repo_tracking_state(
         state,
         app,
         operation_id,
         installation,
-        Path::new(&repo.local_path),
+        repo,
+        &tracked_state,
+        dirty_repo_strategy,
         sync_dependencies,
+        write_tracked_target,
     )
-    .await?;
-    refresh_repo_state(state, &repo.id).await?;
-    if write_tracked_target {
-        state.db.set_repo_tracked_target(
-            &repo.id,
-            Some(resolved.target_kind.clone()),
-            Some(target_input),
-            resolved.resolved_sha.as_deref(),
-        )?;
-    }
-    Ok(checkpoint)
+    .await
 }
 
 #[tauri::command]
@@ -1388,40 +2052,26 @@ async fn run_install_or_patch_custom_node(
                 )?;
                 let repo_lock = state.repo_lock(&repo.id).await;
                 let _guard = repo_lock.lock().await;
-                let checkpoint = create_checkpoint_if_needed(
+                let tracked_state = build_requested_tracked_state_for_input(
                     &state,
+                    &installation,
                     &repo,
-                    &operation_id,
-                    &input.dirty_repo_strategy,
+                    &input.input,
+                    false,
                 )
                 .await?;
-                log_operation(
-                    &state,
-                    &app,
-                    &operation_id,
-                    "checkpoint",
-                    "info",
-                    format!("checkpoint {} created", checkpoint.id),
-                );
-                apply_resolved_target(&state, &app, &operation_id, &repo, &resolved).await?;
-                maybe_sync_dependencies(
+                let checkpoint = apply_repo_tracking_state(
                     &state,
                     &app,
                     &operation_id,
                     &installation,
-                    Path::new(&repo.local_path),
+                    &repo,
+                    &tracked_state,
+                    &input.dirty_repo_strategy,
                     input.sync_dependencies,
+                    input.set_tracked_target,
                 )
                 .await?;
-                refresh_repo_state(&state, &repo.id).await?;
-                if input.set_tracked_target {
-                    state.db.set_repo_tracked_target(
-                        &repo.id,
-                        Some(resolved.target_kind.clone()),
-                        Some(&input.input),
-                        resolved.resolved_sha.as_deref(),
-                    )?;
-                }
                 maybe_restart_installation(
                     &state,
                     &app,
@@ -1532,38 +2182,28 @@ async fn run_install_or_patch_custom_node(
         }
         let repo_lock = state.repo_lock(&repo.id).await;
         let _guard = repo_lock.lock().await;
-        let checkpoint =
-            create_checkpoint_if_needed(&state, &repo, &operation_id, &DirtyRepoStrategy::Abort)
-                .await?;
-        log_operation(
+        let tracked_state = build_requested_tracked_state_for_input(
             &state,
-            &app,
-            &operation_id,
-            "checkpoint",
-            "info",
-            format!("checkpoint {} created", checkpoint.id),
-        );
-        if tracking_backup_path.is_some() {
-            rollback_checkpoint_id = Some(checkpoint.id.clone());
-        }
-        apply_resolved_target(&state, &app, &operation_id, &repo, &resolved).await?;
-        maybe_sync_dependencies(
+            &installation,
+            &repo,
+            &input.input,
+            false,
+        )
+        .await?;
+        let checkpoint = apply_repo_tracking_state(
             &state,
             &app,
             &operation_id,
             &installation,
-            &target_path,
+            &repo,
+            &tracked_state,
+            &DirtyRepoStrategy::Abort,
             input.sync_dependencies,
+            input.set_tracked_target,
         )
         .await?;
-        refresh_repo_state(&state, &repo.id).await?;
-        if input.set_tracked_target {
-            state.db.set_repo_tracked_target(
-                &repo.id,
-                Some(resolved.target_kind.clone()),
-                Some(&input.input),
-                resolved.resolved_sha.as_deref(),
-            )?;
+        if tracking_backup_path.is_some() {
+            rollback_checkpoint_id = Some(checkpoint.id.clone());
         }
         maybe_restart_installation(
             &state,
@@ -1693,6 +2333,578 @@ async fn run_install_or_patch_custom_node(
 }
 
 #[tauri::command]
+async fn set_repo_base_target(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: SetRepoBaseTargetInput,
+) -> Result<OperationStart, String> {
+    let repo = state
+        .db
+        .get_repo(&input.repo_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "repo not found".to_string())?;
+    let installation = state
+        .db
+        .get_installation(&repo.installation_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "installation not found".to_string())?;
+    let op = state
+        .db
+        .create_operation(
+            &installation.id,
+            Some(&repo.id),
+            OperationKind::ManageRepoStack,
+            Some(&input.input),
+        )
+        .map_err(|e| e.to_string())?;
+    let op_id = op.id.clone();
+    let state_handle = app.state::<AppState>().inner().clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = run_set_repo_base_target(app, state_handle, installation, repo, input, op_id).await;
+    });
+    Ok(OperationStart {
+        operation_id: op.id,
+    })
+}
+
+async fn run_set_repo_base_target(
+    app: AppHandle,
+    state: AppState,
+    installation: Installation,
+    repo: ManagedRepo,
+    input: SetRepoBaseTargetInput,
+    operation_id: String,
+) -> AppResult<()> {
+    state.db.set_operation_running(&operation_id)?;
+    let repo_lock = state.repo_lock(&repo.id).await;
+    let _guard = repo_lock.lock().await;
+    log_operation(
+        &state,
+        &app,
+        &operation_id,
+        "preflight",
+        "info",
+        stack_operation_summary("setting repo base target", &repo),
+    );
+    let result = async {
+        let resolved = resolve_target_for_context(
+            &state,
+            &installation,
+            &repo.kind,
+            Some(&repo.id),
+            &input.input,
+        )
+        .await?;
+        ensure_remote_matches(repo.canonical_remote.as_deref(), &resolved)?;
+        let tracked_state = build_base_tracked_state_for_input(
+            &state,
+            &installation,
+            &repo,
+            &resolved,
+            input.clear_overlays,
+        )
+        .await?;
+        let checkpoint = apply_repo_tracking_state(
+            &state,
+            &app,
+            &operation_id,
+            &installation,
+            &repo,
+            &tracked_state,
+            &input.dirty_repo_strategy,
+            input.sync_dependencies,
+            true,
+        )
+        .await?;
+        state.db.finish_operation(
+            &operation_id,
+            OperationStatus::Succeeded,
+            None,
+            Some(&checkpoint.id),
+        )?;
+        log_operation(
+            &state,
+            &app,
+            &operation_id,
+            "done",
+            "info",
+            "repo base target updated",
+        );
+        Ok::<(), AppError>(())
+    }
+    .await;
+    if let Err(err) = result {
+        state.db.finish_operation(
+            &operation_id,
+            OperationStatus::Failed,
+            Some(&err.to_string()),
+            None,
+        )?;
+        log_operation(
+            &state,
+            &app,
+            &operation_id,
+            "error",
+            "error",
+            err.to_string(),
+        );
+        return Err(err);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn add_repo_overlay(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: AddRepoOverlayInput,
+) -> Result<OperationStart, String> {
+    let repo = state
+        .db
+        .get_repo(&input.repo_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "repo not found".to_string())?;
+    let installation = state
+        .db
+        .get_installation(&repo.installation_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "installation not found".to_string())?;
+    let op = state
+        .db
+        .create_operation(
+            &installation.id,
+            Some(&repo.id),
+            OperationKind::ManageRepoStack,
+            Some(&input.input),
+        )
+        .map_err(|e| e.to_string())?;
+    let op_id = op.id.clone();
+    let state_handle = app.state::<AppState>().inner().clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = run_add_repo_overlay(app, state_handle, installation, repo, input, op_id).await;
+    });
+    Ok(OperationStart {
+        operation_id: op.id,
+    })
+}
+
+async fn run_add_repo_overlay(
+    app: AppHandle,
+    state: AppState,
+    installation: Installation,
+    repo: ManagedRepo,
+    input: AddRepoOverlayInput,
+    operation_id: String,
+) -> AppResult<()> {
+    state.db.set_operation_running(&operation_id)?;
+    let repo_lock = state.repo_lock(&repo.id).await;
+    let _guard = repo_lock.lock().await;
+    log_operation(
+        &state,
+        &app,
+        &operation_id,
+        "preflight",
+        "info",
+        stack_operation_summary("adding repo overlay", &repo),
+    );
+    let result = async {
+        let tracked_state = build_requested_tracked_state_for_input(
+            &state,
+            &installation,
+            &repo,
+            &input.input,
+            false,
+        )
+        .await?;
+        let checkpoint = apply_repo_tracking_state(
+            &state,
+            &app,
+            &operation_id,
+            &installation,
+            &repo,
+            &tracked_state,
+            &input.dirty_repo_strategy,
+            input.sync_dependencies,
+            true,
+        )
+        .await?;
+        state.db.finish_operation(
+            &operation_id,
+            OperationStatus::Succeeded,
+            None,
+            Some(&checkpoint.id),
+        )?;
+        log_operation(
+            &state,
+            &app,
+            &operation_id,
+            "done",
+            "info",
+            "repo overlay added",
+        );
+        Ok::<(), AppError>(())
+    }
+    .await;
+    if let Err(err) = result {
+        state.db.finish_operation(
+            &operation_id,
+            OperationStatus::Failed,
+            Some(&err.to_string()),
+            None,
+        )?;
+        log_operation(
+            &state,
+            &app,
+            &operation_id,
+            "error",
+            "error",
+            err.to_string(),
+        );
+        return Err(err);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_repo_overlay_enabled(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: SetRepoOverlayEnabledInput,
+) -> Result<OperationStart, String> {
+    let repo = state
+        .db
+        .get_repo(&input.repo_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "repo not found".to_string())?;
+    let installation = state
+        .db
+        .get_installation(&repo.installation_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "installation not found".to_string())?;
+    let op = state
+        .db
+        .create_operation(
+            &installation.id,
+            Some(&repo.id),
+            OperationKind::ManageRepoStack,
+            Some(&input.overlay_id),
+        )
+        .map_err(|e| e.to_string())?;
+    let op_id = op.id.clone();
+    let state_handle = app.state::<AppState>().inner().clone();
+    tauri::async_runtime::spawn(async move {
+        let _ =
+            run_set_repo_overlay_enabled(app, state_handle, installation, repo, input, op_id).await;
+    });
+    Ok(OperationStart {
+        operation_id: op.id,
+    })
+}
+
+async fn run_set_repo_overlay_enabled(
+    app: AppHandle,
+    state: AppState,
+    installation: Installation,
+    repo: ManagedRepo,
+    input: SetRepoOverlayEnabledInput,
+    operation_id: String,
+) -> AppResult<()> {
+    state.db.set_operation_running(&operation_id)?;
+    let repo_lock = state.repo_lock(&repo.id).await;
+    let _guard = repo_lock.lock().await;
+    log_operation(
+        &state,
+        &app,
+        &operation_id,
+        "preflight",
+        "info",
+        stack_operation_summary("updating overlay activation", &repo),
+    );
+    let result = async {
+        let mut tracked_state = load_repo_tracked_state(&state, &installation, &repo)
+            .await?
+            .ok_or_else(|| AppError::InvalidInput("repo has no tracked stack".to_string()))?;
+        let index = overlay_index(&tracked_state, &input.overlay_id)?;
+        tracked_state.overlays[index].enabled = input.enabled;
+        let checkpoint = apply_repo_tracking_state(
+            &state,
+            &app,
+            &operation_id,
+            &installation,
+            &repo,
+            &tracked_state,
+            &input.dirty_repo_strategy,
+            input.sync_dependencies,
+            true,
+        )
+        .await?;
+        state.db.finish_operation(
+            &operation_id,
+            OperationStatus::Succeeded,
+            None,
+            Some(&checkpoint.id),
+        )?;
+        log_operation(
+            &state,
+            &app,
+            &operation_id,
+            "done",
+            "info",
+            "overlay activation updated",
+        );
+        Ok::<(), AppError>(())
+    }
+    .await;
+    if let Err(err) = result {
+        state.db.finish_operation(
+            &operation_id,
+            OperationStatus::Failed,
+            Some(&err.to_string()),
+            None,
+        )?;
+        log_operation(
+            &state,
+            &app,
+            &operation_id,
+            "error",
+            "error",
+            err.to_string(),
+        );
+        return Err(err);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn remove_repo_overlay(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: RemoveRepoOverlayInput,
+) -> Result<OperationStart, String> {
+    let repo = state
+        .db
+        .get_repo(&input.repo_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "repo not found".to_string())?;
+    let installation = state
+        .db
+        .get_installation(&repo.installation_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "installation not found".to_string())?;
+    let op = state
+        .db
+        .create_operation(
+            &installation.id,
+            Some(&repo.id),
+            OperationKind::ManageRepoStack,
+            Some(&input.overlay_id),
+        )
+        .map_err(|e| e.to_string())?;
+    let op_id = op.id.clone();
+    let state_handle = app.state::<AppState>().inner().clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = run_remove_repo_overlay(app, state_handle, installation, repo, input, op_id).await;
+    });
+    Ok(OperationStart {
+        operation_id: op.id,
+    })
+}
+
+async fn run_remove_repo_overlay(
+    app: AppHandle,
+    state: AppState,
+    installation: Installation,
+    repo: ManagedRepo,
+    input: RemoveRepoOverlayInput,
+    operation_id: String,
+) -> AppResult<()> {
+    state.db.set_operation_running(&operation_id)?;
+    let repo_lock = state.repo_lock(&repo.id).await;
+    let _guard = repo_lock.lock().await;
+    log_operation(
+        &state,
+        &app,
+        &operation_id,
+        "preflight",
+        "info",
+        stack_operation_summary("removing repo overlay", &repo),
+    );
+    let result = async {
+        let mut tracked_state = load_repo_tracked_state(&state, &installation, &repo)
+            .await?
+            .ok_or_else(|| AppError::InvalidInput("repo has no tracked stack".to_string()))?;
+        let index = overlay_index(&tracked_state, &input.overlay_id)?;
+        tracked_state.overlays.remove(index);
+        normalize_overlay_positions(&mut tracked_state);
+        tracked_state.materialized_branch =
+            (!tracked_state.overlays.is_empty()).then(|| STACK_BRANCH_NAME.to_string());
+        let checkpoint = apply_repo_tracking_state(
+            &state,
+            &app,
+            &operation_id,
+            &installation,
+            &repo,
+            &tracked_state,
+            &input.dirty_repo_strategy,
+            input.sync_dependencies,
+            true,
+        )
+        .await?;
+        state.db.finish_operation(
+            &operation_id,
+            OperationStatus::Succeeded,
+            None,
+            Some(&checkpoint.id),
+        )?;
+        log_operation(
+            &state,
+            &app,
+            &operation_id,
+            "done",
+            "info",
+            "repo overlay removed",
+        );
+        Ok::<(), AppError>(())
+    }
+    .await;
+    if let Err(err) = result {
+        state.db.finish_operation(
+            &operation_id,
+            OperationStatus::Failed,
+            Some(&err.to_string()),
+            None,
+        )?;
+        log_operation(
+            &state,
+            &app,
+            &operation_id,
+            "error",
+            "error",
+            err.to_string(),
+        );
+        return Err(err);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn move_repo_overlay(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: MoveRepoOverlayInput,
+) -> Result<OperationStart, String> {
+    let repo = state
+        .db
+        .get_repo(&input.repo_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "repo not found".to_string())?;
+    let installation = state
+        .db
+        .get_installation(&repo.installation_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "installation not found".to_string())?;
+    let op = state
+        .db
+        .create_operation(
+            &installation.id,
+            Some(&repo.id),
+            OperationKind::ManageRepoStack,
+            Some(&input.overlay_id),
+        )
+        .map_err(|e| e.to_string())?;
+    let op_id = op.id.clone();
+    let state_handle = app.state::<AppState>().inner().clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = run_move_repo_overlay(app, state_handle, installation, repo, input, op_id).await;
+    });
+    Ok(OperationStart {
+        operation_id: op.id,
+    })
+}
+
+async fn run_move_repo_overlay(
+    app: AppHandle,
+    state: AppState,
+    installation: Installation,
+    repo: ManagedRepo,
+    input: MoveRepoOverlayInput,
+    operation_id: String,
+) -> AppResult<()> {
+    state.db.set_operation_running(&operation_id)?;
+    let repo_lock = state.repo_lock(&repo.id).await;
+    let _guard = repo_lock.lock().await;
+    log_operation(
+        &state,
+        &app,
+        &operation_id,
+        "preflight",
+        "info",
+        stack_operation_summary("reordering repo overlay", &repo),
+    );
+    let result = async {
+        let mut tracked_state = load_repo_tracked_state(&state, &installation, &repo)
+            .await?
+            .ok_or_else(|| AppError::InvalidInput("repo has no tracked stack".to_string()))?;
+        let index = overlay_index(&tracked_state, &input.overlay_id)?;
+        let target_index = match input.direction {
+            OverlayMoveDirection::Up if index > 0 => index - 1,
+            OverlayMoveDirection::Down if index + 1 < tracked_state.overlays.len() => index + 1,
+            _ => index,
+        };
+        if target_index != index {
+            tracked_state.overlays.swap(index, target_index);
+            normalize_overlay_positions(&mut tracked_state);
+        }
+        let checkpoint = apply_repo_tracking_state(
+            &state,
+            &app,
+            &operation_id,
+            &installation,
+            &repo,
+            &tracked_state,
+            &input.dirty_repo_strategy,
+            input.sync_dependencies,
+            true,
+        )
+        .await?;
+        state.db.finish_operation(
+            &operation_id,
+            OperationStatus::Succeeded,
+            None,
+            Some(&checkpoint.id),
+        )?;
+        log_operation(
+            &state,
+            &app,
+            &operation_id,
+            "done",
+            "info",
+            "repo overlay order updated",
+        );
+        Ok::<(), AppError>(())
+    }
+    .await;
+    if let Err(err) = result {
+        state.db.finish_operation(
+            &operation_id,
+            OperationStatus::Failed,
+            Some(&err.to_string()),
+            None,
+        )?;
+        log_operation(
+            &state,
+            &app,
+            &operation_id,
+            "error",
+            "error",
+            err.to_string(),
+        );
+        return Err(err);
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn update_repo(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -1714,7 +2926,10 @@ async fn update_repo(
             &installation.id,
             Some(&repo.id),
             OperationKind::UpdateRepo,
-            repo.tracked_target_input.as_deref(),
+            repo.tracked_state
+                .as_ref()
+                .map(|tracked| tracked.base.source_input.as_str())
+                .or(repo.tracked_target_input.as_deref()),
         )
         .map_err(|e| e.to_string())?;
     let op_id = op.id.clone();
@@ -1747,17 +2962,16 @@ async fn run_update_repo(
         format!("updating {}", repo.display_name),
     );
     let result = async {
-        let tracked = repo
-            .tracked_target_input
-            .clone()
+        let tracked_state = load_repo_tracked_state(&state, &installation, &repo)
+            .await?
             .ok_or_else(|| AppError::InvalidInput("repo has no tracked target".to_string()))?;
-        let checkpoint = apply_repo_target_update(
+        let checkpoint = apply_repo_tracking_state(
             &state,
             &app,
             &operation_id,
             &installation,
             &repo,
-            &tracked,
+            &tracked_state,
             &input.dirty_repo_strategy,
             input.sync_dependencies,
             true,
@@ -1852,7 +3066,8 @@ async fn run_update_all(
         let mut failures = Vec::new();
 
         for repo in repos {
-            if let Some(tracked) = repo.tracked_target_input.clone() {
+            if let Some(tracked_state) = load_repo_tracked_state(&state, &installation, &repo).await?
+            {
                 let repo_lock = state.repo_lock(&repo.id).await;
                 let _guard = repo_lock.lock().await;
                 log_operation(
@@ -1863,13 +3078,13 @@ async fn run_update_all(
                     "info",
                     format!("updating {}", repo.display_name),
                 );
-                match apply_repo_target_update(
+                match apply_repo_tracking_state(
                     &state,
                     &app,
                     &operation_id,
                     &installation,
                     &repo,
-                    &tracked,
+                    &tracked_state,
                     &input.dirty_repo_strategy,
                     input.sync_dependencies,
                     true,
@@ -2021,34 +3236,15 @@ async fn run_rollback_repo(
             format!("restoring {}", checkpoint.old_head_sha),
         );
         let path = Path::new(&repo.local_path);
-        if checkpoint.old_is_detached {
-            switch_detached(path, &checkpoint.old_head_sha).await?;
-        } else if let Some(branch) = checkpoint.old_branch.as_deref() {
-            switch_branch(path, branch, Some(&checkpoint.old_head_sha)).await?;
-        } else {
-            switch_detached(path, &checkpoint.old_head_sha).await?;
-        }
-        reset_hard(path, &checkpoint.old_head_sha).await?;
+        restore_checkpoint_state(
+            &state,
+            path,
+            &repo.id,
+            &checkpoint,
+            input.restore_stash,
+        )
+        .await?;
         let _ = submodule_update(path).await;
-        if input.restore_stash && checkpoint.stash_created {
-            let stash_ref = checkpoint.stash_ref.as_deref().ok_or_else(|| {
-                AppError::Git(
-                    "checkpoint indicates a stash was created but no stash reference was stored"
-                        .to_string(),
-                )
-            })?;
-            if let Err(err) = apply_stash(path, stash_ref).await {
-                log_operation(
-                    &state,
-                    &app,
-                    &operation_id,
-                    "stash",
-                    "error",
-                    format!("failed to restore stash: {err}"),
-                );
-                return Err(AppError::Git(format!("failed to restore stash: {err}")));
-            }
-        }
         maybe_sync_dependencies(
             &state,
             &app,
@@ -2443,6 +3639,11 @@ pub fn run() {
             resolve_target,
             patch_core,
             install_or_patch_custom_node,
+            set_repo_base_target,
+            add_repo_overlay,
+            set_repo_overlay_enabled,
+            remove_repo_overlay,
+            move_repo_overlay,
             update_repo,
             update_all,
             rollback_repo,

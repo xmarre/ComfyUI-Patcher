@@ -1,7 +1,7 @@
 use crate::errors::{AppError, AppResult};
 use crate::models::{
     Installation, InstallationDetail, LaunchProfile, ManagedRepo, OperationKind, OperationRecord,
-    OperationStatus, RepoCheckpoint, RepoKind, TargetKind,
+    OperationStatus, RepoCheckpoint, RepoKind, TargetKind, TrackedBaseTarget, TrackedRepoState,
 };
 use crate::util::{new_id, now_rfc3339};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -27,10 +27,6 @@ impl Database {
 
     fn connect(&self) -> AppResult<Connection> {
         Ok(Connection::open(&self.path)?)
-    }
-
-    pub fn logs_dir(&self) -> &Path {
-        &self.logs_dir
     }
 
     fn init(&self) -> AppResult<()> {
@@ -90,12 +86,17 @@ impl Database {
                 old_head_sha TEXT NOT NULL,
                 old_branch TEXT,
                 old_is_detached INTEGER NOT NULL,
+                has_tracked_target_snapshot INTEGER NOT NULL DEFAULT 0,
+                old_tracked_target_kind TEXT,
+                old_tracked_target_input TEXT,
+                old_tracked_target_resolved_sha TEXT,
                 stash_created INTEGER NOT NULL,
                 stash_ref TEXT,
                 created_at TEXT NOT NULL
             );
             "#,
         )?;
+        ensure_repo_checkpoint_tracking_columns(&conn)?;
         let has_duplicate_roots = conn.query_row(
             "SELECT EXISTS(
                  SELECT 1
@@ -423,22 +424,56 @@ impl Database {
         Ok(())
     }
 
-    pub fn set_repo_tracked_target(
+    pub fn set_repo_tracked_state(
         &self,
         repo_id: &str,
-        target_kind: Option<TargetKind>,
-        target_input: Option<&str>,
+        tracked_state: Option<&TrackedRepoState>,
         resolved_sha: Option<&str>,
     ) -> AppResult<()> {
         let conn = self.connect()?;
-        let target_kind_json = target_kind
-            .map(|value| serde_json::to_string(&value))
+        let target_kind_json = tracked_state
+            .map(|value| serde_json::to_string(&value.base.target_kind))
+            .transpose()?;
+        let target_input_json = tracked_state
+            .map(serde_json::to_string)
             .transpose()?;
         conn.execute(
             "UPDATE managed_repos
              SET tracked_target_kind = ?2, tracked_target_input = ?3, tracked_target_resolved_sha = ?4, updated_at = ?5
              WHERE id = ?1",
-            params![repo_id, target_kind_json, target_input, resolved_sha, now_rfc3339()],
+            params![
+                repo_id,
+                target_kind_json,
+                target_input_json,
+                resolved_sha,
+                now_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn restore_repo_tracked_target(
+        &self,
+        repo_id: &str,
+        target_kind: Option<&TargetKind>,
+        target_input: Option<&str>,
+        resolved_sha: Option<&str>,
+    ) -> AppResult<()> {
+        let conn = self.connect()?;
+        let target_kind_json = target_kind
+            .map(serde_json::to_string)
+            .transpose()?;
+        conn.execute(
+            "UPDATE managed_repos
+             SET tracked_target_kind = ?2, tracked_target_input = ?3, tracked_target_resolved_sha = ?4, updated_at = ?5
+             WHERE id = ?1",
+            params![
+                repo_id,
+                target_kind_json,
+                target_input,
+                resolved_sha,
+                now_rfc3339()
+            ],
         )?;
         Ok(())
     }
@@ -605,17 +640,40 @@ impl Database {
         old_head_sha: &str,
         old_branch: Option<&str>,
         old_is_detached: bool,
+        has_tracked_target_snapshot: bool,
+        old_tracked_target_kind: Option<&TargetKind>,
+        old_tracked_target_input: Option<&str>,
+        old_tracked_target_resolved_sha: Option<&str>,
         stash_created: bool,
         stash_ref: Option<&str>,
     ) -> AppResult<RepoCheckpoint> {
         let conn = self.connect()?;
         let id = new_id();
         let now = now_rfc3339();
+        let old_tracked_target_kind_json = old_tracked_target_kind
+            .map(serde_json::to_string)
+            .transpose()?;
         conn.execute(
             "INSERT INTO repo_checkpoints
-             (id, repo_id, operation_id, old_head_sha, old_branch, old_is_detached, stash_created, stash_ref, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![id, repo_id, operation_id, old_head_sha, old_branch, old_is_detached as i64, stash_created as i64, stash_ref, now],
+             (id, repo_id, operation_id, old_head_sha, old_branch, old_is_detached,
+              has_tracked_target_snapshot, old_tracked_target_kind, old_tracked_target_input,
+              old_tracked_target_resolved_sha, stash_created, stash_ref, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                id,
+                repo_id,
+                operation_id,
+                old_head_sha,
+                old_branch,
+                old_is_detached as i64,
+                has_tracked_target_snapshot as i64,
+                old_tracked_target_kind_json,
+                old_tracked_target_input,
+                old_tracked_target_resolved_sha,
+                stash_created as i64,
+                stash_ref,
+                now
+            ],
         )?;
         self.get_checkpoint(&id)?
             .ok_or_else(|| AppError::Db("failed to reload checkpoint".to_string()))
@@ -638,7 +696,9 @@ impl Database {
     pub fn get_checkpoint(&self, checkpoint_id: &str) -> AppResult<Option<RepoCheckpoint>> {
         let conn = self.connect()?;
         let mut stmt = conn.prepare(
-            "SELECT id, repo_id, operation_id, old_head_sha, old_branch, old_is_detached, stash_created, stash_ref, created_at
+            "SELECT id, repo_id, operation_id, old_head_sha, old_branch, old_is_detached,
+                    has_tracked_target_snapshot, old_tracked_target_kind, old_tracked_target_input,
+                    old_tracked_target_resolved_sha, stash_created, stash_ref, created_at
              FROM repo_checkpoints WHERE id = ?1",
         )?;
         stmt.query_row(params![checkpoint_id], map_checkpoint)
@@ -649,7 +709,9 @@ impl Database {
     pub fn list_checkpoints(&self, repo_id: &str) -> AppResult<Vec<RepoCheckpoint>> {
         let conn = self.connect()?;
         let mut stmt = conn.prepare(
-            "SELECT id, repo_id, operation_id, old_head_sha, old_branch, old_is_detached, stash_created, stash_ref, created_at
+            "SELECT id, repo_id, operation_id, old_head_sha, old_branch, old_is_detached,
+                    has_tracked_target_snapshot, old_tracked_target_kind, old_tracked_target_input,
+                    old_tracked_target_resolved_sha, stash_created, stash_ref, created_at
              FROM repo_checkpoints WHERE repo_id = ?1 ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map(params![repo_id], map_checkpoint)?;
@@ -663,7 +725,9 @@ impl Database {
     pub fn latest_checkpoint(&self, repo_id: &str) -> AppResult<Option<RepoCheckpoint>> {
         let conn = self.connect()?;
         let mut stmt = conn.prepare(
-            "SELECT id, repo_id, operation_id, old_head_sha, old_branch, old_is_detached, stash_created, stash_ref, created_at
+            "SELECT id, repo_id, operation_id, old_head_sha, old_branch, old_is_detached,
+                    has_tracked_target_snapshot, old_tracked_target_kind, old_tracked_target_input,
+                    old_tracked_target_resolved_sha, stash_created, stash_ref, created_at
              FROM repo_checkpoints WHERE repo_id = ?1 ORDER BY created_at DESC LIMIT 1",
         )?;
         stmt.query_row(params![repo_id], map_checkpoint)
@@ -694,26 +758,87 @@ fn map_installation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Installation> {
 fn map_repo(row: &rusqlite::Row<'_>) -> rusqlite::Result<ManagedRepo> {
     let kind_json: String = row.get(2)?;
     let tracked_kind_json: Option<String> = row.get(10)?;
+    let canonical_remote: Option<String> = row.get(5)?;
+    let tracked_target_input: Option<String> = row.get(11)?;
+    let tracked_target_resolved_sha: Option<String> = row.get(12)?;
+    let tracked_target_kind = tracked_kind_json
+        .map(|json| serde_json::from_str(&json))
+        .transpose()
+        .map_err(to_sql_err)?;
     Ok(ManagedRepo {
         id: row.get(0)?,
         installation_id: row.get(1)?,
         kind: serde_json::from_str(&kind_json).map_err(to_sql_err)?,
         display_name: row.get(3)?,
         local_path: row.get(4)?,
-        canonical_remote: row.get(5)?,
+        canonical_remote: canonical_remote.clone(),
         current_head_sha: row.get(6)?,
         current_branch: row.get(7)?,
         is_detached: row.get::<_, i64>(8)? != 0,
         is_dirty: row.get::<_, i64>(9)? != 0,
-        tracked_target_kind: tracked_kind_json
-            .map(|json| serde_json::from_str(&json))
-            .transpose()
-            .map_err(to_sql_err)?,
-        tracked_target_input: row.get(11)?,
-        tracked_target_resolved_sha: row.get(12)?,
+        tracked_target_kind: tracked_target_kind.clone(),
+        tracked_target_input: tracked_target_input.clone(),
+        tracked_target_resolved_sha: tracked_target_resolved_sha.clone(),
+        tracked_state: parse_tracked_repo_state(
+            tracked_target_kind.as_ref(),
+            tracked_target_input.as_deref(),
+            tracked_target_resolved_sha.as_deref(),
+            canonical_remote.as_deref(),
+        )?,
         created_at: row.get(13)?,
         updated_at: row.get(14)?,
     })
+}
+
+fn parse_tracked_repo_state(
+    tracked_kind: Option<&TargetKind>,
+    tracked_input: Option<&str>,
+    tracked_resolved_sha: Option<&str>,
+    canonical_remote: Option<&str>,
+) -> rusqlite::Result<Option<TrackedRepoState>> {
+    let tracked_input = match tracked_input {
+        Some(tracked_input) => tracked_input.trim(),
+        None => return Ok(None),
+    };
+    if tracked_input.is_empty() {
+        return Ok(None);
+    }
+
+    if tracked_input.starts_with('{') {
+        return serde_json::from_str::<TrackedRepoState>(tracked_input)
+            .map(Some)
+            .map_err(to_sql_err);
+    }
+
+    if let Ok(parsed) = serde_json::from_str::<TrackedRepoState>(tracked_input) {
+        return Ok(Some(parsed));
+    }
+
+    let tracked_kind = match tracked_kind {
+        Some(tracked_kind) => tracked_kind,
+        None => return Ok(None),
+    };
+    if matches!(tracked_kind, TargetKind::Pr) {
+        return Ok(None);
+    }
+
+    let canonical_repo_url = match canonical_remote {
+        Some(canonical_remote) => canonical_remote.to_string(),
+        None => return Ok(None),
+    };
+    Ok(Some(TrackedRepoState {
+        version: 1,
+        base: TrackedBaseTarget {
+            source_input: tracked_input.to_string(),
+            target_kind: tracked_kind.clone(),
+            canonical_repo_url,
+            checkout_ref: tracked_input.to_string(),
+            resolved_sha: tracked_resolved_sha.map(ToOwned::to_owned),
+            summary_label: tracked_input.to_string(),
+        },
+        overlays: Vec::new(),
+        materialized_branch: None,
+    }))
 }
 
 fn map_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationRecord> {
@@ -736,6 +861,7 @@ fn map_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationRecord> {
 }
 
 fn map_checkpoint(row: &rusqlite::Row<'_>) -> rusqlite::Result<RepoCheckpoint> {
+    let old_tracked_target_kind_json: Option<String> = row.get(7)?;
     Ok(RepoCheckpoint {
         id: row.get(0)?,
         repo_id: row.get(1)?,
@@ -743,10 +869,45 @@ fn map_checkpoint(row: &rusqlite::Row<'_>) -> rusqlite::Result<RepoCheckpoint> {
         old_head_sha: row.get(3)?,
         old_branch: row.get(4)?,
         old_is_detached: row.get::<_, i64>(5)? != 0,
-        stash_created: row.get::<_, i64>(6)? != 0,
-        stash_ref: row.get(7)?,
-        created_at: row.get(8)?,
+        has_tracked_target_snapshot: row.get::<_, i64>(6)? != 0,
+        old_tracked_target_kind: old_tracked_target_kind_json
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(to_sql_err)?,
+        old_tracked_target_input: row.get(8)?,
+        old_tracked_target_resolved_sha: row.get(9)?,
+        stash_created: row.get::<_, i64>(10)? != 0,
+        stash_ref: row.get(11)?,
+        created_at: row.get(12)?,
     })
+}
+
+fn ensure_repo_checkpoint_tracking_columns(conn: &Connection) -> AppResult<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(repo_checkpoints)")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    let mut columns = Vec::new();
+    for row in rows {
+        columns.push(row?);
+    }
+    drop(stmt);
+
+    for (column_name, sql_type) in [
+        (
+            "has_tracked_target_snapshot",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+        ("old_tracked_target_kind", "TEXT"),
+        ("old_tracked_target_input", "TEXT"),
+        ("old_tracked_target_resolved_sha", "TEXT"),
+    ] {
+        if !columns.iter().any(|existing| existing == column_name) {
+            conn.execute(
+                &format!("ALTER TABLE repo_checkpoints ADD COLUMN {column_name} {sql_type}"),
+                [],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn to_sql_err(err: serde_json::Error) -> rusqlite::Error {
