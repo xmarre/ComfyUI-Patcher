@@ -1183,6 +1183,10 @@ fn default_frontend_settings_for_installation(
 ) -> AppResult<FrontendSettings> {
     let root = PathBuf::from(&installation.comfy_root);
     let custom_nodes_dir = PathBuf::from(&installation.custom_nodes_dir);
+    let existing_settings = installation.frontend_settings.as_ref();
+    let package_manager = existing_settings
+        .map(|settings| settings.package_manager.clone())
+        .unwrap_or(FrontendPackageManager::Auto);
     let repo_root = repo_root_override
         .map(Path::to_path_buf)
         .unwrap_or_else(|| {
@@ -1196,8 +1200,11 @@ fn default_frontend_settings_for_installation(
         &custom_nodes_dir,
         Some(FrontendSettings {
             repo_root: repo_root.to_string_lossy().to_string(),
-            dist_path: String::new(),
-            package_manager: FrontendPackageManager::Auto,
+            dist_path: existing_settings
+                .map(|settings| settings.dist_path.trim().to_string())
+                .filter(|dist_path| !dist_path.is_empty())
+                .unwrap_or_default(),
+            package_manager,
         }),
     )?
     .ok_or_else(|| {
