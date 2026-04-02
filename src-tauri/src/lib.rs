@@ -61,6 +61,11 @@ async fn is_tracking_managed_dir(path: &Path) -> bool {
     path.is_dir() && path.join(".tracking").is_file() && !is_git_repo(path).await
 }
 
+fn has_git_marker(path: &Path) -> bool {
+    let dot_git = path.join(".git");
+    dot_git.is_dir() || dot_git.is_file()
+}
+
 fn choose_tracking_backup_path(path: &Path, backup_root: &Path) -> PathBuf {
     let name = path
         .file_name()
@@ -94,7 +99,7 @@ async fn discover_repositories_for_installation(
     let mut core_repo = None;
     let mut custom_node_repos = Vec::new();
 
-    if is_git_repo(&root).await {
+    if has_git_marker(&root) && is_git_repo(&root).await {
         let status = inspect_repo(&root).await?;
         core_repo = Some(state.db.upsert_repo(
             &installation.id,
@@ -114,7 +119,7 @@ async fn discover_repositories_for_installation(
         for entry in std::fs::read_dir(&custom_nodes_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if !path.is_dir() || !is_git_repo(&path).await {
+            if !path.is_dir() || !has_git_marker(&path) || !is_git_repo(&path).await {
                 continue;
             }
             let display_name = path
@@ -190,7 +195,7 @@ async fn discover_custom_node_repos_best_effort(
             }
         };
         let path = entry.path();
-        if !path.is_dir() || !is_git_repo(&path).await {
+        if !path.is_dir() || !has_git_marker(&path) || !is_git_repo(&path).await {
             continue;
         }
 
@@ -997,13 +1002,15 @@ async fn list_manager_custom_nodes(
             let Some(dir_name) = path.file_name().and_then(|value| value.to_str()) else {
                 continue;
             };
+            let has_tracking = path.join(".tracking").is_file();
+            let has_git = has_git_marker(&path);
             let key = dir_name.to_ascii_lowercase();
-            if is_git_repo(&path).await {
+            if has_git && is_git_repo(&path).await {
                 continue;
             }
-            if path.join(".tracking").is_file() {
+            if has_tracking {
                 tracking_managed_dirs.insert(key, path.to_string_lossy().to_string());
-            } else {
+            } else if !has_git {
                 present_non_git_dirs.insert(key, path.to_string_lossy().to_string());
             }
         }

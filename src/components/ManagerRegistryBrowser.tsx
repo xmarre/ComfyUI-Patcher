@@ -41,6 +41,7 @@ export default function ManagerRegistryBrowser({
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [hasLoaded, setHasLoaded] = useState(false);
   const requestSeq = useRef(0);
 
   async function refresh() {
@@ -55,6 +56,7 @@ export default function ManagerRegistryBrowser({
       });
       if (requestSeq.current !== requestId) return;
       setEntries(next);
+      setHasLoaded(true);
     } catch (err) {
       if (requestSeq.current !== requestId) return;
       setError(toErrorMessage(err));
@@ -69,9 +71,16 @@ export default function ManagerRegistryBrowser({
     setEntries([]);
     setError(null);
     setVisibleCount(PAGE_SIZE);
+    setHasLoaded(false);
     requestSeq.current += 1;
+  }, [installationId]);
+
+  useEffect(() => {
+    if (!hasLoaded) {
+      return;
+    }
     void refresh();
-  }, [installationId, refreshToken]);
+  }, [refreshToken]);
 
   useEffect(() => {
     setVisibleCount(PAGE_SIZE);
@@ -106,7 +115,7 @@ export default function ManagerRegistryBrowser({
           </div>
         </div>
         <button className="secondary" onClick={() => void refresh()}>
-          Refresh
+          {hasLoaded ? "Refresh" : "Load registry"}
         </button>
       </div>
 
@@ -118,11 +127,16 @@ export default function ManagerRegistryBrowser({
 
       {error ? <div className="muted">{error}</div> : null}
       {loading ? <div className="muted">Loading registry entries…</div> : null}
+      {!loading && !hasLoaded ? (
+        <div className="muted">Registry browsing is loaded on demand.</div>
+      ) : null}
 
-      <div className="small muted">
-        Showing {visibleEntries.length} of {filteredEntries.length} loaded matching entries
-        {filteredEntries.length !== entries.length ? ` (from ${entries.length} loaded)` : ""}.
-      </div>
+      {hasLoaded ? (
+        <div className="small muted">
+          Showing {visibleEntries.length} of {filteredEntries.length} loaded matching entries
+          {filteredEntries.length !== entries.length ? ` (from ${entries.length} loaded)` : ""}.
+        </div>
+      ) : null}
 
       <div className="list registry-list">
         {visibleEntries.map((entry) => (
@@ -222,7 +236,7 @@ export default function ManagerRegistryBrowser({
         </div>
       ) : null}
 
-      {!loading && !filteredEntries.length && !error ? (
+      {!loading && hasLoaded && !filteredEntries.length && !error ? (
         <div className="muted">No registry entries matched the current search.</div>
       ) : null}
     </div>
