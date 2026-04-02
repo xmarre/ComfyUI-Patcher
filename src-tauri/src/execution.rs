@@ -93,11 +93,12 @@ fn build_command(program: &str, args: &[String], cwd: Option<&Path>) -> std::io:
     Ok(command)
 }
 
-pub(crate) fn configure_spawn_command(command: &mut Command) {
-    command.stdin(Stdio::null());
-    command.stdout(Stdio::null());
-    command.stderr(Stdio::null());
+pub(crate) fn configure_managed_spawn_command(command: &mut Command) {
     command.kill_on_drop(true);
+}
+
+pub(crate) fn configure_hidden_output_command(command: &mut Command) {
+    command.stdin(Stdio::null());
     #[cfg(windows)]
     {
         command.as_std_mut().creation_flags(CREATE_NO_WINDOW);
@@ -109,12 +110,14 @@ pub async fn output_command(
     args: &[String],
     cwd: Option<&Path>,
 ) -> std::io::Result<Output> {
-    build_command(program, args, cwd)?.output().await
+    let mut command = build_command(program, args, cwd)?;
+    configure_hidden_output_command(&mut command);
+    command.output().await
 }
 
 pub fn spawn_command(program: &str, args: &[String], cwd: Option<&Path>) -> std::io::Result<Child> {
     let mut command = build_command(program, args, cwd)?;
-    configure_spawn_command(&mut command);
+    configure_managed_spawn_command(&mut command);
     command.spawn()
 }
 
