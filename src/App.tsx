@@ -395,6 +395,14 @@ export default function App() {
           <button
             onClick={() =>
               void runAction(async () => {
+                const launchArgs = parseLaunchArgs(registerForm.launchArgs);
+                const launchCwd =
+                  registerForm.launchCwd.trim() ||
+                  (registerForm.launchCommand === defaultLaunchProfile.command &&
+                  launchArgs.length === defaultLaunchProfile.args.length &&
+                  launchArgs.every((arg, index) => arg === defaultLaunchProfile.args[index])
+                    ? registerForm.comfyRoot
+                    : null);
                 const result = await api.registerInstallation({
                   name: registerForm.name,
                   comfyRoot: registerForm.comfyRoot,
@@ -402,8 +410,8 @@ export default function App() {
                   launchProfile: {
                     mode: "managed_child",
                     command: registerForm.launchCommand,
-                    args: parseLaunchArgs(registerForm.launchArgs),
-                    cwd: registerForm.launchCwd.trim() || null,
+                    args: launchArgs,
+                    cwd: launchCwd,
                     env: {}
                   }
                 });
