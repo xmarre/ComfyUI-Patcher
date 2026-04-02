@@ -28,9 +28,29 @@ pub fn parse_wsl_unc_path(path: &Path) -> Option<WslPath> {
     Some(WslPath { distro, linux_path })
 }
 
+fn is_wsl_launcher(program: &str) -> bool {
+    Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.eq_ignore_ascii_case("wsl.exe") || name.eq_ignore_ascii_case("wsl")
+        })
+}
+
 fn build_command(program: &str, args: &[String], cwd: Option<&Path>) -> std::io::Result<Command> {
     let cwd_wsl = cwd.and_then(parse_wsl_unc_path);
     let program_wsl = parse_wsl_unc_path(Path::new(program));
+
+    if is_wsl_launcher(program) {
+        let mut command = Command::new(program);
+        command.args(args);
+        if cwd_wsl.is_none() {
+            if let Some(cwd) = cwd {
+                command.current_dir(cwd);
+            }
+        }
+        return Ok(command);
+    }
 
     if let Some(context) = cwd_wsl.as_ref().or(program_wsl.as_ref()) {
         if let (Some(cwd_wsl), Some(program_wsl)) = (cwd_wsl.as_ref(), program_wsl.as_ref()) {
@@ -140,5 +160,26 @@ mod tests {
         let program = r"\\wsl.localhost\Debian\home\toor\bin\python";
         let err = build_command(program, &[], Some(cwd)).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn build_command_does_not_rewrap_explicit_wsl_launcher_with_wsl_unc_cwd() {
+        let cwd = Path::new(r"\\wsl.localhost\Ubuntu-22.04\home\toor\ComfyUI");
+        let args = vec![
+            "-d".to_string(),
+            "Ubuntu-22.04".to_string(),
+            "--".to_string(),
+            "/home/toor/start_comfyui.sh".to_string(),
+            "--front-end-root".to_string(),
+            "/mnt/c/Users/marre/source/repos/ComfyUI_frontend/dist".to_string(),
+        ];
+        let command = build_command("wsl.exe", &args, Some(cwd)).unwrap();
+
+        let program_dbg = format!("{:?}", command.as_std().get_program());
+        let args_dbg = format!("{:?}", command.as_std().get_args().collect::<Vec<_>>());
+
+        assert!(program_dbg.contains("wsl.exe"));
+        assert!(args_dbg.contains("start_comfyui.sh"));
+        assert!(!args_dbg.contains("--cd"));
     }
 }

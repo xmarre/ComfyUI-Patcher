@@ -172,7 +172,7 @@ export default function App() {
       launchCommand: installation.launchProfile?.command ?? defaultLaunchProfile.command,
       launchArgs: (installation.launchProfile?.args ?? defaultLaunchProfile.args).join(" "),
       extraArgs: (installation.launchProfile?.extraArgs ?? []).join(" "),
-      launchCwd: installation.launchProfile?.cwd ?? installation.comfyRoot,
+      launchCwd: installation.launchProfile?.cwd ?? "",
       stopCommand: installation.launchProfile?.stopCommand ?? "",
       stopArgs: (installation.launchProfile?.stopArgs ?? []).join(" "),
       restartCommand: installation.launchProfile?.restartCommand ?? "",
@@ -387,6 +387,7 @@ export default function App() {
           <label>
             <span>Launch cwd</span>
             <input
+              placeholder="Optional; leave blank to inherit default process cwd"
               value={registerForm.launchCwd}
               onChange={(e) => setRegisterForm((v) => ({ ...v, launchCwd: e.target.value }))}
             />
@@ -394,6 +395,14 @@ export default function App() {
           <button
             onClick={() =>
               void runAction(async () => {
+                const launchArgs = parseLaunchArgs(registerForm.launchArgs);
+                const launchCwd =
+                  registerForm.launchCwd.trim() ||
+                  (registerForm.launchCommand === defaultLaunchProfile.command &&
+                  launchArgs.length === defaultLaunchProfile.args.length &&
+                  launchArgs.every((arg, index) => arg === defaultLaunchProfile.args[index])
+                    ? registerForm.comfyRoot
+                    : null);
                 const result = await api.registerInstallation({
                   name: registerForm.name,
                   comfyRoot: registerForm.comfyRoot,
@@ -401,8 +410,8 @@ export default function App() {
                   launchProfile: {
                     mode: "managed_child",
                     command: registerForm.launchCommand,
-                    args: parseLaunchArgs(registerForm.launchArgs),
-                    cwd: registerForm.launchCwd || registerForm.comfyRoot,
+                    args: launchArgs,
+                    cwd: launchCwd,
                     env: {}
                   }
                 });
@@ -527,7 +536,7 @@ export default function App() {
                         launchCwd:
                           detail?.installation.launchProfile?.cwd ??
                           selectedInstallation.launchProfile?.cwd ??
-                          selectedInstallation.comfyRoot,
+                          "",
                         stopCommand:
                           detail?.installation.launchProfile?.stopCommand ??
                           selectedInstallation.launchProfile?.stopCommand ??
@@ -563,7 +572,7 @@ export default function App() {
                             command: installationForm.launchCommand,
                             args: parseLaunchArgs(installationForm.launchArgs),
                             extraArgs: parseOptionalArgs(installationForm.extraArgs),
-                            cwd: installationForm.launchCwd || selectedInstallation.comfyRoot,
+                            cwd: installationForm.launchCwd.trim() || null,
                             stopCommand: installationForm.stopCommand.trim() || null,
                             stopArgs: installationForm.stopCommand.trim()
                               ? parseOptionalArgs(installationForm.stopArgs)
@@ -656,6 +665,7 @@ export default function App() {
                 <label>
                   <span>Launch cwd</span>
                   <input
+                    placeholder="Optional; leave blank to inherit default process cwd"
                     value={installationForm.launchCwd}
                     onChange={(e) =>
                       setInstallationForm((v) => ({ ...v, launchCwd: e.target.value }))
