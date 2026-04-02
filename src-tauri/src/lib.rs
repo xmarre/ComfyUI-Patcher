@@ -525,12 +525,14 @@ async fn restore_checkpoint_state(
                 "checkpoint indicates a stash was created but no stash reference was stored"
                     .to_string(),
             );
-            state.db.restore_repo_tracked_target(
-                repo_id,
-                checkpoint.old_tracked_target_kind.as_ref(),
-                checkpoint.old_tracked_target_input.as_deref(),
-                checkpoint.old_tracked_target_resolved_sha.as_deref(),
-            )?;
+            if checkpoint.has_tracked_target_snapshot {
+                state.db.restore_repo_tracked_target(
+                    repo_id,
+                    checkpoint.old_tracked_target_kind.as_ref(),
+                    checkpoint.old_tracked_target_input.as_deref(),
+                    checkpoint.old_tracked_target_resolved_sha.as_deref(),
+                )?;
+            }
             return Err(AppError::Git(restore_errors.join("; ")));
         };
         if let Err(err) = apply_stash(path, stash_ref).await {
@@ -538,13 +540,15 @@ async fn restore_checkpoint_state(
         }
     }
 
-    if let Err(err) = state.db.restore_repo_tracked_target(
-        repo_id,
-        checkpoint.old_tracked_target_kind.as_ref(),
-        checkpoint.old_tracked_target_input.as_deref(),
-        checkpoint.old_tracked_target_resolved_sha.as_deref(),
-    ) {
-        restore_errors.push(format!("failed to restore tracked target metadata: {err}"));
+    if checkpoint.has_tracked_target_snapshot {
+        if let Err(err) = state.db.restore_repo_tracked_target(
+            repo_id,
+            checkpoint.old_tracked_target_kind.as_ref(),
+            checkpoint.old_tracked_target_input.as_deref(),
+            checkpoint.old_tracked_target_resolved_sha.as_deref(),
+        ) {
+            restore_errors.push(format!("failed to restore tracked target metadata: {err}"));
+        }
     }
 
     if restore_errors.is_empty() {
@@ -1215,6 +1219,7 @@ async fn create_checkpoint_if_needed(
         &head,
         status.branch.as_deref(),
         status.is_detached,
+        true,
         repo.tracked_target_kind.as_ref(),
         repo.tracked_target_input.as_deref(),
         repo.tracked_target_resolved_sha.as_deref(),

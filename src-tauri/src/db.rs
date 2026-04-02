@@ -86,6 +86,7 @@ impl Database {
                 old_head_sha TEXT NOT NULL,
                 old_branch TEXT,
                 old_is_detached INTEGER NOT NULL,
+                has_tracked_target_snapshot INTEGER NOT NULL DEFAULT 0,
                 old_tracked_target_kind TEXT,
                 old_tracked_target_input TEXT,
                 old_tracked_target_resolved_sha TEXT,
@@ -639,6 +640,7 @@ impl Database {
         old_head_sha: &str,
         old_branch: Option<&str>,
         old_is_detached: bool,
+        has_tracked_target_snapshot: bool,
         old_tracked_target_kind: Option<&TargetKind>,
         old_tracked_target_input: Option<&str>,
         old_tracked_target_resolved_sha: Option<&str>,
@@ -654,9 +656,9 @@ impl Database {
         conn.execute(
             "INSERT INTO repo_checkpoints
              (id, repo_id, operation_id, old_head_sha, old_branch, old_is_detached,
-              old_tracked_target_kind, old_tracked_target_input, old_tracked_target_resolved_sha,
-              stash_created, stash_ref, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+              has_tracked_target_snapshot, old_tracked_target_kind, old_tracked_target_input,
+              old_tracked_target_resolved_sha, stash_created, stash_ref, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 id,
                 repo_id,
@@ -664,6 +666,7 @@ impl Database {
                 old_head_sha,
                 old_branch,
                 old_is_detached as i64,
+                has_tracked_target_snapshot as i64,
                 old_tracked_target_kind_json,
                 old_tracked_target_input,
                 old_tracked_target_resolved_sha,
@@ -694,8 +697,8 @@ impl Database {
         let conn = self.connect()?;
         let mut stmt = conn.prepare(
             "SELECT id, repo_id, operation_id, old_head_sha, old_branch, old_is_detached,
-                    old_tracked_target_kind, old_tracked_target_input, old_tracked_target_resolved_sha,
-                    stash_created, stash_ref, created_at
+                    has_tracked_target_snapshot, old_tracked_target_kind, old_tracked_target_input,
+                    old_tracked_target_resolved_sha, stash_created, stash_ref, created_at
              FROM repo_checkpoints WHERE id = ?1",
         )?;
         stmt.query_row(params![checkpoint_id], map_checkpoint)
@@ -707,8 +710,8 @@ impl Database {
         let conn = self.connect()?;
         let mut stmt = conn.prepare(
             "SELECT id, repo_id, operation_id, old_head_sha, old_branch, old_is_detached,
-                    old_tracked_target_kind, old_tracked_target_input, old_tracked_target_resolved_sha,
-                    stash_created, stash_ref, created_at
+                    has_tracked_target_snapshot, old_tracked_target_kind, old_tracked_target_input,
+                    old_tracked_target_resolved_sha, stash_created, stash_ref, created_at
              FROM repo_checkpoints WHERE repo_id = ?1 ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map(params![repo_id], map_checkpoint)?;
@@ -723,8 +726,8 @@ impl Database {
         let conn = self.connect()?;
         let mut stmt = conn.prepare(
             "SELECT id, repo_id, operation_id, old_head_sha, old_branch, old_is_detached,
-                    old_tracked_target_kind, old_tracked_target_input, old_tracked_target_resolved_sha,
-                    stash_created, stash_ref, created_at
+                    has_tracked_target_snapshot, old_tracked_target_kind, old_tracked_target_input,
+                    old_tracked_target_resolved_sha, stash_created, stash_ref, created_at
              FROM repo_checkpoints WHERE repo_id = ?1 ORDER BY created_at DESC LIMIT 1",
         )?;
         stmt.query_row(params![repo_id], map_checkpoint)
@@ -858,7 +861,7 @@ fn map_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationRecord> {
 }
 
 fn map_checkpoint(row: &rusqlite::Row<'_>) -> rusqlite::Result<RepoCheckpoint> {
-    let old_tracked_target_kind_json: Option<String> = row.get(6)?;
+    let old_tracked_target_kind_json: Option<String> = row.get(7)?;
     Ok(RepoCheckpoint {
         id: row.get(0)?,
         repo_id: row.get(1)?,
@@ -866,15 +869,16 @@ fn map_checkpoint(row: &rusqlite::Row<'_>) -> rusqlite::Result<RepoCheckpoint> {
         old_head_sha: row.get(3)?,
         old_branch: row.get(4)?,
         old_is_detached: row.get::<_, i64>(5)? != 0,
+        has_tracked_target_snapshot: row.get::<_, i64>(6)? != 0,
         old_tracked_target_kind: old_tracked_target_kind_json
             .map(|json| serde_json::from_str(&json))
             .transpose()
             .map_err(to_sql_err)?,
-        old_tracked_target_input: row.get(7)?,
-        old_tracked_target_resolved_sha: row.get(8)?,
-        stash_created: row.get::<_, i64>(9)? != 0,
-        stash_ref: row.get(10)?,
-        created_at: row.get(11)?,
+        old_tracked_target_input: row.get(8)?,
+        old_tracked_target_resolved_sha: row.get(9)?,
+        stash_created: row.get::<_, i64>(10)? != 0,
+        stash_ref: row.get(11)?,
+        created_at: row.get(12)?,
     })
 }
 
@@ -888,6 +892,10 @@ fn ensure_repo_checkpoint_tracking_columns(conn: &Connection) -> AppResult<()> {
     drop(stmt);
 
     for (column_name, sql_type) in [
+        (
+            "has_tracked_target_snapshot",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
         ("old_tracked_target_kind", "TEXT"),
         ("old_tracked_target_input", "TEXT"),
         ("old_tracked_target_resolved_sha", "TEXT"),

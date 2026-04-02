@@ -228,6 +228,7 @@ pub struct RepoCheckpoint {
     pub old_head_sha: String,
     pub old_branch: Option<String>,
     pub old_is_detached: bool,
+    pub has_tracked_target_snapshot: bool,
     pub old_tracked_target_kind: Option<TargetKind>,
     pub old_tracked_target_input: Option<String>,
     pub old_tracked_target_resolved_sha: Option<String>,

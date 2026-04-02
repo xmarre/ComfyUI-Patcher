@@ -167,6 +167,7 @@ export type RepoCheckpoint = {
   oldHeadSha: string;
   oldBranch: string | null;
   oldIsDetached: boolean;
+  hasTrackedTargetSnapshot: boolean;
   stashCreated: boolean;
   stashRef: string | null;
   createdAt: string;

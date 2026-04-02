@@ -188,7 +188,16 @@ export default function App() {
     }
   }
 
-  async function runAction(action: () => Promise<void>): Promise<boolean> {
+  async function runAction(action: () => Promise<void>) {
+    setActionError(null);
+    try {
+      await action();
+    } catch (error) {
+      setActionError(toErrorMessage(error));
+    }
+  }
+
+  async function runActionOk(action: () => Promise<void>): Promise<boolean> {
     setActionError(null);
     try {
       await action();
@@ -782,7 +791,7 @@ export default function App() {
                     })
                   }
                   onSetBaseTarget={(input, clearOverlays) =>
-                    runAction(async () => {
+                    runActionOk(async () => {
                       await api.setRepoBaseTarget({
                         repoId: coreRepo.id,
                         input,
@@ -793,7 +802,7 @@ export default function App() {
                     })
                   }
                   onAddOverlay={(input) =>
-                    runAction(async () => {
+                    runActionOk(async () => {
                       await api.addRepoOverlay({
                         repoId: coreRepo.id,
                         input,
@@ -803,7 +812,7 @@ export default function App() {
                     })
                   }
                   onSetOverlayEnabled={(overlayId, enabled) =>
-                    runAction(async () => {
+                    runActionOk(async () => {
                       await api.setRepoOverlayEnabled({
                         repoId: coreRepo.id,
                         overlayId,
@@ -814,7 +823,7 @@ export default function App() {
                     })
                   }
                   onRemoveOverlay={(overlayId) =>
-                    runAction(async () => {
+                    runActionOk(async () => {
                       await api.removeRepoOverlay({
                         repoId: coreRepo.id,
                         overlayId,
@@ -824,7 +833,7 @@ export default function App() {
                     })
                   }
                   onMoveOverlay={(overlayId, direction) =>
-                    runAction(async () => {
+                    runActionOk(async () => {
                       await api.moveRepoOverlay({
                         repoId: coreRepo.id,
                         overlayId,
@@ -909,8 +918,8 @@ export default function App() {
             <ManagerRegistryBrowser
               installationId={selectedInstallation.id}
               refreshToken={registryRefreshToken}
-              onInstall={(entry) =>
-                runAction(async () => {
+              onInstall={async (entry) => {
+                await runAction(async () => {
                   const targetLocalDirName =
                     entry.isTrackingManaged && !(entry.installedRepoId || entry.installedLocalPath)
                       ? (entry.trackingLocalPath?.split(/[\\/]/).filter(Boolean).pop() ?? undefined)
@@ -926,8 +935,8 @@ export default function App() {
                     restartAfterSuccess: false,
                     adoptTrackingInstall: entry.isTrackingManaged && !(entry.installedRepoId || entry.installedLocalPath)
                   });
-                })
-              }
+                });
+              }}
               onUseSourceInput={(sourceInput) => {
                 setNodeInput(sourceInput);
                 setNodePreview(null);
@@ -945,7 +954,7 @@ export default function App() {
                         key={repo.id}
                         repo={repo}
                         onSetBaseTarget={(input, clearOverlays) =>
-                          runAction(async () => {
+                          runActionOk(async () => {
                             await api.setRepoBaseTarget({
                               repoId: repo.id,
                               input,
@@ -956,7 +965,7 @@ export default function App() {
                           })
                         }
                         onAddOverlay={(input) =>
-                          runAction(async () => {
+                          runActionOk(async () => {
                             await api.addRepoOverlay({
                               repoId: repo.id,
                               input,
@@ -966,7 +975,7 @@ export default function App() {
                           })
                         }
                         onSetOverlayEnabled={(overlayId, enabled) =>
-                          runAction(async () => {
+                          runActionOk(async () => {
                             await api.setRepoOverlayEnabled({
                               repoId: repo.id,
                               overlayId,
@@ -977,7 +986,7 @@ export default function App() {
                           })
                         }
                         onRemoveOverlay={(overlayId) =>
-                          runAction(async () => {
+                          runActionOk(async () => {
                             await api.removeRepoOverlay({
                               repoId: repo.id,
                               overlayId,
@@ -987,7 +996,7 @@ export default function App() {
                           })
                         }
                         onMoveOverlay={(overlayId, direction) =>
-                          runAction(async () => {
+                          runActionOk(async () => {
                             await api.moveRepoOverlay({
                               repoId: repo.id,
                               overlayId,

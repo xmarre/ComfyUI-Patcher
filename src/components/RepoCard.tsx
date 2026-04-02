@@ -54,10 +54,21 @@ export default function RepoCard({
   const overlays = trackedState?.overlays ?? [];
   const [baseInput, setBaseInput] = useState("");
   const [overlayInput, setOverlayInput] = useState("");
-  const [isSubmittingBase, setIsSubmittingBase] = useState(false);
-  const [isSubmittingOverlay, setIsSubmittingOverlay] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const integrationBranch = trackedState?.materializedBranch ?? repo.currentBranch ?? "detached";
   const hasOverlays = overlays.length > 0;
+
+  async function runStackAction(action: () => Promise<boolean>): Promise<boolean> {
+    if (isSubmitting) {
+      return false;
+    }
+    setIsSubmitting(true);
+    try {
+      return await action();
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
 
   return (
     <div className="card">
@@ -111,6 +122,7 @@ export default function RepoCard({
         <div className="row gap repo-stack-inputs">
           <input
             className="grow"
+            disabled={isSubmitting}
             placeholder="Branch, tag, commit, or GitHub tree URL"
             value={baseInput}
             onChange={(event) => setBaseInput(event.target.value)}
@@ -118,19 +130,16 @@ export default function RepoCard({
           {onSetBaseTarget ? (
             <button
               className="secondary"
-              disabled={!baseInput.trim() || isSubmittingBase}
+              disabled={!baseInput.trim() || isSubmitting}
               onClick={async () => {
-                if (!onSetBaseTarget || !baseInput.trim() || isSubmittingBase) {
+                if (!onSetBaseTarget || !baseInput.trim() || isSubmitting) {
                   return;
                 }
-                setIsSubmittingBase(true);
-                try {
-                  const ok = await onSetBaseTarget(baseInput, hasOverlays);
-                  if (ok) {
-                    setBaseInput("");
-                  }
-                } finally {
-                  setIsSubmittingBase(false);
+                const ok = await runStackAction(() =>
+                  onSetBaseTarget(baseInput, hasOverlays)
+                );
+                if (ok) {
+                  setBaseInput("");
                 }
               }}
             >
@@ -145,25 +154,21 @@ export default function RepoCard({
         <div className="row gap repo-stack-inputs">
           <input
             className="grow"
+            disabled={isSubmitting}
             placeholder="GitHub PR URL"
             value={overlayInput}
             onChange={(event) => setOverlayInput(event.target.value)}
           />
           {onAddOverlay ? (
             <button
-              disabled={!overlayInput.trim() || isSubmittingOverlay}
+              disabled={!overlayInput.trim() || isSubmitting}
               onClick={async () => {
-                if (!onAddOverlay || !overlayInput.trim() || isSubmittingOverlay) {
+                if (!onAddOverlay || !overlayInput.trim() || isSubmitting) {
                   return;
                 }
-                setIsSubmittingOverlay(true);
-                try {
-                  const ok = await onAddOverlay(overlayInput);
-                  if (ok) {
-                    setOverlayInput("");
-                  }
-                } finally {
-                  setIsSubmittingOverlay(false);
+                const ok = await runStackAction(() => onAddOverlay(overlayInput));
+                if (ok) {
+                  setOverlayInput("");
                 }
               }}
             >
@@ -182,10 +187,16 @@ export default function RepoCard({
                     <label className="overlay-toggle">
                       <input
                         type="checkbox"
+                        disabled={isSubmitting}
                         checked={overlay.enabled}
-                        onChange={(event) =>
-                          void onSetOverlayEnabled?.(overlay.id, event.target.checked)
-                        }
+                        onChange={async (event) => {
+                          if (!onSetOverlayEnabled || isSubmitting) {
+                            return;
+                          }
+                          await runStackAction(() =>
+                            onSetOverlayEnabled(overlay.id, event.target.checked)
+                          );
+                        }}
                       />
                       <span>
                         <strong>{overlay.summaryLabel}</strong>
@@ -201,21 +212,37 @@ export default function RepoCard({
                     <div className="row gap overlay-actions">
                       <button
                         className="secondary"
-                        disabled={index === 0}
-                        onClick={() => void onMoveOverlay?.(overlay.id, "up")}
+                        disabled={index === 0 || isSubmitting}
+                        onClick={async () => {
+                          if (!onMoveOverlay || isSubmitting) {
+                            return;
+                          }
+                          await runStackAction(() => onMoveOverlay(overlay.id, "up"));
+                        }}
                       >
                         Up
                       </button>
                       <button
                         className="secondary"
-                        disabled={index === overlays.length - 1}
-                        onClick={() => void onMoveOverlay?.(overlay.id, "down")}
+                        disabled={index === overlays.length - 1 || isSubmitting}
+                        onClick={async () => {
+                          if (!onMoveOverlay || isSubmitting) {
+                            return;
+                          }
+                          await runStackAction(() => onMoveOverlay(overlay.id, "down"));
+                        }}
                       >
                         Down
                       </button>
                       <button
                         className="secondary"
-                        onClick={() => void onRemoveOverlay?.(overlay.id)}
+                        disabled={isSubmitting}
+                        onClick={async () => {
+                          if (!onRemoveOverlay || isSubmitting) {
+                            return;
+                          }
+                          await runStackAction(() => onRemoveOverlay(overlay.id));
+                        }}
                       >
                         Remove
                       </button>
