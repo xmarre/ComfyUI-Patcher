@@ -1,19 +1,33 @@
 import { useState } from "react";
-import type { ManagedRepo, OverlayMoveDirection, TrackedPrOverlay } from "../types";
+import type {
+  ManagedRepo,
+  OverlayApplyStatus,
+  OverlayMoveDirection,
+  TrackedPrOverlay
+} from "../types";
 
 type Props = {
   repo: ManagedRepo;
   onUpdate?: () => void;
   onRollback?: () => void;
-  onSetBaseTarget?: (input: string, clearOverlays: boolean) => void;
-  onAddOverlay?: (input: string) => void;
-  onSetOverlayEnabled?: (overlayId: string, enabled: boolean) => void;
-  onRemoveOverlay?: (overlayId: string) => void;
-  onMoveOverlay?: (overlayId: string, direction: OverlayMoveDirection) => void;
+  onSetBaseTarget?: (input: string, clearOverlays: boolean) => Promise<boolean>;
+  onAddOverlay?: (input: string) => Promise<boolean>;
+  onSetOverlayEnabled?: (overlayId: string, enabled: boolean) => Promise<boolean>;
+  onRemoveOverlay?: (overlayId: string) => Promise<boolean>;
+  onMoveOverlay?: (overlayId: string, direction: OverlayMoveDirection) => Promise<boolean>;
 };
 
+type EffectiveOverlayStatus = OverlayApplyStatus | "disabled" | "pending";
+
+function overlayEffectiveStatus(overlay: TrackedPrOverlay): EffectiveOverlayStatus {
+  if (!overlay.enabled) {
+    return "disabled";
+  }
+  return overlay.lastApplyStatus ?? "pending";
+}
+
 function overlayStatusClass(overlay: TrackedPrOverlay): string {
-  switch (overlay.lastApplyStatus) {
+  switch (overlayEffectiveStatus(overlay)) {
     case "applied":
       return "ok";
     case "conflict":
@@ -40,6 +54,8 @@ export default function RepoCard({
   const overlays = trackedState?.overlays ?? [];
   const [baseInput, setBaseInput] = useState("");
   const [overlayInput, setOverlayInput] = useState("");
+  const [isSubmittingBase, setIsSubmittingBase] = useState(false);
+  const [isSubmittingOverlay, setIsSubmittingOverlay] = useState(false);
   const integrationBranch = trackedState?.materializedBranch ?? repo.currentBranch ?? "detached";
   const hasOverlays = overlays.length > 0;
 
@@ -102,10 +118,20 @@ export default function RepoCard({
           {onSetBaseTarget ? (
             <button
               className="secondary"
-              disabled={!baseInput.trim()}
-              onClick={() => {
-                onSetBaseTarget(baseInput, hasOverlays);
-                setBaseInput("");
+              disabled={!baseInput.trim() || isSubmittingBase}
+              onClick={async () => {
+                if (!onSetBaseTarget || !baseInput.trim() || isSubmittingBase) {
+                  return;
+                }
+                setIsSubmittingBase(true);
+                try {
+                  const ok = await onSetBaseTarget(baseInput, hasOverlays);
+                  if (ok) {
+                    setBaseInput("");
+                  }
+                } finally {
+                  setIsSubmittingBase(false);
+                }
               }}
             >
               {hasOverlays ? "Replace base" : "Set base"}
@@ -125,10 +151,20 @@ export default function RepoCard({
           />
           {onAddOverlay ? (
             <button
-              disabled={!overlayInput.trim()}
-              onClick={() => {
-                onAddOverlay(overlayInput);
-                setOverlayInput("");
+              disabled={!overlayInput.trim() || isSubmittingOverlay}
+              onClick={async () => {
+                if (!onAddOverlay || !overlayInput.trim() || isSubmittingOverlay) {
+                  return;
+                }
+                setIsSubmittingOverlay(true);
+                try {
+                  const ok = await onAddOverlay(overlayInput);
+                  if (ok) {
+                    setOverlayInput("");
+                  }
+                } finally {
+                  setIsSubmittingOverlay(false);
+                }
               }}
             >
               Add PR overlay
@@ -138,51 +174,57 @@ export default function RepoCard({
 
         {hasOverlays ? (
           <div className="overlay-list">
-            {overlays.map((overlay, index) => (
-              <div key={overlay.id} className="overlay-item">
-                <div className="row between overlay-row">
-                  <label className="overlay-toggle">
-                    <input
-                      type="checkbox"
-                      checked={overlay.enabled}
-                      onChange={(event) => onSetOverlayEnabled?.(overlay.id, event.target.checked)}
-                    />
-                    <span>
-                      <strong>{overlay.summaryLabel}</strong>
-                      <span className="mono small overlay-meta">
-                        PR #{overlay.prNumber} on {overlay.prBaseRef}
+            {overlays.map((overlay, index) => {
+              const status = overlayEffectiveStatus(overlay);
+              return (
+                <div key={overlay.id} className="overlay-item">
+                  <div className="row between overlay-row">
+                    <label className="overlay-toggle">
+                      <input
+                        type="checkbox"
+                        checked={overlay.enabled}
+                        onChange={(event) =>
+                          void onSetOverlayEnabled?.(overlay.id, event.target.checked)
+                        }
+                      />
+                      <span>
+                        <strong>{overlay.summaryLabel}</strong>
+                        <span className="mono small overlay-meta">
+                          PR #{overlay.prNumber} on {overlay.prBaseRef}
+                        </span>
                       </span>
-                    </span>
-                  </label>
-                  <span className={`badge ${overlayStatusClass(overlay)}`}>
-                    {overlay.lastApplyStatus ?? (overlay.enabled ? "pending" : "disabled")}
-                  </span>
-                </div>
-                <div className="row between overlay-row">
-                  <div className="mono small overlay-meta">{overlay.resolvedSha ?? overlay.sourceInput}</div>
-                  <div className="row gap overlay-actions">
-                    <button
-                      className="secondary"
-                      disabled={index === 0}
-                      onClick={() => onMoveOverlay?.(overlay.id, "up")}
-                    >
-                      Up
-                    </button>
-                    <button
-                      className="secondary"
-                      disabled={index === overlays.length - 1}
-                      onClick={() => onMoveOverlay?.(overlay.id, "down")}
-                    >
-                      Down
-                    </button>
-                    <button className="secondary" onClick={() => onRemoveOverlay?.(overlay.id)}>
-                      Remove
-                    </button>
+                    </label>
+                    <span className={`badge ${overlayStatusClass(overlay)}`}>{status}</span>
                   </div>
+                  <div className="row between overlay-row">
+                    <div className="mono small overlay-meta">{overlay.resolvedSha ?? overlay.sourceInput}</div>
+                    <div className="row gap overlay-actions">
+                      <button
+                        className="secondary"
+                        disabled={index === 0}
+                        onClick={() => void onMoveOverlay?.(overlay.id, "up")}
+                      >
+                        Up
+                      </button>
+                      <button
+                        className="secondary"
+                        disabled={index === overlays.length - 1}
+                        onClick={() => void onMoveOverlay?.(overlay.id, "down")}
+                      >
+                        Down
+                      </button>
+                      <button
+                        className="secondary"
+                        onClick={() => void onRemoveOverlay?.(overlay.id)}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                  {overlay.lastError ? <div className="muted small">{overlay.lastError}</div> : null}
                 </div>
-                {overlay.lastError ? <div className="muted small">{overlay.lastError}</div> : null}
-              </div>
-            ))}
+              );
+            })}
           </div>
         ) : (
           <div className="muted small">No PR overlays are stored for this repo.</div>
