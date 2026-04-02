@@ -1177,6 +1177,34 @@ fn normalize_frontend_settings(
     }))
 }
 
+fn default_frontend_settings_for_installation(
+    installation: &Installation,
+    repo_root_override: Option<&Path>,
+) -> AppResult<FrontendSettings> {
+    let root = PathBuf::from(&installation.comfy_root);
+    let custom_nodes_dir = PathBuf::from(&installation.custom_nodes_dir);
+    let repo_root = repo_root_override
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| {
+            root.parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| root.clone())
+                .join("ComfyUI_frontend")
+        });
+    normalize_frontend_settings(
+        &root,
+        &custom_nodes_dir,
+        Some(FrontendSettings {
+            repo_root: repo_root.to_string_lossy().to_string(),
+            dist_path: String::new(),
+            package_manager: FrontendPackageManager::Auto,
+        }),
+    )?
+    .ok_or_else(|| {
+        AppError::InvalidInput("failed to derive managed frontend settings".to_string())
+    })
+}
+
 fn strip_frontend_root_args(args: &[String]) -> Vec<String> {
     let mut stripped = Vec::with_capacity(args.len());
     let mut index = 0usize;
@@ -2119,24 +2147,45 @@ async fn install_or_patch_frontend(
     state: State<'_, AppState>,
     input: PatchFrontendInput,
 ) -> Result<OperationStart, String> {
-    let installation = state
+    let mut installation = state
         .db
         .get_installation(&input.installation_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "installation not found".to_string())?;
-    let frontend_settings = installation
-        .frontend_settings
-        .as_ref()
-        .ok_or_else(|| {
-            "configure a managed frontend repo root in installation settings first".to_string()
-        })?;
-    if frontend_settings.repo_root.trim().is_empty() {
-        return Err("configure a managed frontend repo root in installation settings first".to_string());
-    }
-    let detail = state
+    let mut detail = state
         .db
         .get_installation_detail(&installation.id)
         .map_err(|e| e.to_string())?;
+    let frontend_settings_missing = installation
+        .frontend_settings
+        .as_ref()
+        .map_or(true, |settings| settings.repo_root.trim().is_empty());
+    if frontend_settings_missing {
+        let frontend_settings = default_frontend_settings_for_installation(
+            &installation,
+            detail
+                .frontend_repo
+                .as_ref()
+                .map(|repo| Path::new(&repo.local_path)),
+        )
+        .map_err(|e| e.to_string())?;
+        installation = state
+            .db
+            .update_installation(
+                &installation.id,
+                &installation.name,
+                &installation.python_exe,
+                installation.launch_profile.as_ref(),
+                Some(&frontend_settings),
+                &installation.detected_env_kind,
+                installation.is_git_repo,
+            )
+            .map_err(|e| e.to_string())?;
+        detail = state
+            .db
+            .get_installation_detail(&installation.id)
+            .map_err(|e| e.to_string())?;
+    }
     let repo_id = detail.frontend_repo.as_ref().map(|repo| repo.id.as_str());
     let operation_kind = if detail.frontend_repo.is_some() {
         OperationKind::PatchFrontend

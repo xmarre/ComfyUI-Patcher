@@ -1063,7 +1063,7 @@ export default function App() {
                   Resolve
                 </button>
                 <button
-                  disabled={!savedFrontendSettings || !frontendInput.trim()}
+                  disabled={!frontendInput.trim()}
                   onClick={() =>
                     void runAction(async () => {
                       await api.installOrPatchFrontend({
@@ -1085,7 +1085,7 @@ export default function App() {
                 </button>
               </div>
               {!savedFrontendSettings ? (
-                <div className="muted">Configure a managed frontend repo root in Installation settings before using this section.</div>
+                <div className="muted">No managed frontend repo root is configured yet. A fresh frontend install will automatically use the default sibling checkout path; save Installation settings only if you want to override it.</div>
               ) : null}
               {frontendPreview ? (
                 <div className="preview">
