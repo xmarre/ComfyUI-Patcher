@@ -294,7 +294,17 @@ The app does **not** execute arbitrary install scripts beyond the supported mani
 
 ## Setup
 
-### Prerequisites
+### Windows: use the prebuilt release unless you want to develop the app
+
+If you are on Windows and just want to use ComfyUI Patcher, the normal path is to download the prebuilt executable / installer from the project's GitHub releases and run that.
+
+That path does **not** require a local Rust toolchain, Node.js, or a Tauri build setup.
+
+Build from source only if you want to modify the app, work on the codebase, or produce your own local builds.
+
+### Build from source
+
+#### Prerequisites
 
 * Node.js
 * Rust toolchain
@@ -306,19 +316,19 @@ The app does **not** execute arbitrary install scripts beyond the supported mani
   * a working Node toolchain in the environment where the frontend repo lives
   * for WSL-managed frontend repos, Linux `node` and Linux `npm` / `pnpm` / `yarn` must be available inside WSL
 
-### Install dependencies
+#### Install dependencies
 
 ```bash
 npm install
 ```
 
-### Run in development
+#### Run in development
 
 ```bash
 npm run tauri dev
 ```
 
-### Build
+#### Build
 
 ```bash
 npm install
