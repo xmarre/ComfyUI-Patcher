@@ -1,6 +1,7 @@
 use crate::errors::{AppError, AppResult};
 use crate::git::{
-    canonicalize_remote, ls_remote_head, ls_remote_head_remote, ls_remote_tag, ls_remote_tag_remote,
+    canonicalize_remote, ls_remote_default_branch_remote, ls_remote_head, ls_remote_head_remote,
+    ls_remote_tag, ls_remote_tag_remote,
 };
 use crate::models::{ResolvedTarget, TargetKind};
 use crate::util::slugify;
@@ -53,7 +54,6 @@ struct PullResponse {
 struct RepoResponse {
     default_branch: String,
     clone_url: String,
-    html_url: String,
 }
 
 impl GithubClient {
@@ -193,25 +193,60 @@ impl GithubClient {
         }
 
         if let Some(repo) = parse_repo_url(trimmed) {
-            let metadata = self.get_repo(&repo.owner, &repo.repo).await?;
-            let canonical_repo_url = canonicalize_remote(&metadata.html_url).ok_or_else(|| {
+            let canonical_repo_url = format!("https://github.com/{}/{}", repo.owner, repo.repo);
+            let canonical_repo_url = canonicalize_remote(&canonical_repo_url).ok_or_else(|| {
                 AppError::Github("could not canonicalize repository URL".to_string())
             })?;
-            return Ok(ResolvedTarget {
-                source_input: trimmed.to_string(),
-                target_kind: TargetKind::DefaultBranch,
-                canonical_repo_url,
-                fetch_url: metadata.clone_url,
-                checkout_ref: metadata.default_branch.clone(),
-                resolved_sha: None,
-                pr_number: None,
-                pr_base_repo_url: None,
-                pr_base_ref: None,
-                pr_head_repo_url: None,
-                pr_head_ref: None,
-                summary_label: format!("default branch {}", metadata.default_branch),
-                suggested_local_dir_name: slugify(&repo.repo),
-            });
+            let fetch_url = format!("{canonical_repo_url}.git");
+
+            match self.get_repo(&repo.owner, &repo.repo).await {
+                Ok(metadata) => {
+                    return Ok(ResolvedTarget {
+                        source_input: trimmed.to_string(),
+                        target_kind: TargetKind::DefaultBranch,
+                        canonical_repo_url,
+                        fetch_url: metadata.clone_url,
+                        checkout_ref: metadata.default_branch.clone(),
+                        resolved_sha: None,
+                        pr_number: None,
+                        pr_base_repo_url: None,
+                        pr_base_ref: None,
+                        pr_head_repo_url: None,
+                        pr_head_ref: None,
+                        summary_label: format!("default branch {}", metadata.default_branch),
+                        suggested_local_dir_name: slugify(&repo.repo),
+                    });
+                }
+                Err(api_err) => {
+                    let default_branch = ls_remote_default_branch_remote(&fetch_url)
+                        .await
+                        .map_err(|git_err| {
+                            AppError::Github(format!(
+                                "could not resolve repository default branch via GitHub API ({api_err}) or git ls-remote HEAD ({git_err})"
+                            ))
+                        })?
+                        .ok_or_else(|| {
+                            AppError::Github(format!(
+                                "could not resolve repository default branch via GitHub API ({api_err}) or git ls-remote HEAD"
+                            ))
+                        })?;
+                    return Ok(ResolvedTarget {
+                        source_input: trimmed.to_string(),
+                        target_kind: TargetKind::DefaultBranch,
+                        canonical_repo_url,
+                        fetch_url,
+                        checkout_ref: default_branch.clone(),
+                        resolved_sha: None,
+                        pr_number: None,
+                        pr_base_repo_url: None,
+                        pr_base_ref: None,
+                        pr_head_repo_url: None,
+                        pr_head_ref: None,
+                        summary_label: format!("default branch {}", default_branch),
+                        suggested_local_dir_name: slugify(&repo.repo),
+                    });
+                }
+            }
         }
 
         if let Some(repo_path) = current_repo_path {
