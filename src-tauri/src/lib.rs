@@ -1053,13 +1053,44 @@ async fn find_existing_custom_node_repo_by_remote(
 
     let custom_nodes_dir = PathBuf::from(&installation.custom_nodes_dir);
     if custom_nodes_dir.exists() {
-        for entry in std::fs::read_dir(&custom_nodes_dir)? {
-            let entry = entry?;
+        let entries = match std::fs::read_dir(&custom_nodes_dir) {
+            Ok(entries) => entries,
+            Err(err) => {
+                eprintln!(
+                    "failed to scan custom_nodes directory {} during custom node remote-match probe: {}",
+                    custom_nodes_dir.to_string_lossy(),
+                    err
+                );
+                return Ok(None);
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    eprintln!(
+                        "failed to read an entry under {} during custom node remote-match probe: {}",
+                        custom_nodes_dir.to_string_lossy(),
+                        err
+                    );
+                    continue;
+                }
+            };
             let path = entry.path();
             if !path.is_dir() || !is_git_repo(&path).await {
                 continue;
             }
-            let status = inspect_repo(&path).await?;
+            let status = match inspect_repo(&path).await {
+                Ok(status) => status,
+                Err(err) => {
+                    eprintln!(
+                        "skipping unreadable custom node repo {} during custom node remote-match probe: {}",
+                        path.to_string_lossy(),
+                        err
+                    );
+                    continue;
+                }
+            };
             let Some(live_remote) = status.origin_url.as_deref().and_then(canonicalize_remote) else {
                 continue;
             };
@@ -1904,6 +1935,23 @@ async fn delete_installation(
         .map_err(|e| e.to_string())
 }
 
+fn collect_local_dir_matches(
+    expected_dir_names: &[String],
+    dirs_by_name: &HashMap<String, Vec<String>>,
+) -> Vec<String> {
+    let mut matches = Vec::new();
+    for expected_dir_name in expected_dir_names {
+        if let Some(paths) = dirs_by_name.get(&expected_dir_name.to_ascii_lowercase()) {
+            for path in paths {
+                if !matches.iter().any(|existing| existing == path) {
+                    matches.push(path.clone());
+                }
+            }
+        }
+    }
+    matches
+}
+
 async fn collect_manager_custom_node_items(
     state: &AppState,
     installation: &Installation,
@@ -1912,8 +1960,8 @@ async fn collect_manager_custom_node_items(
 ) -> AppResult<Vec<ManagerRegistryCustomNode>> {
     let discovered_custom_nodes = discover_custom_node_repos_best_effort(state, installation).await?;
 
-    let mut tracking_managed_dirs: HashMap<String, String> = HashMap::new();
-    let mut present_non_git_dirs: HashMap<String, String> = HashMap::new();
+    let mut tracking_managed_dirs: HashMap<String, Vec<String>> = HashMap::new();
+    let mut present_non_git_dirs: HashMap<String, Vec<String>> = HashMap::new();
     let custom_nodes_dir = PathBuf::from(&installation.custom_nodes_dir);
     if custom_nodes_dir.exists() {
         match std::fs::read_dir(&custom_nodes_dir) {
@@ -1943,10 +1991,11 @@ async fn collect_manager_custom_node_items(
                     if has_git && is_git_repo(&path).await {
                         continue;
                     }
+                    let path_string = path.to_string_lossy().to_string();
                     if has_tracking {
-                        tracking_managed_dirs.insert(key, path.to_string_lossy().to_string());
+                        tracking_managed_dirs.entry(key).or_default().push(path_string);
                     } else if !has_git {
-                        present_non_git_dirs.insert(key, path.to_string_lossy().to_string());
+                        present_non_git_dirs.entry(key).or_default().push(path_string);
                     }
                 }
             }
@@ -1999,16 +2048,26 @@ async fn collect_manager_custom_node_items(
             .as_ref()
             .and_then(|remote| installed_by_remote.get(remote));
         let expected_dir_names = state.manager_registry.expected_dir_names_for_entry(&entry);
-        let tracking_local_path = expected_dir_names
-            .iter()
-            .find_map(|value| tracking_managed_dirs.get(&value.to_ascii_lowercase()))
-            .cloned();
-        let present_local_path = expected_dir_names
-            .iter()
-            .find_map(|value| present_non_git_dirs.get(&value.to_ascii_lowercase()))
-            .cloned();
+        let tracking_local_matches =
+            collect_local_dir_matches(&expected_dir_names, &tracking_managed_dirs);
+        let present_local_matches =
+            collect_local_dir_matches(&expected_dir_names, &present_non_git_dirs);
+        let (tracking_local_path, has_ambiguous_tracking_local_path) =
+            match tracking_local_matches.len() {
+                0 => (None, false),
+                1 => (tracking_local_matches.into_iter().next(), false),
+                _ => (None, true),
+            };
+        let (present_local_path, has_ambiguous_present_local_path) =
+            match present_local_matches.len() {
+                0 => (None, false),
+                1 => (present_local_matches.into_iter().next(), false),
+                _ => (None, true),
+            };
         let installed = installed_state.and_then(|state| state.as_ref());
-        let has_ambiguous_installation = matches!(installed_state, Some(None));
+        let has_ambiguous_installation = matches!(installed_state, Some(None))
+            || has_ambiguous_tracking_local_path
+            || has_ambiguous_present_local_path;
         items.push(ManagerRegistryCustomNode {
             registry_id: entry.registry_id(),
             title: entry.title(),
