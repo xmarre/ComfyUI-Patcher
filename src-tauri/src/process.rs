@@ -35,6 +35,69 @@ impl ProcessRegistry {
         }
     }
 
+    fn is_explicit_wsl_launcher(program: &str) -> bool {
+        Path::new(program)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.eq_ignore_ascii_case("wsl.exe") || name.eq_ignore_ascii_case("wsl")
+            })
+    }
+
+    fn command_is_wsl_backed(program: &str, cwd: Option<&str>) -> bool {
+        Self::is_explicit_wsl_launcher(program)
+            || parse_wsl_unc_path(Path::new(program)).is_some()
+            || cwd
+                .and_then(|value| parse_wsl_unc_path(Path::new(value)))
+                .is_some()
+    }
+
+    fn rewrite_frontend_root_args_for_context(
+        program: &str,
+        args: &[String],
+        cwd: Option<&str>,
+    ) -> Vec<String> {
+        let wsl_backed = Self::command_is_wsl_backed(program, cwd);
+        let mut rewritten = Vec::with_capacity(args.len());
+        let mut index = 0usize;
+
+        while index < args.len() {
+            let current = &args[index];
+            if current == "--front-end-root" {
+                rewritten.push(current.clone());
+                if let Some(value) = args.get(index + 1) {
+                    let converted = if wsl_backed {
+                        parse_wsl_unc_path(Path::new(value))
+                            .map(|parsed| parsed.linux_path)
+                            .unwrap_or_else(|| value.clone())
+                    } else {
+                        value.clone()
+                    };
+                    rewritten.push(converted);
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+                continue;
+            }
+            if let Some(value) = current.strip_prefix("--front-end-root=") {
+                let converted = if wsl_backed {
+                    parse_wsl_unc_path(Path::new(value))
+                        .map(|parsed| parsed.linux_path)
+                        .unwrap_or_else(|| value.to_string())
+                } else {
+                    value.to_string()
+                };
+                rewritten.push(format!("--front-end-root={converted}"));
+                index += 1;
+                continue;
+            }
+            rewritten.push(current.clone());
+            index += 1;
+        }
+        rewritten
+    }
+
     fn joined_args(base: &[String], extra: Option<&[String]>) -> Vec<String> {
         let mut joined = Vec::with_capacity(base.len() + extra.map_or(0, |values| values.len()));
         joined.extend(base.iter().cloned());
@@ -182,20 +245,26 @@ impl ProcessRegistry {
     }
 
     fn start_command(profile: &LaunchProfile) -> (&str, Vec<String>) {
-        (
-            &profile.command,
-            Self::joined_args(&profile.args, profile.extra_args.as_deref()),
-        )
+        let program = &profile.command;
+        let args = Self::rewrite_frontend_root_args_for_context(
+            program,
+            &Self::joined_args(&profile.args, profile.extra_args.as_deref()),
+            profile.cwd.as_deref(),
+        );
+        (program, args)
     }
 
     fn restart_command(profile: &LaunchProfile) -> (&str, Vec<String>) {
-        (
-            profile.restart_command.as_deref().unwrap_or(&profile.command),
-            Self::joined_args(
+        let program = profile.restart_command.as_deref().unwrap_or(&profile.command);
+        let args = Self::rewrite_frontend_root_args_for_context(
+            program,
+            &Self::joined_args(
                 profile.restart_args.as_deref().unwrap_or(&profile.args),
                 profile.extra_args.as_deref(),
             ),
-        )
+            profile.cwd.as_deref(),
+        );
+        (program, args)
     }
 
     pub async fn is_running(&self, installation_id: &str) -> AppResult<bool> {

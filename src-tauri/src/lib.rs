@@ -10,7 +10,6 @@ mod registry;
 mod state;
 mod util;
 
-use crate::execution::parse_wsl_unc_path;
 use crate::deps::{execute_dependency_sync, plan_dependency_sync};
 use crate::errors::{AppError, AppResult};
 use crate::git::{
@@ -1235,38 +1234,12 @@ fn strip_frontend_root_args(args: &[String]) -> Vec<String> {
     stripped
 }
 
-fn is_explicit_wsl_launcher(command: &str) -> bool {
-    Path::new(command)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| {
-            name.eq_ignore_ascii_case("wsl.exe") || name.eq_ignore_ascii_case("wsl")
-        })
-}
-
-fn managed_frontend_arg_path(profile: &LaunchProfile, dist_path: &str) -> String {
-    let wsl_backed = is_explicit_wsl_launcher(&profile.command)
-        || parse_wsl_unc_path(Path::new(&profile.command)).is_some()
-        || profile
-            .cwd
-            .as_deref()
-            .and_then(|cwd| parse_wsl_unc_path(Path::new(cwd)))
-            .is_some();
-    if wsl_backed {
-        if let Some(parsed) = parse_wsl_unc_path(Path::new(dist_path)) {
-            return parsed.linux_path;
-        }
-    }
-    dist_path.to_string()
-}
-
 fn apply_managed_frontend_root(profile: &mut LaunchProfile, dist_path: &str) {
-    let injected_dist_path = managed_frontend_arg_path(profile, dist_path);
     profile.args = strip_frontend_root_args(&profile.args);
     profile.extra_args = Some({
         let mut extra = strip_frontend_root_args(profile.extra_args.as_deref().unwrap_or(&[]));
         extra.push("--front-end-root".to_string());
-        extra.push(injected_dist_path);
+        extra.push(dist_path.to_string());
         extra
     });
     if let Some(restart_args) = profile.restart_args.as_ref() {
