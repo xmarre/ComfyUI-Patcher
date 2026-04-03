@@ -108,6 +108,10 @@ export type ListManagerCustomNodesInput = {
   limit?: number | null;
 };
 
+export type AdoptTrackedCustomNodesInput = {
+  installationId: string;
+};
+
 export type ResolvedTarget = {
   sourceInput: string;
   targetKind: "branch" | "tag" | "commit" | "pr" | "default_branch" | "named_ref";

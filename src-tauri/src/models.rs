@@ -381,6 +381,12 @@ pub struct PatchCustomNodeInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AdoptTrackedCustomNodesInput {
+    pub installation_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateRepoInput {
     pub repo_id: String,
     pub dirty_repo_strategy: DirtyRepoStrategy,
