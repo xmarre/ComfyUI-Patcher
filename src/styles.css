@@ -71,7 +71,7 @@ h1, h2, h3 {
 
 pre {
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: break-word;
   background: #0b0f13;
   border: 1px solid #1f2a34;
   border-radius: 12px;
@@ -413,7 +413,7 @@ button:disabled {
 
 .alert-copy {
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: break-word;
 }
 
 .activity-grid {
@@ -478,7 +478,7 @@ button:disabled {
 
 .operation-id,
 .operation-input-preview {
-  word-break: break-word;
+  overflow-wrap: break-word;
 }
 
 .operation-detail-panel {
