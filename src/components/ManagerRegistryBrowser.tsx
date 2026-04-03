@@ -106,6 +106,7 @@ export default function ManagerRegistryBrowser({
   const hasTrackingInstallation = (entry: ManagerRegistryCustomNode) => entry.isTrackingManaged;
   const shouldOfferTrackingAdoption = (entry: ManagerRegistryCustomNode) =>
     hasTrackingInstallation(entry) && !hasGitInstallation(entry);
+  const asciiLower = (value: string) => value.replace(/[A-Z]/g, (char) => char.toLowerCase());
 
   const adoptableTrackedEntries = useMemo(() => {
     const entriesByTrackingPath = new Map<string, ManagerRegistryCustomNode[]>();
@@ -121,7 +122,7 @@ export default function ManagerRegistryBrowser({
       ) {
         continue;
       }
-      const key = trackingLocalPath.toLocaleLowerCase();
+      const key = asciiLower(trackingLocalPath);
       const bucket = entriesByTrackingPath.get(key);
       if (bucket) {
         bucket.push(entry);

@@ -1916,26 +1916,46 @@ async fn collect_manager_custom_node_items(
     let mut present_non_git_dirs: HashMap<String, String> = HashMap::new();
     let custom_nodes_dir = PathBuf::from(&installation.custom_nodes_dir);
     if custom_nodes_dir.exists() {
-        let entries = std::fs::read_dir(&custom_nodes_dir)?;
-        for entry in entries {
-            let entry = entry?;
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
+        match std::fs::read_dir(&custom_nodes_dir) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = match entry {
+                        Ok(entry) => entry,
+                        Err(err) => {
+                            eprintln!(
+                                "failed to read an entry under {} during registry browsing: {}",
+                                custom_nodes_dir.to_string_lossy(),
+                                err
+                            );
+                            continue;
+                        }
+                    };
+                    let path = entry.path();
+                    if !path.is_dir() {
+                        continue;
+                    }
+                    let Some(dir_name) = path.file_name().and_then(|value| value.to_str()) else {
+                        continue;
+                    };
+                    let has_tracking = path.join(".tracking").is_file();
+                    let has_git = has_git_marker(&path);
+                    let key = dir_name.to_ascii_lowercase();
+                    if has_git && is_git_repo(&path).await {
+                        continue;
+                    }
+                    if has_tracking {
+                        tracking_managed_dirs.insert(key, path.to_string_lossy().to_string());
+                    } else if !has_git {
+                        present_non_git_dirs.insert(key, path.to_string_lossy().to_string());
+                    }
+                }
             }
-            let Some(dir_name) = path.file_name().and_then(|value| value.to_str()) else {
-                continue;
-            };
-            let has_tracking = path.join(".tracking").is_file();
-            let has_git = has_git_marker(&path);
-            let key = dir_name.to_ascii_lowercase();
-            if has_git && is_git_repo(&path).await {
-                continue;
-            }
-            if has_tracking {
-                tracking_managed_dirs.insert(key, path.to_string_lossy().to_string());
-            } else if !has_git {
-                present_non_git_dirs.insert(key, path.to_string_lossy().to_string());
+            Err(err) => {
+                eprintln!(
+                    "failed to scan custom_nodes directory {} during registry browsing: {}",
+                    custom_nodes_dir.to_string_lossy(),
+                    err
+                );
             }
         }
     }
