@@ -1,9 +1,9 @@
 [package]
 name = "comfyui-patcher"
-version = "0.1.1"
+version = "0.1.2"
 description = "Desktop patcher for ComfyUI and custom nodes"
-authors = ["OpenAI"]
-edition = "2021"
+authors = ["xmarre"]
+edition = "2026"
 
 [lib]
 name = "comfyui_patcher_lib"
