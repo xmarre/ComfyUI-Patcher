@@ -3328,9 +3328,6 @@ async fn run_adopt_tracked_custom_nodes(
             summary.push_str(&format!("; {} failed", failure_count));
             return Err(AppError::Conflict(summary));
         }
-        if ambiguous_path_count > 0 {
-            return Err(AppError::Conflict(summary));
-        }
         Ok::<String, AppError>(summary)
     }
     .await;
