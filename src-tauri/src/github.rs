@@ -201,19 +201,25 @@ impl GithubClient {
 
             match self.get_repo(&repo.owner, &repo.repo).await {
                 Ok(metadata) => {
+                    let canonical_repo_url = canonicalize_remote(&metadata.clone_url)
+                        .ok_or_else(|| {
+                            AppError::Github("could not canonicalize repository URL".to_string())
+                        })?;
+                    let fetch_url = metadata.clone_url;
+                    let default_branch = metadata.default_branch;
                     return Ok(ResolvedTarget {
                         source_input: trimmed.to_string(),
                         target_kind: TargetKind::DefaultBranch,
                         canonical_repo_url,
-                        fetch_url: metadata.clone_url,
-                        checkout_ref: metadata.default_branch.clone(),
+                        fetch_url,
+                        checkout_ref: default_branch.clone(),
                         resolved_sha: None,
                         pr_number: None,
                         pr_base_repo_url: None,
                         pr_base_ref: None,
                         pr_head_repo_url: None,
                         pr_head_ref: None,
-                        summary_label: format!("default branch {}", metadata.default_branch),
+                        summary_label: format!("default branch {}", default_branch),
                         suggested_local_dir_name: slugify(&repo.repo),
                     });
                 }
