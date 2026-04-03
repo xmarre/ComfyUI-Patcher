@@ -15,7 +15,8 @@ use crate::errors::{AppError, AppResult};
 use crate::git::{
     apply_stash, canonicalize_remote, clone_repo, ensure_clean_or_apply_strategy, fetch_origin,
     fetch_refspec, inspect_repo, is_git_repo, join_custom_node_path, merge_abort, merge_no_ff,
-    reset_hard, submodule_update, switch_branch, switch_detached, validate_custom_node_dir_name,
+    reset_hard, run_git_allow_fail, submodule_update, switch_branch, switch_detached,
+    validate_custom_node_dir_name,
 };
 use crate::models::*;
 use crate::state::AppState;
@@ -796,9 +797,27 @@ async fn materialize_tracked_state(
         )
         .await
         {
-            let merge_error = match merge_abort(path).await {
-                Ok(()) => err,
-                Err(abort_err) => restore_checkpoint_error(err, abort_err),
+            let merge_in_progress = match run_git_allow_fail(
+                path,
+                &["rev-parse", "-q", "--verify", "MERGE_HEAD"],
+            )
+            .await
+            {
+                Ok(result) => result.is_some(),
+                Err(probe_err) => {
+                    let merge_error = restore_checkpoint_error(err, probe_err);
+                    overlay.last_apply_status = Some(OverlayApplyStatus::Conflict);
+                    overlay.last_error = Some(merge_error.to_string());
+                    return Err((next_state, merge_error));
+                }
+            };
+            let merge_error = if merge_in_progress {
+                match merge_abort(path).await {
+                    Ok(()) => err,
+                    Err(abort_err) => restore_checkpoint_error(err, abort_err),
+                }
+            } else {
+                err
             };
             overlay.last_apply_status = Some(OverlayApplyStatus::Conflict);
             overlay.last_error = Some(merge_error.to_string());

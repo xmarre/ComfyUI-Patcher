@@ -164,7 +164,22 @@ pub async fn fetch_refspec(path: &Path, remote: &str, refspec: &str) -> AppResul
 }
 
 pub async fn merge_no_ff(path: &Path, target: &str, message: &str) -> AppResult<()> {
-    run_git(path, &["merge", "--no-ff", "--no-edit", "-m", message, target]).await?;
+    run_git(
+        path,
+        &[
+            "-c",
+            "user.name=ComfyUI Patcher",
+            "-c",
+            "user.email=patcher@local.invalid",
+            "merge",
+            "--no-ff",
+            "--no-edit",
+            "-m",
+            message,
+            target,
+        ],
+    )
+    .await?;
     Ok(())
 }
 
