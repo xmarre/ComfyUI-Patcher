@@ -1318,29 +1318,37 @@ export default function App() {
                 installationId={selectedInstallation.id}
                 refreshToken={registryRefreshToken}
                 onInstall={async (entry) => {
-                await runAction(async () => {
-                  const targetLocalDirName =
-                    entry.isTrackingManaged && !(entry.installedRepoId || entry.installedLocalPath)
-                      ? (entry.trackingLocalPath?.split(/[\\/]/).filter(Boolean).pop() ?? undefined)
-                      : undefined;
-                  await api.installOrPatchCustomNode({
-                    installationId: selectedInstallation.id,
-                    input: entry.sourceInput ?? "",
-                    targetLocalDirName,
-                    existingRepoConflictStrategy: "install_with_suffix",
-                    dirtyRepoStrategy: "abort",
-                    setTrackedTarget: true,
-                    syncDependencies: true,
-                    restartAfterSuccess: false,
-                    adoptTrackingInstall: entry.isTrackingManaged && !(entry.installedRepoId || entry.installedLocalPath)
+                  await runAction(async () => {
+                    const targetLocalDirName =
+                      entry.isTrackingManaged && !(entry.installedRepoId || entry.installedLocalPath)
+                        ? (entry.trackingLocalPath?.split(/[\\/]/).filter(Boolean).pop() ?? undefined)
+                        : undefined;
+                    await api.installOrPatchCustomNode({
+                      installationId: selectedInstallation.id,
+                      input: entry.sourceInput ?? "",
+                      targetLocalDirName,
+                      existingRepoConflictStrategy: "install_with_suffix",
+                      dirtyRepoStrategy: "abort",
+                      setTrackedTarget: true,
+                      syncDependencies: true,
+                      restartAfterSuccess: false,
+                      adoptTrackingInstall:
+                        entry.isTrackingManaged && !(entry.installedRepoId || entry.installedLocalPath)
+                    });
                   });
-                });
-              }}
+                }}
+                onAdoptAllTracked={async () => {
+                  await runAction(async () => {
+                    await api.adoptTrackedCustomNodes({
+                      installationId: selectedInstallation.id
+                    });
+                  });
+                }}
                 onUseSourceInput={(sourceInput) => {
-                setNodeInput(sourceInput);
-                setNodePreview(null);
-                setNodePreviewError(null);
-              }}
+                  setNodeInput(sourceInput);
+                  setNodePreview(null);
+                  setNodePreviewError(null);
+                }}
               />
             </section>
 

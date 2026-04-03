@@ -1053,13 +1053,44 @@ async fn find_existing_custom_node_repo_by_remote(
 
     let custom_nodes_dir = PathBuf::from(&installation.custom_nodes_dir);
     if custom_nodes_dir.exists() {
-        for entry in std::fs::read_dir(&custom_nodes_dir)? {
-            let entry = entry?;
+        let entries = match std::fs::read_dir(&custom_nodes_dir) {
+            Ok(entries) => entries,
+            Err(err) => {
+                eprintln!(
+                    "failed to scan custom_nodes directory {} during custom node remote-match probe: {}",
+                    custom_nodes_dir.to_string_lossy(),
+                    err
+                );
+                return Ok(None);
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    eprintln!(
+                        "failed to read an entry under {} during custom node remote-match probe: {}",
+                        custom_nodes_dir.to_string_lossy(),
+                        err
+                    );
+                    continue;
+                }
+            };
             let path = entry.path();
             if !path.is_dir() || !is_git_repo(&path).await {
                 continue;
             }
-            let status = inspect_repo(&path).await?;
+            let status = match inspect_repo(&path).await {
+                Ok(status) => status,
+                Err(err) => {
+                    eprintln!(
+                        "skipping unreadable custom node repo {} during custom node remote-match probe: {}",
+                        path.to_string_lossy(),
+                        err
+                    );
+                    continue;
+                }
+            };
             let Some(live_remote) = status.origin_url.as_deref().and_then(canonicalize_remote) else {
                 continue;
             };
@@ -1904,45 +1935,76 @@ async fn delete_installation(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-async fn list_manager_custom_nodes(
-    state: State<'_, AppState>,
-    input: ListManagerCustomNodesInput,
-) -> Result<Vec<ManagerRegistryCustomNode>, String> {
-    let installation = state
-        .db
-        .get_installation(&input.installation_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "installation not found".to_string())?;
+fn collect_local_dir_matches(
+    expected_dir_names: &[String],
+    dirs_by_name: &HashMap<String, Vec<String>>,
+) -> Vec<String> {
+    let mut matches = Vec::new();
+    for expected_dir_name in expected_dir_names {
+        if let Some(paths) = dirs_by_name.get(&expected_dir_name.to_ascii_lowercase()) {
+            for path in paths {
+                if !matches.iter().any(|existing| existing == path) {
+                    matches.push(path.clone());
+                }
+            }
+        }
+    }
+    matches
+}
 
-    let discovered_custom_nodes = discover_custom_node_repos_best_effort(&state, &installation)
-        .await
-        .map_err(|e| e.to_string())?;
+async fn collect_manager_custom_node_items(
+    state: &AppState,
+    installation: &Installation,
+    query: Option<&str>,
+    limit: usize,
+) -> AppResult<Vec<ManagerRegistryCustomNode>> {
+    let discovered_custom_nodes = discover_custom_node_repos_best_effort(state, installation).await?;
 
-    let mut tracking_managed_dirs: HashMap<String, String> = HashMap::new();
-    let mut present_non_git_dirs: HashMap<String, String> = HashMap::new();
+    let mut tracking_managed_dirs: HashMap<String, Vec<String>> = HashMap::new();
+    let mut present_non_git_dirs: HashMap<String, Vec<String>> = HashMap::new();
     let custom_nodes_dir = PathBuf::from(&installation.custom_nodes_dir);
     if custom_nodes_dir.exists() {
-        let entries = std::fs::read_dir(&custom_nodes_dir).map_err(|e| e.to_string())?;
-        for entry in entries {
-            let entry = entry.map_err(|e| e.to_string())?;
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
+        match std::fs::read_dir(&custom_nodes_dir) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = match entry {
+                        Ok(entry) => entry,
+                        Err(err) => {
+                            eprintln!(
+                                "failed to read an entry under {} during registry browsing: {}",
+                                custom_nodes_dir.to_string_lossy(),
+                                err
+                            );
+                            continue;
+                        }
+                    };
+                    let path = entry.path();
+                    if !path.is_dir() {
+                        continue;
+                    }
+                    let Some(dir_name) = path.file_name().and_then(|value| value.to_str()) else {
+                        continue;
+                    };
+                    let has_tracking = path.join(".tracking").is_file();
+                    let has_git = has_git_marker(&path);
+                    let key = dir_name.to_ascii_lowercase();
+                    if has_git && is_git_repo(&path).await {
+                        continue;
+                    }
+                    let path_string = path.to_string_lossy().to_string();
+                    if has_tracking {
+                        tracking_managed_dirs.entry(key).or_default().push(path_string);
+                    } else if !has_git {
+                        present_non_git_dirs.entry(key).or_default().push(path_string);
+                    }
+                }
             }
-            let Some(dir_name) = path.file_name().and_then(|value| value.to_str()) else {
-                continue;
-            };
-            let has_tracking = path.join(".tracking").is_file();
-            let has_git = has_git_marker(&path);
-            let key = dir_name.to_ascii_lowercase();
-            if has_git && is_git_repo(&path).await {
-                continue;
-            }
-            if has_tracking {
-                tracking_managed_dirs.insert(key, path.to_string_lossy().to_string());
-            } else if !has_git {
-                present_non_git_dirs.insert(key, path.to_string_lossy().to_string());
+            Err(err) => {
+                eprintln!(
+                    "failed to scan custom_nodes directory {} during registry browsing: {}",
+                    custom_nodes_dir.to_string_lossy(),
+                    err
+                );
             }
         }
     }
@@ -1970,12 +2032,8 @@ async fn list_manager_custom_nodes(
         }
     }
 
-    let limit = input.limit.unwrap_or(1000).clamp(1, 10000);
-    let entries = state
-        .manager_registry
-        .search_entries(input.query.as_deref(), usize::MAX)
-        .await
-        .map_err(|e| e.to_string())?;
+    let limit = limit.clamp(1, 10000);
+    let entries = state.manager_registry.search_entries(query, usize::MAX).await?;
     let mut items = Vec::with_capacity(entries.len());
     for entry in entries {
         let install_type = entry.install_type_label();
@@ -1990,16 +2048,26 @@ async fn list_manager_custom_nodes(
             .as_ref()
             .and_then(|remote| installed_by_remote.get(remote));
         let expected_dir_names = state.manager_registry.expected_dir_names_for_entry(&entry);
-        let tracking_local_path = expected_dir_names
-            .iter()
-            .find_map(|value| tracking_managed_dirs.get(&value.to_ascii_lowercase()))
-            .cloned();
-        let present_local_path = expected_dir_names
-            .iter()
-            .find_map(|value| present_non_git_dirs.get(&value.to_ascii_lowercase()))
-            .cloned();
+        let tracking_local_matches =
+            collect_local_dir_matches(&expected_dir_names, &tracking_managed_dirs);
+        let present_local_matches =
+            collect_local_dir_matches(&expected_dir_names, &present_non_git_dirs);
+        let (tracking_local_path, has_ambiguous_tracking_local_path) =
+            match tracking_local_matches.len() {
+                0 => (None, false),
+                1 => (tracking_local_matches.into_iter().next(), false),
+                _ => (None, true),
+            };
+        let (present_local_path, has_ambiguous_present_local_path) =
+            match present_local_matches.len() {
+                0 => (None, false),
+                1 => (present_local_matches.into_iter().next(), false),
+                _ => (None, true),
+            };
         let installed = installed_state.and_then(|state| state.as_ref());
-        let has_ambiguous_installation = matches!(installed_state, Some(None));
+        let has_ambiguous_installation = matches!(installed_state, Some(None))
+            || has_ambiguous_tracking_local_path
+            || has_ambiguous_present_local_path;
         items.push(ManagerRegistryCustomNode {
             registry_id: entry.registry_id(),
             title: entry.title(),
@@ -2030,6 +2098,27 @@ async fn list_manager_custom_nodes(
     });
     items.truncate(limit);
     Ok(items)
+}
+
+#[tauri::command]
+async fn list_manager_custom_nodes(
+    state: State<'_, AppState>,
+    input: ListManagerCustomNodesInput,
+) -> Result<Vec<ManagerRegistryCustomNode>, String> {
+    let installation = state
+        .db
+        .get_installation(&input.installation_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "installation not found".to_string())?;
+
+    collect_manager_custom_node_items(
+        &state,
+        &installation,
+        input.query.as_deref(),
+        input.limit.unwrap_or(1000),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2610,6 +2699,358 @@ async fn run_install_or_patch_frontend(
     Ok(())
 }
 
+struct CustomNodeInstallRunResult {
+    checkpoint_id: String,
+    done_message: &'static str,
+}
+
+async fn execute_install_or_patch_custom_node(
+    app: &AppHandle,
+    state: &AppState,
+    installation: &Installation,
+    input: &PatchCustomNodeInput,
+    operation_id: &str,
+) -> AppResult<CustomNodeInstallRunResult> {
+    let restore_tracking_backup = |backup_path: &Path, target_path: &Path| -> AppResult<()> {
+        if target_path.exists() {
+            std::fs::remove_dir_all(target_path)?;
+        }
+        std::fs::rename(backup_path, target_path)?;
+        Ok(())
+    };
+    let mut tracking_backup_path: Option<PathBuf> = None;
+    let mut tracking_target_path: Option<PathBuf> = None;
+    let mut rollback_repo_id: Option<String> = None;
+    let mut rollback_checkpoint_id: Option<String> = None;
+    let result = async {
+        let resolved = resolve_target_for_context(
+            state,
+            installation,
+            &RepoKind::CustomNode,
+            None,
+            &input.input,
+        )
+        .await?;
+        let custom_nodes_dir = PathBuf::from(&installation.custom_nodes_dir);
+        let existing_repo_match =
+            find_existing_custom_node_repo_by_remote(state, installation, &resolved).await?;
+        if let (Some(requested), Some(repo)) = (
+            input
+                .target_local_dir_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            existing_repo_match.as_ref(),
+        ) {
+            let existing_name = Path::new(&repo.local_path)
+                .file_name()
+                .and_then(|value| value.to_str());
+            if existing_name != Some(requested) {
+                return Err(AppError::Conflict(format!(
+                    "matching repo already exists at {}; refusing to ignore requested directory {}",
+                    repo.local_path, requested
+                )));
+            }
+        }
+        let requested_dir_name = match input
+            .target_local_dir_name
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+        {
+            Some(value) => value,
+            None => match existing_repo_match.as_ref() {
+                Some(repo) => Path::new(&repo.local_path)
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or(&resolved.suggested_local_dir_name)
+                    .to_string(),
+                None => preferred_custom_node_dir_name(state, &resolved).await,
+            },
+        };
+        let base_dir_name = validate_custom_node_dir_name(&requested_dir_name)?;
+        let mut target_path = existing_repo_match
+            .as_ref()
+            .map(|repo| PathBuf::from(&repo.local_path))
+            .unwrap_or_else(|| join_custom_node_path(&custom_nodes_dir, &base_dir_name));
+
+        if let Some(repo) = existing_repo_match.as_ref() {
+            log_operation(
+                state,
+                app,
+                operation_id,
+                "preflight",
+                "info",
+                format!("reusing existing custom node directory {}", repo.local_path),
+            );
+        } else {
+            log_operation(
+                state,
+                app,
+                operation_id,
+                "preflight",
+                "info",
+                format!("selected custom node directory {}", target_path.to_string_lossy()),
+            );
+        }
+
+        if target_path.exists() {
+            if is_git_repo(&target_path).await {
+                let status = inspect_repo(&target_path).await?;
+                ensure_remote_matches(status.origin_url.as_deref(), &resolved)?;
+                let repo = state.db.upsert_repo(
+                    &installation.id,
+                    RepoKind::CustomNode,
+                    target_path
+                        .file_name()
+                        .and_then(|v| v.to_str())
+                        .unwrap_or("custom-node"),
+                    &target_path.to_string_lossy(),
+                    status.origin_url.as_deref(),
+                    status.head_sha.as_deref(),
+                    status.branch.as_deref(),
+                    status.is_detached,
+                    status.is_dirty,
+                )?;
+                let repo_lock = state.repo_lock(&repo.id).await;
+                let _guard = repo_lock.lock().await;
+                let tracked_state = build_requested_tracked_state_for_input(
+                    state,
+                    installation,
+                    &repo,
+                    &input.input,
+                    false,
+                )
+                .await?;
+                let checkpoint = apply_repo_tracking_state(
+                    state,
+                    app,
+                    operation_id,
+                    installation,
+                    &repo,
+                    &tracked_state,
+                    &input.dirty_repo_strategy,
+                    input.sync_dependencies,
+                    input.set_tracked_target,
+                )
+                .await?;
+                maybe_restart_installation(
+                    state,
+                    app,
+                    operation_id,
+                    installation,
+                    input.restart_after_success,
+                )
+                .await?;
+                return Ok::<CustomNodeInstallRunResult, AppError>(CustomNodeInstallRunResult {
+                    checkpoint_id: checkpoint.id.clone(),
+                    done_message: "custom node patch completed",
+                });
+            }
+
+            if is_tracking_managed_dir(&target_path).await {
+                if !input.adopt_tracking_install {
+                    return Err(AppError::Conflict(
+                        "target custom node directory is a tracking-managed install; enable tracking adoption to replace it with a managed git clone"
+                            .to_string(),
+                    ));
+                }
+                let backup_root = PathBuf::from(&installation.comfy_root)
+                    .join(".comfyui-patcher-backups")
+                    .join("custom_nodes");
+                std::fs::create_dir_all(&backup_root)?;
+                let backup_path = choose_tracking_backup_path(&target_path, &backup_root);
+                log_operation(
+                    state,
+                    app,
+                    operation_id,
+                    "preflight",
+                    "info",
+                    format!(
+                        "backing up tracking-managed install {} to {} before adopting it as a git repo",
+                        target_path.to_string_lossy(),
+                        backup_path.to_string_lossy()
+                    ),
+                );
+                std::fs::rename(&target_path, &backup_path)?;
+                tracking_target_path = Some(target_path.clone());
+                tracking_backup_path = Some(backup_path);
+            } else {
+                match input.existing_repo_conflict_strategy {
+                    ExistingRepoConflictStrategy::Abort => {
+                        return Err(AppError::Conflict(
+                            "target custom node directory already exists and is not a git repo"
+                                .to_string(),
+                        ));
+                    }
+                    ExistingRepoConflictStrategy::Replace => {
+                        std::fs::remove_dir_all(&target_path)?;
+                    }
+                    ExistingRepoConflictStrategy::InstallWithSuffix => {
+                        let mut idx = 2usize;
+                        loop {
+                            let candidate = join_custom_node_path(
+                                &custom_nodes_dir,
+                                &format!("{base_dir_name}-{idx}"),
+                            );
+                            if !candidate.exists() {
+                                target_path = candidate;
+                                break;
+                            }
+                            idx += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        log_operation(
+            state,
+            app,
+            operation_id,
+            "clone",
+            "info",
+            format!("cloning {}", resolved.canonical_repo_url),
+        );
+        clone_repo(&resolved.fetch_url, &target_path).await?;
+        let status = inspect_repo(&target_path).await?;
+        let repo = state.db.upsert_repo(
+            &installation.id,
+            RepoKind::CustomNode,
+            target_path
+                .file_name()
+                .and_then(|v| v.to_str())
+                .unwrap_or("custom-node"),
+            &target_path.to_string_lossy(),
+            status.origin_url.as_deref(),
+            status.head_sha.as_deref(),
+            status.branch.as_deref(),
+            status.is_detached,
+            status.is_dirty,
+        )?;
+        if tracking_backup_path.is_some() {
+            rollback_repo_id = Some(repo.id.clone());
+        }
+        let repo_lock = state.repo_lock(&repo.id).await;
+        let _guard = repo_lock.lock().await;
+        let tracked_state = build_requested_tracked_state_for_input(
+            state,
+            installation,
+            &repo,
+            &input.input,
+            false,
+        )
+        .await?;
+        let checkpoint = apply_repo_tracking_state(
+            state,
+            app,
+            operation_id,
+            installation,
+            &repo,
+            &tracked_state,
+            &DirtyRepoStrategy::Abort,
+            input.sync_dependencies,
+            input.set_tracked_target,
+        )
+        .await?;
+        if tracking_backup_path.is_some() {
+            rollback_checkpoint_id = Some(checkpoint.id.clone());
+        }
+        maybe_restart_installation(
+            state,
+            app,
+            operation_id,
+            installation,
+            input.restart_after_success,
+        )
+        .await?;
+        if let Some(backup_path) = tracking_backup_path.as_ref() {
+            if let Err(remove_err) = std::fs::remove_dir_all(backup_path) {
+                log_operation(
+                    state,
+                    app,
+                    operation_id,
+                    "preflight",
+                    "warn",
+                    format!(
+                        "managed install succeeded, but failed to remove tracking backup {}: {}",
+                        backup_path.to_string_lossy(),
+                        remove_err
+                    ),
+                );
+            }
+        }
+        Ok::<CustomNodeInstallRunResult, AppError>(CustomNodeInstallRunResult {
+            checkpoint_id: checkpoint.id.clone(),
+            done_message: "custom node install completed",
+        })
+    }
+    .await;
+
+    match result {
+        Ok(outcome) => Ok(outcome),
+        Err(err) => {
+            if let (Some(backup_path), Some(target_path)) =
+                (tracking_backup_path.as_ref(), tracking_target_path.as_ref())
+            {
+                if let Err(restore_err) = restore_tracking_backup(backup_path, target_path) {
+                    log_operation(
+                        state,
+                        app,
+                        operation_id,
+                        "error",
+                        "error",
+                        format!(
+                            "failed to restore tracking-managed backup {} after install error: {}",
+                            backup_path.to_string_lossy(),
+                            restore_err
+                        ),
+                    );
+                } else {
+                    log_operation(
+                        state,
+                        app,
+                        operation_id,
+                        "preflight",
+                        "warn",
+                        format!(
+                            "restored tracking-managed backup {} after install error",
+                            backup_path.to_string_lossy()
+                        ),
+                    );
+                }
+            }
+            if let Some(checkpoint_id) = rollback_checkpoint_id.as_ref() {
+                if let Err(db_err) = state.db.delete_checkpoint(checkpoint_id) {
+                    log_operation(
+                        state,
+                        app,
+                        operation_id,
+                        "error",
+                        "error",
+                        format!(
+                            "failed to delete rollback checkpoint {}: {}",
+                            checkpoint_id, db_err
+                        ),
+                    );
+                }
+            }
+            if let Some(repo_id) = rollback_repo_id.as_ref() {
+                if let Err(db_err) = state.db.delete_repo(repo_id) {
+                    log_operation(
+                        state,
+                        app,
+                        operation_id,
+                        "error",
+                        "error",
+                        format!("failed to delete rollback repo {}: {}", repo_id, db_err),
+                    );
+                }
+            }
+            Err(err)
+        }
+    }
+}
+
 #[tauri::command]
 async fn install_or_patch_custom_node(
     app: AppHandle,
@@ -2659,322 +3100,187 @@ async fn run_install_or_patch_custom_node(
         "info",
         "installing or patching custom node",
     );
-    let result = async {
-        let restore_tracking_backup = |backup_path: &Path, target_path: &Path| -> AppResult<()> {
-            if target_path.exists() {
-                std::fs::remove_dir_all(target_path)?;
-            }
-            std::fs::rename(backup_path, target_path)?;
-            Ok(())
-        };
-        let mut tracking_backup_path: Option<PathBuf> = None;
-        let mut tracking_target_path: Option<PathBuf> = None;
-        let mut rollback_repo_id: Option<String> = None;
-        let mut rollback_checkpoint_id: Option<String> = None;
-        let result = async {
-            let resolved = resolve_target_for_context(
-                &state,
-                &installation,
-                &RepoKind::CustomNode,
-                None,
-                &input.input,
-            )
-            .await?;
-            let custom_nodes_dir = PathBuf::from(&installation.custom_nodes_dir);
-            let existing_repo_match =
-                find_existing_custom_node_repo_by_remote(&state, &installation, &resolved).await?;
-            if let (Some(requested), Some(repo)) = (
-                input
-                    .target_local_dir_name
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty()),
-                existing_repo_match.as_ref(),
-            ) {
-                let existing_name = Path::new(&repo.local_path)
-                    .file_name()
-                    .and_then(|value| value.to_str());
-                if existing_name != Some(requested) {
-                    return Err(AppError::Conflict(format!(
-                        "matching repo already exists at {}; refusing to ignore requested directory {}",
-                        repo.local_path, requested
-                    )));
-                }
-            }
-            let requested_dir_name = match input
-                .target_local_dir_name
-                .clone()
-                .filter(|value| !value.trim().is_empty())
-            {
-                Some(value) => value,
-                None => match existing_repo_match.as_ref() {
-                    Some(repo) => Path::new(&repo.local_path)
-                        .file_name()
-                        .and_then(|value| value.to_str())
-                        .unwrap_or(&resolved.suggested_local_dir_name)
-                        .to_string(),
-                    None => preferred_custom_node_dir_name(&state, &resolved).await,
-                },
-            };
-            let base_dir_name = validate_custom_node_dir_name(&requested_dir_name)?;
-            let mut target_path = existing_repo_match
-                .as_ref()
-                .map(|repo| PathBuf::from(&repo.local_path))
-                .unwrap_or_else(|| join_custom_node_path(&custom_nodes_dir, &base_dir_name));
 
-        if let Some(repo) = existing_repo_match.as_ref() {
+    match execute_install_or_patch_custom_node(&app, &state, &installation, &input, &operation_id).await {
+        Ok(outcome) => {
+            state.db.finish_operation(
+                &operation_id,
+                OperationStatus::Succeeded,
+                None,
+                Some(&outcome.checkpoint_id),
+            )?;
             log_operation(
                 &state,
                 &app,
                 &operation_id,
-                "preflight",
+                "done",
                 "info",
-                format!("reusing existing custom node directory {}", repo.local_path),
+                outcome.done_message,
             );
-        } else {
+            Ok(())
+        }
+        Err(err) => {
+            state.db.finish_operation(
+                &operation_id,
+                OperationStatus::Failed,
+                Some(&err.to_string()),
+                None,
+            )?;
             log_operation(
                 &state,
                 &app,
                 &operation_id,
-                "preflight",
-                "info",
-                format!("selected custom node directory {}", target_path.to_string_lossy()),
+                "error",
+                "error",
+                err.to_string(),
             );
+            Err(err)
+        }
+    }
+}
+
+#[tauri::command]
+async fn adopt_tracked_custom_nodes(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: AdoptTrackedCustomNodesInput,
+) -> Result<OperationStart, String> {
+    let installation = state
+        .db
+        .get_installation(&input.installation_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "installation not found".to_string())?;
+    let op = state
+        .db
+        .create_operation(
+            &installation.id,
+            None,
+            OperationKind::InstallCustomNode,
+            Some("adopt all tracked installs"),
+        )
+        .map_err(|e| e.to_string())?;
+    let op_id = op.id.clone();
+    let state_handle = app.state::<AppState>().inner().clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = run_adopt_tracked_custom_nodes(app, state_handle, installation, op_id).await;
+    });
+    Ok(OperationStart {
+        operation_id: op.id,
+    })
+}
+
+async fn run_adopt_tracked_custom_nodes(
+    app: AppHandle,
+    state: AppState,
+    installation: Installation,
+    operation_id: String,
+) -> AppResult<()> {
+    state.db.set_operation_running(&operation_id)?;
+    let installation_lock = state.installation_lock(&installation.id).await;
+    let _installation_guard = installation_lock.lock().await;
+    log_operation(
+        &state,
+        &app,
+        &operation_id,
+        "preflight",
+        "info",
+        "adopting all tracked custom node installs",
+    );
+
+    let result = async {
+        let items = collect_manager_custom_node_items(&state, &installation, None, 10_000).await?;
+        let mut candidates_by_path: HashMap<String, Vec<ManagerRegistryCustomNode>> = HashMap::new();
+        for entry in items {
+            let has_git_install = entry.installed_repo_id.is_some() || entry.installed_local_path.is_some();
+            let source_input = entry
+                .source_input
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let tracking_local_path = entry
+                .tracking_local_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            if !entry.is_tracking_managed
+                || has_git_install
+                || !entry.is_installable
+                || entry.has_ambiguous_installation
+                || source_input.is_none()
+                || tracking_local_path.is_none()
+            {
+                continue;
+            }
+            candidates_by_path
+                .entry(tracking_local_path.unwrap().to_ascii_lowercase())
+                .or_default()
+                .push(entry);
         }
 
-        if target_path.exists() {
-            if is_git_repo(&target_path).await {
-                let status = inspect_repo(&target_path).await?;
-                ensure_remote_matches(status.origin_url.as_deref(), &resolved)?;
-                let repo = state.db.upsert_repo(
-                    &installation.id,
-                    RepoKind::CustomNode,
-                    target_path
-                        .file_name()
-                        .and_then(|v| v.to_str())
-                        .unwrap_or("custom-node"),
-                    &target_path.to_string_lossy(),
-                    status.origin_url.as_deref(),
-                    status.head_sha.as_deref(),
-                    status.branch.as_deref(),
-                    status.is_detached,
-                    status.is_dirty,
-                )?;
-                let repo_lock = state.repo_lock(&repo.id).await;
-                let _guard = repo_lock.lock().await;
-                let tracked_state = build_requested_tracked_state_for_input(
-                    &state,
-                    &installation,
-                    &repo,
-                    &input.input,
-                    false,
-                )
-                .await?;
-                let checkpoint = apply_repo_tracking_state(
-                    &state,
-                    &app,
-                    &operation_id,
-                    &installation,
-                    &repo,
-                    &tracked_state,
-                    &input.dirty_repo_strategy,
-                    input.sync_dependencies,
-                    input.set_tracked_target,
-                )
-                .await?;
-                maybe_restart_installation(
-                    &state,
-                    &app,
-                    &operation_id,
-                    &installation,
-                    input.restart_after_success,
-                )
-                .await?;
-                state.db.finish_operation(
-                    &operation_id,
-                    OperationStatus::Succeeded,
-                    None,
-                    Some(&checkpoint.id),
-                )?;
-                log_operation(
-                    &state,
-                    &app,
-                    &operation_id,
-                    "done",
-                    "info",
-                    "custom node patch completed",
-                );
-                return Ok::<(), AppError>(());
-            }
-
-            if is_tracking_managed_dir(&target_path).await {
-                if !input.adopt_tracking_install {
-                    return Err(AppError::Conflict(
-                        "target custom node directory is a tracking-managed install; enable tracking adoption to replace it with a managed git clone"
-                            .to_string(),
-                    ));
-                }
-                let backup_root = PathBuf::from(&installation.comfy_root)
-                    .join(".comfyui-patcher-backups")
-                    .join("custom_nodes");
-                std::fs::create_dir_all(&backup_root)?;
-                let backup_path = choose_tracking_backup_path(&target_path, &backup_root);
+        let mut ambiguous_path_count = 0usize;
+        let mut candidates = Vec::new();
+        for mut entries in candidates_by_path.into_values() {
+            if entries.len() > 1 {
+                ambiguous_path_count += 1;
+                let tracking_local_path = entries
+                    .first()
+                    .and_then(|entry| entry.tracking_local_path.as_deref())
+                    .unwrap_or("unknown path")
+                    .to_string();
+                let titles = entries
+                    .iter()
+                    .map(|entry| entry.title.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 log_operation(
                     &state,
                     &app,
                     &operation_id,
                     "preflight",
-                    "info",
-                    format!(
-                        "backing up tracking-managed install {} to {} before adopting it as a git repo",
-                        target_path.to_string_lossy(),
-                        backup_path.to_string_lossy()
-                    ),
-                );
-                std::fs::rename(&target_path, &backup_path)?;
-                tracking_target_path = Some(target_path.clone());
-                tracking_backup_path = Some(backup_path);
-            } else {
-                match input.existing_repo_conflict_strategy {
-                    ExistingRepoConflictStrategy::Abort => {
-                        return Err(AppError::Conflict(
-                            "target custom node directory already exists and is not a git repo"
-                                .to_string(),
-                        ));
-                    }
-                    ExistingRepoConflictStrategy::Replace => {
-                        std::fs::remove_dir_all(&target_path)?;
-                    }
-                    ExistingRepoConflictStrategy::InstallWithSuffix => {
-                        let mut idx = 2usize;
-                        loop {
-                            let candidate = join_custom_node_path(
-                                &custom_nodes_dir,
-                                &format!("{base_dir_name}-{idx}"),
-                            );
-                            if !candidate.exists() {
-                                target_path = candidate;
-                                break;
-                            }
-                            idx += 1;
-                        }
-                    }
-                }
-            }
-        }
-
-        log_operation(
-            &state,
-            &app,
-            &operation_id,
-            "clone",
-            "info",
-            format!("cloning {}", resolved.canonical_repo_url),
-        );
-        clone_repo(&resolved.fetch_url, &target_path).await?;
-        let status = inspect_repo(&target_path).await?;
-        let repo = state.db.upsert_repo(
-            &installation.id,
-            RepoKind::CustomNode,
-            target_path
-                .file_name()
-                .and_then(|v| v.to_str())
-                .unwrap_or("custom-node"),
-            &target_path.to_string_lossy(),
-            status.origin_url.as_deref(),
-            status.head_sha.as_deref(),
-            status.branch.as_deref(),
-            status.is_detached,
-            status.is_dirty,
-        )?;
-        if tracking_backup_path.is_some() {
-            rollback_repo_id = Some(repo.id.clone());
-        }
-        let repo_lock = state.repo_lock(&repo.id).await;
-        let _guard = repo_lock.lock().await;
-        let tracked_state = build_requested_tracked_state_for_input(
-            &state,
-            &installation,
-            &repo,
-            &input.input,
-            false,
-        )
-        .await?;
-        let checkpoint = apply_repo_tracking_state(
-            &state,
-            &app,
-            &operation_id,
-            &installation,
-            &repo,
-            &tracked_state,
-            &DirtyRepoStrategy::Abort,
-            input.sync_dependencies,
-            input.set_tracked_target,
-        )
-        .await?;
-        if tracking_backup_path.is_some() {
-            rollback_checkpoint_id = Some(checkpoint.id.clone());
-        }
-        maybe_restart_installation(
-            &state,
-            &app,
-            &operation_id,
-            &installation,
-            input.restart_after_success,
-        )
-        .await?;
-        state.db.finish_operation(
-            &operation_id,
-            OperationStatus::Succeeded,
-            None,
-            Some(&checkpoint.id),
-        )?;
-        log_operation(
-            &state,
-            &app,
-            &operation_id,
-            "done",
-            "info",
-            "custom node install completed",
-        );
-        if let Some(backup_path) = tracking_backup_path.as_ref() {
-            if let Err(remove_err) = std::fs::remove_dir_all(backup_path) {
-                log_operation(
-                    &state,
-                    &app,
-                    &operation_id,
-                    "done",
                     "warn",
                     format!(
-                        "managed install succeeded, but failed to remove tracking backup {}: {}",
-                        backup_path.to_string_lossy(),
-                        remove_err
+                        "skipping tracking-managed install at {} because multiple registry entries matched it: {}",
+                        tracking_local_path, titles
                     ),
                 );
+                continue;
+            }
+            if let Some(entry) = entries.pop() {
+                candidates.push(entry);
             }
         }
-        Ok::<(), AppError>(())
-        }
-        .await;
 
-        if let Err(err) = result {
-            if let (Some(backup_path), Some(target_path)) =
-                (tracking_backup_path.as_ref(), tracking_target_path.as_ref())
+        candidates.sort_by(|left, right| {
+            left.title
+                .to_ascii_lowercase()
+                .cmp(&right.title.to_ascii_lowercase())
+                .then_with(|| left.registry_id.cmp(&right.registry_id))
+        });
+
+        if candidates.is_empty() {
+            if ambiguous_path_count == 0 {
+                return Ok::<String, AppError>("no adoptable tracked installs found".to_string());
+            }
+            return Err(AppError::Conflict(format!(
+                "found no uniquely mappable tracked installs to adopt; skipped {} ambiguous path(s)",
+                ambiguous_path_count
+            )));
+        }
+
+        let total = candidates.len();
+        let mut adopted_count = 0usize;
+        let mut failure_count = 0usize;
+
+        for (index, entry) in candidates.into_iter().enumerate() {
+            let source_input = match entry
+                .source_input
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
             {
-                if let Err(restore_err) = restore_tracking_backup(backup_path, target_path) {
-                    log_operation(
-                        &state,
-                        &app,
-                        &operation_id,
-                        "error",
-                        "error",
-                        format!(
-                            "failed to restore tracking-managed backup {} after install error: {}",
-                            backup_path.to_string_lossy(),
-                            restore_err
-                        ),
-                    );
-                } else {
+                Some(value) => value.to_string(),
+                None => {
+                    failure_count += 1;
                     log_operation(
                         &state,
                         &app,
@@ -2982,64 +3288,135 @@ async fn run_install_or_patch_custom_node(
                         "preflight",
                         "warn",
                         format!(
-                            "restored tracking-managed backup {} after install error",
-                            backup_path.to_string_lossy()
+                            "skipping tracked install {} because no source URL was available",
+                            entry.title
                         ),
                     );
+                    continue;
                 }
-            }
-            if let Some(checkpoint_id) = rollback_checkpoint_id.as_ref() {
-                if let Err(db_err) = state.db.delete_checkpoint(checkpoint_id) {
+            };
+            let target_local_dir_name = match entry
+                .tracking_local_path
+                .as_deref()
+                .and_then(|value| Path::new(value).file_name().and_then(|name| name.to_str()))
+                .map(str::to_string)
+            {
+                Some(value) => value,
+                None => {
+                    failure_count += 1;
                     log_operation(
                         &state,
                         &app,
                         &operation_id,
-                        "error",
-                        "error",
+                        "preflight",
+                        "warn",
                         format!(
-                            "failed to delete rollback checkpoint {}: {}",
-                            checkpoint_id, db_err
+                            "skipping tracked install {} because its local directory name could not be determined",
+                            entry.title
                         ),
                     );
+                    continue;
                 }
-            }
-            if let Some(repo_id) = rollback_repo_id.as_ref() {
-                if let Err(db_err) = state.db.delete_repo(repo_id) {
+            };
+
+            log_operation(
+                &state,
+                &app,
+                &operation_id,
+                "preflight",
+                "info",
+                format!(
+                    "adopting tracked install {}/{}: {}",
+                    index + 1,
+                    total,
+                    entry.title
+                ),
+            );
+
+            let patch_input = PatchCustomNodeInput {
+                installation_id: installation.id.clone(),
+                input: source_input,
+                target_local_dir_name: Some(target_local_dir_name),
+                existing_repo_conflict_strategy: ExistingRepoConflictStrategy::InstallWithSuffix,
+                dirty_repo_strategy: DirtyRepoStrategy::Abort,
+                set_tracked_target: true,
+                sync_dependencies: true,
+                restart_after_success: false,
+                adopt_tracking_install: true,
+            };
+
+            match execute_install_or_patch_custom_node(
+                &app,
+                &state,
+                &installation,
+                &patch_input,
+                &operation_id,
+            )
+            .await
+            {
+                Ok(outcome) => {
+                    adopted_count += 1;
                     log_operation(
                         &state,
                         &app,
                         &operation_id,
-                        "error",
-                        "error",
-                        format!("failed to delete rollback repo {}: {}", repo_id, db_err),
+                        "preflight",
+                        "info",
+                        format!("{} ({})", outcome.done_message, entry.title),
+                    );
+                }
+                Err(err) => {
+                    failure_count += 1;
+                    log_operation(
+                        &state,
+                        &app,
+                        &operation_id,
+                        "preflight",
+                        "warn",
+                        format!("failed to adopt tracked install {}: {}", entry.title, err),
                     );
                 }
             }
-            return Err(err);
         }
 
-        Ok::<(), AppError>(())
+        let mut summary = format!("adopted {} of {} tracked install(s)", adopted_count, total);
+        if ambiguous_path_count > 0 {
+            summary.push_str(&format!("; skipped {} ambiguous path(s)", ambiguous_path_count));
+        }
+        if failure_count > 0 {
+            summary.push_str(&format!("; {} failed", failure_count));
+            return Err(AppError::Conflict(summary));
+        }
+        Ok::<String, AppError>(summary)
     }
     .await;
 
-    if let Err(err) = result {
-        state.db.finish_operation(
-            &operation_id,
-            OperationStatus::Failed,
-            Some(&err.to_string()),
-            None,
-        )?;
-        log_operation(
-            &state,
-            &app,
-            &operation_id,
-            "error",
-            "error",
-            err.to_string(),
-        );
-        return Err(err);
+    match result {
+        Ok(summary) => {
+            state
+                .db
+                .finish_operation(&operation_id, OperationStatus::Succeeded, None, None)?;
+            log_operation(&state, &app, &operation_id, "done", "info", summary);
+            Ok(())
+        }
+        Err(err) => {
+            state.db.finish_operation(
+                &operation_id,
+                OperationStatus::Failed,
+                Some(&err.to_string()),
+                None,
+            )?;
+            log_operation(
+                &state,
+                &app,
+                &operation_id,
+                "error",
+                "error",
+                err.to_string(),
+            );
+            Err(err)
+        }
     }
-    Ok(())
 }
 
 #[tauri::command]
@@ -4354,6 +4731,7 @@ pub fn run() {
             list_installations,
             get_installation_detail,
             list_manager_custom_nodes,
+            adopt_tracked_custom_nodes,
             resolve_target,
             patch_core,
             install_or_patch_frontend,

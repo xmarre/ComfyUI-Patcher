@@ -6,6 +6,7 @@ type Props = {
   installationId: string;
   refreshToken: number;
   onInstall: (entry: ManagerRegistryCustomNode) => Promise<void>;
+  onAdoptAllTracked: () => Promise<void>;
   onUseSourceInput: (sourceInput: string) => void;
 };
 
@@ -34,6 +35,7 @@ export default function ManagerRegistryBrowser({
   installationId,
   refreshToken,
   onInstall,
+  onAdoptAllTracked,
   onUseSourceInput
 }: Props) {
   const [query, setQuery] = useState("");
@@ -104,6 +106,34 @@ export default function ManagerRegistryBrowser({
   const hasTrackingInstallation = (entry: ManagerRegistryCustomNode) => entry.isTrackingManaged;
   const shouldOfferTrackingAdoption = (entry: ManagerRegistryCustomNode) =>
     hasTrackingInstallation(entry) && !hasGitInstallation(entry);
+  const asciiLower = (value: string) => value.replace(/[A-Z]/g, (char) => char.toLowerCase());
+
+  const adoptableTrackedEntries = useMemo(() => {
+    const entriesByTrackingPath = new Map<string, ManagerRegistryCustomNode[]>();
+    for (const entry of entries) {
+      const trackingLocalPath = entry.trackingLocalPath?.trim();
+      const sourceInput = entry.sourceInput?.trim();
+      if (
+        !shouldOfferTrackingAdoption(entry) ||
+        !entry.isInstallable ||
+        !trackingLocalPath ||
+        !sourceInput ||
+        entry.hasAmbiguousInstallation
+      ) {
+        continue;
+      }
+      const key = asciiLower(trackingLocalPath);
+      const bucket = entriesByTrackingPath.get(key);
+      if (bucket) {
+        bucket.push(entry);
+      } else {
+        entriesByTrackingPath.set(key, [entry]);
+      }
+    }
+    return Array.from(entriesByTrackingPath.values())
+      .filter((bucket) => bucket.length === 1)
+      .map((bucket) => bucket[0]);
+  }, [entries]);
 
   return (
     <div className="card">
@@ -114,9 +144,18 @@ export default function ManagerRegistryBrowser({
             Search the Manager catalog and install through ComfyUI Patcher.
           </div>
         </div>
-        <button className="secondary" onClick={() => void refresh()}>
-          {hasLoaded ? "Refresh" : "Load registry"}
-        </button>
+        <div className="row gap">
+          <button
+            className="secondary"
+            disabled={!hasLoaded || loading || adoptableTrackedEntries.length === 0}
+            onClick={() => void onAdoptAllTracked()}
+          >
+            Adopt all tracked installs{hasLoaded ? ` (${adoptableTrackedEntries.length})` : ""}
+          </button>
+          <button className="secondary" onClick={() => void refresh()}>
+            {hasLoaded ? "Refresh" : "Load registry"}
+          </button>
+        </div>
       </div>
 
       <input
