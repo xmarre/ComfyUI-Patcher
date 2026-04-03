@@ -95,6 +95,15 @@ function toErrorMessage(error: unknown): string {
 
 const defaultFrontendPackageManager: FrontendPackageManager = "auto";
 
+type MainTab = "overview" | "patching" | "custom_nodes" | "activity";
+
+const mainTabOptions: Array<{ id: MainTab; label: string }> = [
+  { id: "overview", label: "Overview" },
+  { id: "patching", label: "Patching" },
+  { id: "custom_nodes", label: "Managed custom nodes" },
+  { id: "activity", label: "Activity" }
+];
+
 const frontendPackageManagerOptions: Array<{
   value: FrontendPackageManager;
   label: string;
@@ -121,6 +130,20 @@ function buildFrontendSettingsPayload(form: {
   };
 }
 
+function repoSearchText(repo: ManagedRepo): string {
+  return [
+    repo.displayName,
+    repo.localPath,
+    repo.canonicalRemote ?? "",
+    repo.currentBranch ?? "",
+    repo.currentHeadSha ?? "",
+    repo.trackedTargetInput ?? "",
+    repo.trackedState?.base.summaryLabel ?? ""
+  ]
+    .join("\n")
+    .toLocaleLowerCase();
+}
+
 export default function App() {
   const [installations, setInstallations] = useState<Installation[]>([]);
   const [selectedInstallationId, setSelectedInstallationId] = useState<string | null>(null);
@@ -137,6 +160,8 @@ export default function App() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [events, setEvents] = useState<OperationEvent[]>([]);
   const [registryRefreshToken, setRegistryRefreshToken] = useState(0);
+  const [activeTab, setActiveTab] = useState<MainTab>("overview");
+  const [managedCustomNodeQuery, setManagedCustomNodeQuery] = useState("");
   const [registerForm, setRegisterForm] = useState({
     name: "Primary ComfyUI",
     comfyRoot: "",
@@ -289,6 +314,8 @@ export default function App() {
     setCorePreviewError(null);
     setFrontendPreviewError(null);
     setNodePreviewError(null);
+    setManagedCustomNodeQuery("");
+    setActiveTab("overview");
     void refreshDetail(selectedInstallationId, { clear: true });
   }, [selectedInstallationId]);
 
@@ -416,6 +443,13 @@ export default function App() {
     detail?.installation.frontendSettings ??
     selectedInstallation?.frontendSettings ??
     null;
+  const filteredCustomNodeRepos = useMemo(() => {
+    const normalizedQuery = managedCustomNodeQuery.trim().toLocaleLowerCase();
+    if (!normalizedQuery) {
+      return customNodeRepos;
+    }
+    return customNodeRepos.filter((repo) => repoSearchText(repo).includes(normalizedQuery));
+  }, [customNodeRepos, managedCustomNodeQuery]);
 
   return (
     <div className="app-shell">
@@ -560,22 +594,31 @@ export default function App() {
           >
             Register / Update by root
           </button>
-          {actionError ? <div className="muted">{actionError}</div> : null}
+          {actionError && !(selectedInstallation && hasMatchingDetail) ? (
+            <div className="muted">{actionError}</div>
+          ) : null}
         </div>
 
-        <div className="card fill">
-          <h3>Live events</h3>
-          <div className="event-stream">
-            {events.map((event, index) => (
-              <div key={`${event.operationId}-${event.timestamp}-${index}`} className={`event ${event.level}`}>
-                <div className="row between">
-                  <span className="mono small">{event.phase}</span>
-                  <span className="small">{new Date(event.timestamp).toLocaleTimeString()}</span>
-                </div>
-                <div className="small">{event.message}</div>
-              </div>
-            ))}
+        <div className="card">
+          <h3>Workspace</h3>
+          <div className="grid two compact-grid">
+            <div>
+              <div className="label">Selected installation</div>
+              <div>{selectedInstallation?.name ?? "none"}</div>
+            </div>
+            <div>
+              <div className="label">Recent live events</div>
+              <div>{events.length}</div>
+            </div>
           </div>
+          <div className="muted small">
+            Activity, operation logs, and searchable managed custom nodes are available from the tabs in the main pane.
+          </div>
+          {selectedInstallation ? (
+            <button className="secondary" onClick={() => setActiveTab("activity")}>
+              Open activity tab
+            </button>
+          ) : null}
         </div>
       </aside>
 
@@ -583,12 +626,19 @@ export default function App() {
         {selectedInstallation && hasMatchingDetail ? (
           <>
             <section className="page-header card">
-              <div className="row between">
-                <div>
+              <div className="row between page-header-main">
+                <div className="page-title-block">
                   <h2>{selectedInstallation.name}</h2>
                   <div className="mono">{selectedInstallation.comfyRoot}</div>
+                  <div className="badge-group page-status-badges">
+                    <span className={`badge ${detail?.isRunning ? "ok" : ""}`}>
+                      {detail?.isRunning ? "running" : "stopped"}
+                    </span>
+                    <span className="badge">{customNodeRepos.length} custom node{customNodeRepos.length === 1 ? "" : "s"}</span>
+                    <span className="badge">{events.length} live event{events.length === 1 ? "" : "s"}</span>
+                  </div>
                 </div>
-                <div className="row gap">
+                <div className="row gap page-actions">
                   <button
                     onClick={() =>
                       void runAction(async () => {
@@ -638,9 +688,39 @@ export default function App() {
                   </button>
                 </div>
               </div>
+
+              <div className="tab-strip" role="tablist" aria-label="Installation sections">
+                {mainTabOptions.map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={activeTab === tab.id}
+                    className={`tab-button ${activeTab === tab.id ? "active" : ""}`}
+                    onClick={() => setActiveTab(tab.id)}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
             </section>
 
-            <section className="card">
+            {actionError ? (
+              <section className="card alert-card">
+                <div className="row between alert-header">
+                  <div>
+                    <h3>Last action failed</h3>
+                    <div className="muted small">The backend rejected the most recent action.</div>
+                  </div>
+                  <button className="secondary" type="button" onClick={() => setActionError(null)}>
+                    Dismiss
+                  </button>
+                </div>
+                <div className="mono small alert-copy">{actionError}</div>
+              </section>
+            ) : null}
+
+            <section className="card tab-panel" hidden={activeTab !== "overview"}>
               <div className="row between">
                 <div>
                   <h3>Installation settings</h3>
@@ -900,7 +980,7 @@ export default function App() {
               <div className="muted small">When managed frontend settings are configured, Start and Restart strip any existing <code>--front-end-root</code> from the stored launch args, restart args, and appended args, then inject the managed dist path at runtime.</div>
             </section>
 
-            <section className="card">
+            <section className="card tab-panel" hidden={activeTab !== "patching"}>
               <h3>Patch core ComfyUI</h3>
               <div className="muted small">PR URLs append to the tracked overlay stack for this checkout. If the repo already has overlays, change the base from the repo card instead of this Apply button.</div>
               <div className="row gap">
@@ -1036,7 +1116,7 @@ export default function App() {
               )}
             </section>
 
-            <section className="card">
+            <section className="card tab-panel" hidden={activeTab !== "patching"}>
               <h3>Install or patch ComfyUI frontend</h3>
               <div className="muted small">Frontend PRs and branches are managed in a dedicated checkout outside <code>custom_nodes</code>. Dependency sync installs Node dependencies, runs the frontend build, and Start/Restart inject the managed <code>--front-end-root</code> automatically.</div>
               <div className="row gap">
@@ -1177,7 +1257,7 @@ export default function App() {
               )}
             </section>
 
-            <section className="card">
+            <section className="card tab-panel" hidden={activeTab !== "patching"}>
               <h3>Install or patch custom node manually</h3>
               <div className="muted small">On an existing managed repo, PR URLs append to that repo's overlay stack. If the repo already has overlays, change the base from the repo card instead of this Install / Patch button.</div>
               <div className="row gap">
@@ -1233,10 +1313,11 @@ export default function App() {
               {nodePreviewError ? <div className="muted">{nodePreviewError}</div> : null}
             </section>
 
-            <ManagerRegistryBrowser
-              installationId={selectedInstallation.id}
-              refreshToken={registryRefreshToken}
-              onInstall={async (entry) => {
+            <section className="tab-panel" hidden={activeTab !== "patching"}>
+              <ManagerRegistryBrowser
+                installationId={selectedInstallation.id}
+                refreshToken={registryRefreshToken}
+                onInstall={async (entry) => {
                 await runAction(async () => {
                   const targetLocalDirName =
                     entry.isTrackingManaged && !(entry.installedRepoId || entry.installedLocalPath)
@@ -1255,103 +1336,165 @@ export default function App() {
                   });
                 });
               }}
-              onUseSourceInput={(sourceInput) => {
+                onUseSourceInput={(sourceInput) => {
                 setNodeInput(sourceInput);
                 setNodePreview(null);
                 setNodePreviewError(null);
               }}
-            />
+              />
+            </section>
 
-            <section className="grid two">
-              <div className="card">
-                <h3>Managed custom nodes</h3>
-                {customNodeRepos.length ? (
-                  <div className="stack">
-                    {customNodeRepos.map((repo: ManagedRepo) => (
-                      <RepoCard
-                        key={repo.id}
-                        repo={repo}
-                        onSetBaseTarget={(input, clearOverlays) =>
-                          runActionOk(async () => {
-                            await api.setRepoBaseTarget({
-                              repoId: repo.id,
-                              input,
-                              clearOverlays,
-                              dirtyRepoStrategy: "abort",
-                              syncDependencies: true
-                            });
-                          })
-                        }
-                        onAddOverlay={(input) =>
-                          runActionOk(async () => {
-                            await api.addRepoOverlay({
-                              repoId: repo.id,
-                              input,
-                              dirtyRepoStrategy: "abort",
-                              syncDependencies: true
-                            });
-                          })
-                        }
-                        onSetOverlayEnabled={(overlayId, enabled) =>
-                          runActionOk(async () => {
-                            await api.setRepoOverlayEnabled({
-                              repoId: repo.id,
-                              overlayId,
-                              enabled,
-                              dirtyRepoStrategy: "abort",
-                              syncDependencies: true
-                            });
-                          })
-                        }
-                        onRemoveOverlay={(overlayId) =>
-                          runActionOk(async () => {
-                            await api.removeRepoOverlay({
-                              repoId: repo.id,
-                              overlayId,
-                              dirtyRepoStrategy: "abort",
-                              syncDependencies: true
-                            });
-                          })
-                        }
-                        onMoveOverlay={(overlayId, direction) =>
-                          runActionOk(async () => {
-                            await api.moveRepoOverlay({
-                              repoId: repo.id,
-                              overlayId,
-                              direction,
-                              dirtyRepoStrategy: "abort",
-                              syncDependencies: true
-                            });
-                          })
-                        }
-                        onUpdate={() =>
-                          void runAction(async () => {
-                            await api.updateRepo({
-                              repoId: repo.id,
-                              dirtyRepoStrategy: "abort",
-                              syncDependencies: true
-                            });
-                          })
-                        }
-                        onRollback={() =>
-                          void runAction(async () => {
-                            await api.rollbackRepo({
-                              repoId: repo.id,
-                              restoreStash: true,
-                              syncDependencies: true,
-                              restartAfterSuccess: false
-                            });
-                          })
-                        }
-                      />
-                    ))}
+            <section className="card tab-panel" hidden={activeTab !== "custom_nodes"}>
+              <div className="row between custom-node-panel-header">
+                <div>
+                  <h3>Managed custom nodes</h3>
+                  <div className="muted small">
+                    Search display name, local path, remote URL, branch, or tracked target.
                   </div>
-                ) : (
-                  <div className="muted">No managed custom node repositories were found.</div>
-                )}
+                </div>
+                <div className="small muted">
+                  Showing {filteredCustomNodeRepos.length} of {customNodeRepos.length}
+                </div>
               </div>
 
+              {customNodeRepos.length ? (
+                <>
+                  <input
+                    placeholder="Search managed custom nodes"
+                    value={managedCustomNodeQuery}
+                    onChange={(event) => setManagedCustomNodeQuery(event.target.value)}
+                  />
+                  {filteredCustomNodeRepos.length ? (
+                    <div className="stack">
+                      {filteredCustomNodeRepos.map((repo: ManagedRepo) => (
+                        <RepoCard
+                          key={repo.id}
+                          repo={repo}
+                          onSetBaseTarget={(input, clearOverlays) =>
+                            runActionOk(async () => {
+                              await api.setRepoBaseTarget({
+                                repoId: repo.id,
+                                input,
+                                clearOverlays,
+                                dirtyRepoStrategy: "abort",
+                                syncDependencies: true
+                              });
+                            })
+                          }
+                          onAddOverlay={(input) =>
+                            runActionOk(async () => {
+                              await api.addRepoOverlay({
+                                repoId: repo.id,
+                                input,
+                                dirtyRepoStrategy: "abort",
+                                syncDependencies: true
+                              });
+                            })
+                          }
+                          onSetOverlayEnabled={(overlayId, enabled) =>
+                            runActionOk(async () => {
+                              await api.setRepoOverlayEnabled({
+                                repoId: repo.id,
+                                overlayId,
+                                enabled,
+                                dirtyRepoStrategy: "abort",
+                                syncDependencies: true
+                              });
+                            })
+                          }
+                          onRemoveOverlay={(overlayId) =>
+                            runActionOk(async () => {
+                              await api.removeRepoOverlay({
+                                repoId: repo.id,
+                                overlayId,
+                                dirtyRepoStrategy: "abort",
+                                syncDependencies: true
+                              });
+                            })
+                          }
+                          onMoveOverlay={(overlayId, direction) =>
+                            runActionOk(async () => {
+                              await api.moveRepoOverlay({
+                                repoId: repo.id,
+                                overlayId,
+                                direction,
+                                dirtyRepoStrategy: "abort",
+                                syncDependencies: true
+                              });
+                            })
+                          }
+                          onUpdate={() =>
+                            void runAction(async () => {
+                              await api.updateRepo({
+                                repoId: repo.id,
+                                dirtyRepoStrategy: "abort",
+                                syncDependencies: true
+                              });
+                            })
+                          }
+                          onRollback={() =>
+                            void runAction(async () => {
+                              await api.rollbackRepo({
+                                repoId: repo.id,
+                                restoreStash: true,
+                                syncDependencies: true,
+                                restartAfterSuccess: false
+                              });
+                            })
+                          }
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="muted">
+                      No managed custom node repositories matched the current search.
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="muted">No managed custom node repositories were found.</div>
+              )}
+            </section>
+
+            <section className="activity-grid tab-panel" hidden={activeTab !== "activity"}>
               <OperationPanel installationId={selectedInstallationId} />
+
+              <div className="card fill">
+                <div className="row between activity-panel-header">
+                  <div>
+                    <h3>Live events</h3>
+                    <div className="muted small">
+                      Newest events appear first. This stream is local to the current app session.
+                    </div>
+                  </div>
+                  <div className="row gap activity-panel-actions">
+                    <div className="small muted">{events.length} events</div>
+                    <button
+                      className="secondary"
+                      type="button"
+                      disabled={!events.length}
+                      onClick={() => setEvents([])}
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+                <div className="event-stream event-stream-large panel-scroll resizable-panel">
+                  {events.length ? (
+                    events.map((event, index) => (
+                      <div key={`${event.operationId}-${event.timestamp}-${index}`} className={`event ${event.level}`}>
+                        <div className="row between">
+                          <span className="mono small">{event.phase}</span>
+                          <span className="small">{new Date(event.timestamp).toLocaleTimeString()}</span>
+                        </div>
+                        <div className="small">{event.message}</div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="muted">No live events yet.</div>
+                  )}
+                </div>
+              </div>
             </section>
           </>
         ) : (
