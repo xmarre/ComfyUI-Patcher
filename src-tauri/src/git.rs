@@ -231,6 +231,24 @@ pub async fn ls_remote_tag_remote(remote: &str, name: &str) -> AppResult<bool> {
     Ok(!output.trim().is_empty())
 }
 
+pub async fn ls_remote_default_branch_remote(remote: &str) -> AppResult<Option<String>> {
+    let output = run_git_no_cwd(&["ls-remote", "--symref", remote, "HEAD"]).await?;
+    Ok(parse_ls_remote_default_branch(&output))
+}
+
+fn parse_ls_remote_default_branch(output: &str) -> Option<String> {
+    for line in output.lines() {
+        let Some(rest) = line.strip_prefix("ref: refs/heads/") else {
+            continue;
+        };
+        let (branch, head_name) = rest.split_once('\t')?;
+        if head_name.trim() == "HEAD" && !branch.trim().is_empty() {
+            return Some(branch.trim().to_string());
+        }
+    }
+    None
+}
+
 fn stash_ref_from_list(stash_list: &str, stash_id: &str) -> Option<String> {
     if stash_id.starts_with("stash@{") {
         return Some(stash_id.to_string());
@@ -428,5 +446,20 @@ mod tests {
             stash_ref_from_list("", "stash@{2}"),
             Some("stash@{2}".to_string())
         );
+    }
+
+    #[test]
+    fn parses_ls_remote_default_branch() {
+        let output = "ref: refs/heads/main\tHEAD\n0123456789abcdef\tHEAD";
+        assert_eq!(
+            parse_ls_remote_default_branch(output),
+            Some("main".to_string())
+        );
+    }
+
+    #[test]
+    fn ignores_missing_ls_remote_default_branch() {
+        let output = "0123456789abcdef\tHEAD";
+        assert_eq!(parse_ls_remote_default_branch(output), None);
     }
 }
