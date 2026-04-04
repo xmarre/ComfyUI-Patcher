@@ -95,6 +95,23 @@ fn choose_tracking_backup_path(path: &Path, backup_root: &Path) -> PathBuf {
     parent.join(format!("{name}.tracking-backup"))
 }
 
+fn installation_retained_backup_root(installation: &Installation, kind: &str) -> PathBuf {
+    let comfy_root = PathBuf::from(&installation.comfy_root);
+    let backup_parent = comfy_root
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| comfy_root.clone());
+    let installation_dir_name = comfy_root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("installation");
+    backup_parent
+        .join(".comfyui-patcher-backups")
+        .join(installation_dir_name)
+        .join(kind)
+}
+
 async fn discover_repositories_for_installation(
     state: &AppState,
     installation: &Installation,
@@ -2483,12 +2500,7 @@ async fn run_install_or_patch_frontend(
                         ));
                     }
                     ExistingRepoConflictStrategy::Replace => {
-                        let backup_root = target_path
-                            .parent()
-                            .map(Path::to_path_buf)
-                            .unwrap_or_else(|| PathBuf::from(&installation.comfy_root))
-                            .join(".comfyui-patcher-backups")
-                            .join("frontend");
+                        let backup_root = installation_retained_backup_root(&installation, "frontend");
                         std::fs::create_dir_all(&backup_root)?;
                         let backup_path = choose_tracking_backup_path(&target_path, &backup_root);
                         log_operation(
@@ -2498,7 +2510,7 @@ async fn run_install_or_patch_frontend(
                             "preflight",
                             "info",
                             format!(
-                                "backing up existing frontend path {} to {} before replacement",
+                                "creating retained backup of existing frontend path {} at {} before replacement",
                                 target_path.to_string_lossy(),
                                 backup_path.to_string_lossy()
                             ),
@@ -2593,24 +2605,17 @@ async fn run_install_or_patch_frontend(
                 "frontend install completed",
             );
             if let Some(backup_path) = replaced_backup_path.as_ref() {
-                if let Err(remove_err) = if backup_path.is_dir() {
-                    std::fs::remove_dir_all(backup_path)
-                } else {
-                    std::fs::remove_file(backup_path)
-                } {
-                    log_operation(
-                        &state,
-                        &app,
-                        &operation_id,
-                        "done",
-                        "warn",
-                        format!(
-                            "managed frontend install succeeded, but failed to remove backup {}: {}",
-                            backup_path.to_string_lossy(),
-                            remove_err
-                        ),
-                    );
-                }
+                log_operation(
+                    &state,
+                    &app,
+                    &operation_id,
+                    "done",
+                    "info",
+                    format!(
+                        "replaced frontend source was preserved at {}. Review and manually migrate any local data from that backup before deleting it.",
+                        backup_path.to_string_lossy()
+                    ),
+                );
             }
             Ok::<(), AppError>(())
         }
@@ -2854,9 +2859,7 @@ async fn execute_install_or_patch_custom_node(
                             .to_string(),
                     ));
                 }
-                let backup_root = PathBuf::from(&installation.comfy_root)
-                    .join(".comfyui-patcher-backups")
-                    .join("custom_nodes");
+                let backup_root = installation_retained_backup_root(installation, "custom_nodes");
                 std::fs::create_dir_all(&backup_root)?;
                 let backup_path = choose_tracking_backup_path(&target_path, &backup_root);
                 log_operation(
@@ -2866,7 +2869,7 @@ async fn execute_install_or_patch_custom_node(
                     "preflight",
                     "info",
                     format!(
-                        "backing up tracking-managed install {} to {} before adopting it as a git repo",
+                        "creating retained backup of tracking-managed install {} at {} before adopting it as a git repo",
                         target_path.to_string_lossy(),
                         backup_path.to_string_lossy()
                     ),
@@ -2964,20 +2967,17 @@ async fn execute_install_or_patch_custom_node(
         )
         .await?;
         if let Some(backup_path) = tracking_backup_path.as_ref() {
-            if let Err(remove_err) = std::fs::remove_dir_all(backup_path) {
-                log_operation(
-                    state,
-                    app,
-                    operation_id,
-                    "preflight",
-                    "warn",
-                    format!(
-                        "managed install succeeded, but failed to remove tracking backup {}: {}",
-                        backup_path.to_string_lossy(),
-                        remove_err
-                    ),
-                );
-            }
+            log_operation(
+                state,
+                app,
+                operation_id,
+                "done",
+                "info",
+                format!(
+                    "tracking-managed source was preserved at {}. Review and manually migrate any user data from that backup before deleting it.",
+                    backup_path.to_string_lossy()
+                ),
+            );
         }
         Ok::<CustomNodeInstallRunResult, AppError>(CustomNodeInstallRunResult {
             checkpoint_id: checkpoint.id.clone(),
