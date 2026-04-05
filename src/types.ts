@@ -9,9 +9,13 @@ export type OperationKind =
   | "install_custom_node"
   | "patch_custom_node"
   | "manage_repo_stack"
+  | "uninstall_repo"
+  | "disable_repo"
+  | "untrack_repo"
   | "update_repo"
   | "update_all"
   | "rollback_repo"
+  | "restore_checkpoint"
   | "start_installation"
   | "stop_installation"
   | "restart_installation";
@@ -25,6 +29,30 @@ export type FrontendSettings = {
   repoRoot: string;
   distPath: string;
   packageManager: FrontendPackageManager;
+};
+
+export type DependencyStep = {
+  phase: string;
+  strategy: string;
+  command: string;
+  args: string[];
+  cwd: string;
+  reason: string;
+};
+
+export type DependencyPlan = {
+  strategy: string;
+  reason: string;
+  steps: DependencyStep[];
+};
+
+export type RepoLiveStatus = "clean" | "dirty" | "drifted" | "missing" | "not_git";
+
+export type RepoDependencyState = {
+  plan: DependencyPlan | null;
+  error: string | null;
+  manifestFiles: string[];
+  relevantChangedFiles: string[];
 };
 
 export type LaunchProfile = {
@@ -69,6 +97,11 @@ export type ManagedRepo = {
   trackedTargetInput: string | null;
   trackedTargetResolvedSha: string | null;
   trackedState: TrackedRepoState | null;
+  liveStatus: RepoLiveStatus;
+  liveWarnings: string[];
+  changedFiles: string[];
+  dependencyState: RepoDependencyState | null;
+  lastScannedAt: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -78,6 +111,8 @@ export type InstallationDetail = {
   coreRepo: ManagedRepo | null;
   frontendRepo: ManagedRepo | null;
   customNodeRepos: ManagedRepo[];
+  warnings: string[];
+  lastReconciledAt: string | null;
   isRunning: boolean;
 };
 
@@ -186,7 +221,52 @@ export type RepoCheckpoint = {
   hasTrackedTargetSnapshot: boolean;
   stashCreated: boolean;
   stashRef: string | null;
+  label: string | null;
+  reason: string | null;
+  dependencyState: RepoDependencyState | null;
   createdAt: string;
+};
+
+export type RepoActionPreviewCommit = {
+  sha: string;
+  subject: string;
+};
+
+export type RepoActionPreviewFile = {
+  path: string;
+  status: string;
+};
+
+export type RepoStackPreviewItem = {
+  kind: string;
+  label: string;
+  enabled: boolean;
+  status: string | null;
+};
+
+export type RepoActionPreview = {
+  action: string;
+  repoId: string | null;
+  repoDisplayName: string;
+  currentHeadSha: string | null;
+  targetHeadSha: string | null;
+  targetSummary: string;
+  targetRef: string | null;
+  commits: RepoActionPreviewCommit[];
+  fileChanges: RepoActionPreviewFile[];
+  warnings: string[];
+  conflictFiles: string[];
+  stackPreview: RepoStackPreviewItem[];
+  dependencyState: RepoDependencyState | null;
+};
+
+export type RepoCheckpointComparison = {
+  checkpoint: RepoCheckpoint;
+  currentHeadSha: string | null;
+  commits: RepoActionPreviewCommit[];
+  fileChanges: RepoActionPreviewFile[];
+  warnings: string[];
+  currentDependencyState: RepoDependencyState | null;
 };
 
 export type OperationEvent = {
@@ -279,6 +359,10 @@ export type UpdateRepoInput = {
   syncDependencies: boolean;
 };
 
+export type RepoLifecycleInput = {
+  repoId: string;
+};
+
 export type SetRepoBaseTargetInput = {
   repoId: string;
   input: string;
@@ -331,6 +415,14 @@ export type RollbackRepoInput = {
   restartAfterSuccess: boolean;
 };
 
+export type RestoreCheckpointInput = {
+  repoId: string;
+  checkpointId: string;
+  restoreStash: boolean;
+  syncDependencies: boolean;
+  restartAfterSuccess: boolean;
+};
+
 export type StartInstallationInput = {
   installationId: string;
 };
@@ -348,6 +440,14 @@ export type ResolveTargetInput = {
   kind: RepoKind;
   input: string;
   repoId?: string | null;
+};
+
+export type PreviewRepoTargetInput = {
+  installationId: string;
+  kind: RepoKind;
+  input: string;
+  repoId?: string | null;
+  clearOverlays?: boolean | null;
 };
 
 export type OperationStart = {

@@ -161,6 +161,11 @@ pre {
   align-items: center;
 }
 
+.repo-badge-wrap {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .badge {
   background: #27313b;
   color: #d2dde7;
@@ -353,6 +358,34 @@ button:disabled {
 }
 
 .overlay-actions {
+  flex-wrap: wrap;
+}
+
+.repo-warning-list,
+.repo-change-list,
+.repo-history-panel,
+.repo-stack-preview-list {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.repo-change-item,
+.repo-stack-preview-item {
+  display: flex;
+  gap: 0.65rem;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.repo-preview-card,
+.repo-history-panel {
+  gap: 0.75rem;
+}
+
+.repo-preview-header,
+.repo-history-header,
+.repo-action-wrap {
+  align-items: flex-start;
   flex-wrap: wrap;
 }
 
