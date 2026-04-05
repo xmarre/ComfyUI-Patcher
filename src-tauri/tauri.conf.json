@@ -37,6 +37,7 @@
   },
   "plugins": {
     "updater": {
+      "pubkey": "untrusted comment: minisign public key: CD68174B881C974F\nRWRPlxyISxdozQWNVi/4xuoBcPXxoZBPHWcXUcdcYaov0kbJqn0TSMPy",
       "windows": {
         "installMode": "passive"
       }

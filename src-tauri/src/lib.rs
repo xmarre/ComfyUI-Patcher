@@ -4790,10 +4790,10 @@ mod app_updates {
         content_length: Option<u64>,
     }
 
-    fn embedded_updater_pubkey() -> Option<&'static str> {
-        option_env!("COMFYUI_PATCHER_UPDATER_PUBKEY")
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+    fn updater_pubkey(app: &AppHandle) -> Option<String> {
+        let updater = app.config().plugins.0.get("updater")?;
+        let pubkey = updater.get("pubkey")?.as_str()?.trim();
+        (!pubkey.is_empty()).then(|| pubkey.to_owned())
     }
 
     fn emit_update_event(app: &AppHandle, event: UpdateEvent) {
@@ -4810,19 +4810,12 @@ mod app_updates {
             pending.take();
         }
 
-        let Some(pubkey) = embedded_updater_pubkey() else {
-            return Ok(UpdateCheckResult {
-                enabled: false,
-                disabled_reason: Some(
-                    "Updater is disabled in this build because COMFYUI_PATCHER_UPDATER_PUBKEY was not embedded at build time.".to_string(),
-                ),
-                update: None,
-            });
-        };
+        let pubkey = updater_pubkey(&app)
+            .ok_or_else(|| "updater configuration is missing plugins.updater.pubkey".to_string())?;
 
         let update = app
             .updater_builder()
-            .pubkey(pubkey)
+            .pubkey(&pubkey)
             .endpoints(vec![
                 UPDATE_ENDPOINT
                     .parse()
