@@ -559,3 +559,43 @@ When a managed frontend is configured, **Start / Restart** inject the frontend d
 * **Stop** the installation
 * **Restart** the installation
 * confirm managed frontend injection still works through **Start / Restart**
+
+---
+
+## In-app updater
+
+The app now supports a native Tauri updater flow backed by GitHub Releases. The intended stable endpoint is:
+
+```text
+https://github.com/xmarre/ComfyUI-Patcher/releases/latest/download/latest.json
+```
+
+### Required release setup
+
+1. Generate a Tauri updater signing key pair:
+
+```bash
+npm run tauri signer generate -- -w ~/.tauri/comfyui-patcher.key
+```
+
+2. Add these GitHub Actions repository secrets:
+
+* `TAURI_SIGNING_PRIVATE_KEY`
+* `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+* `COMFYUI_PATCHER_UPDATER_PUBKEY`
+
+`COMFYUI_PATCHER_UPDATER_PUBKEY` must contain the public key text that should be embedded into release builds. If it is missing at build time, the app still builds, but the in-app updater is disabled and the UI explains why.
+
+### Release flow
+
+* tag a release as `vX.Y.Z`
+* GitHub Actions builds the NSIS bundle
+* Tauri signs the updater artifacts
+* the workflow publishes the release assets and `latest.json`
+
+### Runtime behavior
+
+* the app checks for a newer stable release on startup
+* users can trigger a manual check from the sidebar
+* install first shuts down managed ComfyUI child processes
+* Windows installer handoff is delegated to the native Tauri updater

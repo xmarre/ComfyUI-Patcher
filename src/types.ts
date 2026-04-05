@@ -353,3 +353,27 @@ export type ResolveTargetInput = {
 export type OperationStart = {
   operationId: string;
 };
+
+export type AppUpdateMetadata = {
+  version: string;
+  currentVersion: string;
+};
+
+export type AppUpdateCheckResult = {
+  enabled: boolean;
+  disabledReason: string | null;
+  update: AppUpdateMetadata | null;
+};
+
+export type AppUpdateEvent =
+  | {
+      kind: "started";
+      contentLength: number | null;
+    }
+  | {
+      kind: "progress";
+      chunkLength: number;
+    }
+  | {
+      kind: "finished";
+    };

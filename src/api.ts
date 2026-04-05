@@ -29,7 +29,9 @@ import type {
   RollbackRepoInput,
   UpdateAllInput,
   UpdateRepoInput,
-  Installation
+  Installation,
+  AppUpdateCheckResult,
+  AppUpdateEvent
 } from "./types";
 
 export const api = {
@@ -82,6 +84,10 @@ export const api = {
     invoke<string>("get_operation_log", { operationId }),
   listCheckpoints: (repoId: string) =>
     invoke<RepoCheckpoint[]>("list_checkpoints", { repoId }),
+  fetchAppUpdate: () => invoke<AppUpdateCheckResult>("fetch_app_update"),
+  installAppUpdate: () => invoke<void>("install_app_update"),
+  subscribeAppUpdateEvents: async (handler: (event: AppUpdateEvent) => void): Promise<UnlistenFn> =>
+    listen<AppUpdateEvent>("app-update-event", (event) => handler(event.payload)),
   subscribeOperationEvents: async (handler: (event: OperationEvent) => void): Promise<UnlistenFn> =>
     listen<OperationEvent>("operation-event", (event) => handler(event.payload))
 };

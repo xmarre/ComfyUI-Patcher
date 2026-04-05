@@ -521,3 +521,7 @@ button:disabled {
   border: 1px solid #24303c;
   border-radius: 12px;
 }
+
+.updater-card-header {
+  align-items: flex-start;
+}

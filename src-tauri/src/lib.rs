@@ -4696,6 +4696,203 @@ fn list_checkpoints(
         .map_err(|e| e.to_string())
 }
 
+#[cfg(desktop)]
+mod app_updates {
+    use super::shutdown_managed_installations;
+    use crate::state::AppState;
+    use serde::Serialize;
+    use tauri::{AppHandle, Emitter, State};
+    use tauri_plugin_updater::{Update, UpdaterExt};
+
+    const APP_UPDATE_EVENT: &str = "app-update-event";
+    const UPDATE_ENDPOINT: &str =
+        "https://github.com/xmarre/ComfyUI-Patcher/releases/latest/download/latest.json";
+
+    #[derive(Default)]
+    pub struct PendingUpdate(pub tokio::sync::Mutex<Option<Update>>);
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct UpdateMetadata {
+        version: String,
+        current_version: String,
+    }
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct UpdateCheckResult {
+        enabled: bool,
+        disabled_reason: Option<String>,
+        update: Option<UpdateMetadata>,
+    }
+
+    #[derive(Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct UpdateEvent {
+        kind: String,
+        chunk_length: Option<usize>,
+        content_length: Option<u64>,
+    }
+
+    fn embedded_updater_pubkey() -> Option<&'static str> {
+        option_env!("COMFYUI_PATCHER_UPDATER_PUBKEY")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+
+    fn emit_update_event(app: &AppHandle, event: UpdateEvent) {
+        let _ = app.emit(APP_UPDATE_EVENT, event);
+    }
+
+    #[tauri::command]
+    pub async fn fetch_app_update(
+        app: AppHandle,
+        pending_update: State<'_, PendingUpdate>,
+    ) -> Result<UpdateCheckResult, String> {
+        {
+            let mut pending = pending_update.0.lock().await;
+            pending.take();
+        }
+
+        let Some(pubkey) = embedded_updater_pubkey() else {
+            return Ok(UpdateCheckResult {
+                enabled: false,
+                disabled_reason: Some(
+                    "Updater is disabled in this build because COMFYUI_PATCHER_UPDATER_PUBKEY was not embedded at build time.".to_string(),
+                ),
+                update: None,
+            });
+        };
+
+        let update = app
+            .updater_builder()
+            .pubkey(pubkey)
+            .endpoints(vec![
+                UPDATE_ENDPOINT
+                    .parse()
+                    .map_err(|e: url::ParseError| e.to_string())?,
+            ])
+            .map_err(|e| e.to_string())?
+            .build()
+            .map_err(|e| e.to_string())?
+            .check()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let metadata = update.as_ref().map(|update| UpdateMetadata {
+            version: update.version.clone(),
+            current_version: app.package_info().version.to_string(),
+        });
+
+        let mut pending = pending_update.0.lock().await;
+        *pending = update;
+
+        Ok(UpdateCheckResult {
+            enabled: true,
+            disabled_reason: None,
+            update: metadata,
+        })
+    }
+
+    #[tauri::command]
+    pub async fn install_app_update(
+        app: AppHandle,
+        state: State<'_, AppState>,
+        pending_update: State<'_, PendingUpdate>,
+    ) -> Result<(), String> {
+        let update = {
+            let mut pending = pending_update.0.lock().await;
+            pending
+                .take()
+                .ok_or_else(|| "there is no pending update; check for updates first".to_string())?
+        };
+
+        shutdown_managed_installations(state.inner().clone()).await;
+
+        let mut started = false;
+        update
+            .download_and_install(
+                |chunk_length, content_length| {
+                    if !started {
+                        emit_update_event(
+                            &app,
+                            UpdateEvent {
+                                kind: "started".to_string(),
+                                chunk_length: None,
+                                content_length,
+                            },
+                        );
+                        started = true;
+                    }
+                    emit_update_event(
+                        &app,
+                        UpdateEvent {
+                            kind: "progress".to_string(),
+                            chunk_length: Some(chunk_length),
+                            content_length: None,
+                        },
+                    );
+                },
+                || {
+                    emit_update_event(
+                        &app,
+                        UpdateEvent {
+                            kind: "finished".to_string(),
+                            chunk_length: None,
+                            content_length: None,
+                        },
+                    );
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(not(desktop))]
+mod app_updates {
+    use serde::Serialize;
+    use tauri::{AppHandle, State};
+
+    #[derive(Default)]
+    pub struct PendingUpdate;
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct UpdateMetadata {
+        version: String,
+        current_version: String,
+    }
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct UpdateCheckResult {
+        enabled: bool,
+        disabled_reason: Option<String>,
+        update: Option<UpdateMetadata>,
+    }
+
+    #[tauri::command]
+    pub async fn fetch_app_update(
+        _app: AppHandle,
+        _pending_update: State<'_, PendingUpdate>,
+    ) -> Result<UpdateCheckResult, String> {
+        Ok(UpdateCheckResult {
+            enabled: false,
+            disabled_reason: Some("Updater is only supported on desktop builds.".to_string()),
+            update: None,
+        })
+    }
+
+    #[tauri::command]
+    pub async fn install_app_update(
+        _app: AppHandle,
+        _pending_update: State<'_, PendingUpdate>,
+    ) -> Result<(), String> {
+        Err("Updater is only supported on desktop builds.".to_string())
+    }
+}
+
 async fn shutdown_managed_installations(state: AppState) {
     let installations = match state.db.list_installations() {
         Ok(installations) => installations,
@@ -4719,9 +4916,16 @@ async fn shutdown_managed_installations(state: AppState) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            #[cfg(desktop)]
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())
+                .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+
             let state = AppState::new(app.handle())?;
             app.manage(state);
+            app.manage(app_updates::PendingUpdate::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -4750,6 +4954,8 @@ pub fn run() {
             list_operations,
             get_operation_log,
             list_checkpoints,
+            app_updates::fetch_app_update,
+            app_updates::install_app_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building ComfyUI Patcher");
