@@ -2808,6 +2808,9 @@ async fn preview_repo_target(
             .get_repo(repo_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "repo not found".to_string())?;
+        if repo.installation_id != installation.id {
+            return Err("repo does not belong to the selected installation".to_string());
+        }
         let tracked_state = build_requested_tracked_state_for_input(
             &state,
             &installation,
@@ -5345,6 +5348,8 @@ async fn compare_checkpoint(
     if checkpoint.repo_id != repo.id {
         return Err("checkpoint does not belong to the selected repo".to_string());
     }
+    let repo_lock = state.repo_lock(&repo.id).await;
+    let _guard = repo_lock.lock().await;
     let live_repo = enrich_managed_repo(&state, &installation, &repo)
         .await
         .map_err(|e| e.to_string())?;
