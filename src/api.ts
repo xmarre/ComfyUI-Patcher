@@ -13,6 +13,10 @@ import type {
   PatchCoreInput,
   PatchFrontendInput,
   PatchCustomNodeInput,
+  PreviewRepoTargetInput,
+  RepoActionPreview,
+  RepoCheckpointComparison,
+  RepoLifecycleInput,
   RemoveRepoOverlayInput,
   DeleteInstallationInput,
   RegisterInstallationInput,
@@ -23,6 +27,7 @@ import type {
   RepoCheckpoint,
   ResolveTargetInput,
   ResolvedTarget,
+  RestoreCheckpointInput,
   RestartInstallationInput,
   StartInstallationInput,
   StopInstallationInput,
@@ -44,6 +49,8 @@ export const api = {
     invoke<void>("delete_installation", { input }),
   getInstallationDetail: (installationId: string) =>
     invoke<InstallationDetail>("get_installation_detail", { installationId }),
+  reconcileInstallation: (installationId: string) =>
+    invoke<InstallationDetail>("reconcile_installation", { installationId }),
   listManagerCustomNodes: (input: ListManagerCustomNodesInput) =>
     invoke<ManagerRegistryCustomNode[]>("list_manager_custom_nodes", { input }),
   adoptTrackedCustomNodes: (input: AdoptTrackedCustomNodesInput) =>
@@ -68,10 +75,24 @@ export const api = {
     invoke<OperationStart>("move_repo_overlay", { input }),
   updateRepo: (input: UpdateRepoInput) =>
     invoke<OperationStart>("update_repo", { input }),
+  previewRepoTarget: (input: PreviewRepoTargetInput) =>
+    invoke<RepoActionPreview>("preview_repo_target", { input }),
+  previewTrackedRepoUpdate: (repoId: string) =>
+    invoke<RepoActionPreview>("preview_tracked_repo_update", { repoId }),
   updateAll: (input: UpdateAllInput) =>
     invoke<OperationStart>("update_all", { input }),
   rollbackRepo: (input: RollbackRepoInput) =>
     invoke<OperationStart>("rollback_repo", { input }),
+  restoreCheckpoint: (input: RestoreCheckpointInput) =>
+    invoke<OperationStart>("restore_checkpoint", { input }),
+  compareCheckpoint: (repoId: string, checkpointId: string) =>
+    invoke<RepoCheckpointComparison>("compare_checkpoint", { repoId, checkpointId }),
+  uninstallRepo: (input: RepoLifecycleInput) =>
+    invoke<OperationStart>("uninstall_repo", { input }),
+  disableRepo: (input: RepoLifecycleInput) =>
+    invoke<OperationStart>("disable_repo", { input }),
+  untrackRepo: (input: RepoLifecycleInput) =>
+    invoke<OperationStart>("untrack_repo", { input }),
   startInstallation: (input: StartInstallationInput) =>
     invoke<OperationStart>("start_installation", { input }),
   stopInstallation: (input: StopInstallationInput) =>

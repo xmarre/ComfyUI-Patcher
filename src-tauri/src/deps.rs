@@ -1,26 +1,11 @@
 use crate::errors::{AppError, AppResult};
 use crate::execution::output_command;
-use crate::models::{FrontendPackageManager, Installation, ManagedRepo, RepoKind};
-use serde::{Deserialize, Serialize};
+use crate::models::{
+    DependencyPlan, DependencyStep, FrontendPackageManager, Installation, ManagedRepo, RepoKind,
+};
+use serde::Deserialize;
 use serde_json::Value;
 use std::path::Path;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DependencyStep {
-    pub phase: String,
-    pub strategy: String,
-    pub command: String,
-    pub args: Vec<String>,
-    pub cwd: String,
-    pub reason: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DependencyPlan {
-    pub strategy: String,
-    pub reason: String,
-    pub steps: Vec<DependencyStep>,
-}
 
 #[derive(Debug, Deserialize)]
 struct PyprojectProject {

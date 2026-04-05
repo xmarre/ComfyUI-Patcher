@@ -1,6 +1,6 @@
 use crate::errors::{AppError, AppResult};
 use crate::execution::{output_command, parse_wsl_unc_path};
-use crate::models::DirtyRepoStrategy;
+use crate::models::{DirtyRepoStrategy, RepoActionPreviewCommit, RepoActionPreviewFile};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
@@ -11,7 +11,36 @@ pub struct RepoStatus {
     pub branch: Option<String>,
     pub is_detached: bool,
     pub is_dirty: bool,
+    pub changed_files: Vec<String>,
     pub origin_url: Option<String>,
+}
+
+fn parse_status_changed_files(output: &str) -> Vec<String> {
+    let mut changed_files = Vec::new();
+    for line in output
+        .lines()
+    {
+        if line.len() < 4 {
+            continue;
+        }
+        let path = line[3..].trim();
+        if path.is_empty() {
+            continue;
+        }
+        if let Some((old_path, new_path)) = path.split_once(" -> ") {
+            let old_path = old_path.trim();
+            let new_path = new_path.trim();
+            if !old_path.is_empty() {
+                changed_files.push(old_path.to_string());
+            }
+            if !new_path.is_empty() {
+                changed_files.push(new_path.to_string());
+            }
+            continue;
+        }
+        changed_files.push(path.to_string());
+    }
+    changed_files
 }
 
 pub async fn run_git(path: &Path, args: &[&str]) -> AppResult<String> {
@@ -61,8 +90,105 @@ pub async fn inspect_repo(path: &Path) -> AppResult<RepoStatus> {
         branch: branch.clone(),
         is_detached: branch.is_none(),
         is_dirty: !status.trim().is_empty(),
+        changed_files: parse_status_changed_files(&status),
         origin_url: origin_url.and_then(|value| canonicalize_remote(&value)),
     })
+}
+
+pub async fn rev_parse(path: &Path, rev: &str) -> AppResult<Option<String>> {
+    run_git_allow_fail(path, &["rev-parse", rev]).await
+}
+
+pub async fn merge_base(path: &Path, left: &str, right: &str) -> AppResult<Option<String>> {
+    run_git_allow_fail(path, &["merge-base", left, right]).await
+}
+
+pub async fn commits_between(
+    path: &Path,
+    base: &str,
+    head: &str,
+    limit: usize,
+) -> AppResult<Vec<RepoActionPreviewCommit>> {
+    if base == head {
+        return Ok(Vec::new());
+    }
+    let limit_flag = format!("--max-count={limit}");
+    let range = format!("{base}..{head}");
+    let output = run_git(
+        path,
+        &["log", "--format=%H%x09%s", &limit_flag, &range],
+    )
+    .await?;
+    Ok(output
+        .lines()
+        .filter_map(|line| {
+            let (sha, subject) = line.split_once('\t')?;
+            Some(RepoActionPreviewCommit {
+                sha: sha.to_string(),
+                subject: subject.to_string(),
+            })
+        })
+        .collect())
+}
+
+pub async fn diff_name_status(
+    path: &Path,
+    base: &str,
+    head: &str,
+) -> AppResult<Vec<RepoActionPreviewFile>> {
+    if base == head {
+        return Ok(Vec::new());
+    }
+    let range = format!("{base}..{head}");
+    let output = run_git(path, &["diff", "--name-status", &range]).await?;
+    Ok(output
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let status = parts.next()?.trim();
+            let path = parts.last().or_else(|| parts.next())?.trim();
+            Some(RepoActionPreviewFile {
+                status: status.to_string(),
+                path: path.to_string(),
+            })
+        })
+        .collect())
+}
+
+pub async fn preview_merge_conflicts(
+    path: &Path,
+    current_head: &str,
+    incoming_head: &str,
+) -> AppResult<Vec<String>> {
+    let Some(base) = merge_base(path, current_head, incoming_head).await? else {
+        return Ok(Vec::new());
+    };
+    let output = output_command(
+        "git",
+        &[
+            "merge-tree".to_string(),
+            format!("{base}^{{tree}}"),
+            current_head.to_string(),
+            incoming_head.to_string(),
+        ],
+        Some(path),
+    )
+    .await?;
+    if !output.status.success() && output.stdout.is_empty() {
+        return Err(AppError::Git(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ));
+    }
+    let output = String::from_utf8_lossy(&output.stdout).to_string();
+    let mut conflicts = Vec::new();
+    for line in output.lines() {
+        if let Some(path) = line.trim().strip_prefix("CONFLICT (contents): Merge conflict in ") {
+            conflicts.push(path.trim().to_string());
+        }
+    }
+    conflicts.sort();
+    conflicts.dedup();
+    Ok(conflicts)
 }
 
 pub fn canonicalize_remote(input: &str) -> Option<String> {

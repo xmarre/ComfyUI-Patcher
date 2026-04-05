@@ -1,8 +1,8 @@
 use crate::errors::{AppError, AppResult};
 use crate::models::{
     FrontendSettings, Installation, InstallationDetail, LaunchProfile, ManagedRepo, OperationKind,
-    OperationRecord, OperationStatus, RepoCheckpoint, RepoKind, TargetKind, TrackedBaseTarget,
-    TrackedRepoState,
+    OperationRecord, OperationStatus, RepoCheckpoint, RepoDependencyState, RepoKind,
+    RepoLiveStatus, TargetKind, TrackedBaseTarget, TrackedRepoState,
 };
 use crate::util::{new_id, now_rfc3339};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -95,6 +95,13 @@ impl Database {
                 stash_created INTEGER NOT NULL,
                 stash_ref TEXT,
                 created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS ignored_repo_paths (
+                installation_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                local_path TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (installation_id, local_path)
             );
             "#,
         )?;
@@ -346,6 +353,8 @@ impl Database {
             core_repo,
             frontend_repo,
             custom_node_repos,
+            warnings: Vec::new(),
+            last_reconciled_at: None,
             is_running: false,
         })
     }
@@ -405,6 +414,51 @@ impl Database {
         let conn = self.connect()?;
         conn.execute("DELETE FROM managed_repos WHERE id = ?1", params![repo_id])?;
         Ok(())
+    }
+
+    pub fn ignore_repo_path(
+        &self,
+        installation_id: &str,
+        kind: &RepoKind,
+        local_path: &str,
+    ) -> AppResult<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            "INSERT INTO ignored_repo_paths (installation_id, kind, local_path, created_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(installation_id, local_path) DO UPDATE SET
+                kind = excluded.kind,
+                created_at = excluded.created_at",
+            params![
+                installation_id,
+                serde_json::to_string(kind)?,
+                local_path,
+                now_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn unignore_repo_path(&self, installation_id: &str, local_path: &str) -> AppResult<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            "DELETE FROM ignored_repo_paths WHERE installation_id = ?1 AND local_path = ?2",
+            params![installation_id, local_path],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_ignored_repo_paths(&self, installation_id: &str) -> AppResult<Vec<String>> {
+        let conn = self.connect()?;
+        let mut stmt = conn.prepare(
+            "SELECT local_path FROM ignored_repo_paths WHERE installation_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![installation_id], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     pub fn delete_checkpoint(&self, checkpoint_id: &str) -> AppResult<()> {
@@ -708,6 +762,9 @@ impl Database {
         old_tracked_target_resolved_sha: Option<&str>,
         stash_created: bool,
         stash_ref: Option<&str>,
+        label: Option<&str>,
+        reason: Option<&str>,
+        dependency_state: Option<&RepoDependencyState>,
     ) -> AppResult<RepoCheckpoint> {
         let conn = self.connect()?;
         let id = new_id();
@@ -715,12 +772,14 @@ impl Database {
         let old_tracked_target_kind_json = old_tracked_target_kind
             .map(serde_json::to_string)
             .transpose()?;
+        let dependency_state_json = dependency_state.map(serde_json::to_string).transpose()?;
         conn.execute(
             "INSERT INTO repo_checkpoints
              (id, repo_id, operation_id, old_head_sha, old_branch, old_is_detached,
               has_tracked_target_snapshot, old_tracked_target_kind, old_tracked_target_input,
-              old_tracked_target_resolved_sha, stash_created, stash_ref, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+              old_tracked_target_resolved_sha, stash_created, stash_ref, label, reason,
+              dependency_state_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 id,
                 repo_id,
@@ -734,6 +793,9 @@ impl Database {
                 old_tracked_target_resolved_sha,
                 stash_created as i64,
                 stash_ref,
+                label,
+                reason,
+                dependency_state_json,
                 now
             ],
         )?;
@@ -760,7 +822,8 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT id, repo_id, operation_id, old_head_sha, old_branch, old_is_detached,
                     has_tracked_target_snapshot, old_tracked_target_kind, old_tracked_target_input,
-                    old_tracked_target_resolved_sha, stash_created, stash_ref, created_at
+                    old_tracked_target_resolved_sha, stash_created, stash_ref, label, reason,
+                    dependency_state_json, created_at
              FROM repo_checkpoints WHERE id = ?1",
         )?;
         stmt.query_row(params![checkpoint_id], map_checkpoint)
@@ -773,7 +836,8 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT id, repo_id, operation_id, old_head_sha, old_branch, old_is_detached,
                     has_tracked_target_snapshot, old_tracked_target_kind, old_tracked_target_input,
-                    old_tracked_target_resolved_sha, stash_created, stash_ref, created_at
+                    old_tracked_target_resolved_sha, stash_created, stash_ref, label, reason,
+                    dependency_state_json, created_at
              FROM repo_checkpoints WHERE repo_id = ?1 ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map(params![repo_id], map_checkpoint)?;
@@ -789,7 +853,8 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT id, repo_id, operation_id, old_head_sha, old_branch, old_is_detached,
                     has_tracked_target_snapshot, old_tracked_target_kind, old_tracked_target_input,
-                    old_tracked_target_resolved_sha, stash_created, stash_ref, created_at
+                    old_tracked_target_resolved_sha, stash_created, stash_ref, label, reason,
+                    dependency_state_json, created_at
              FROM repo_checkpoints WHERE repo_id = ?1 ORDER BY created_at DESC LIMIT 1",
         )?;
         stmt.query_row(params![repo_id], map_checkpoint)
@@ -852,6 +917,11 @@ fn map_repo(row: &rusqlite::Row<'_>) -> rusqlite::Result<ManagedRepo> {
             tracked_target_resolved_sha.as_deref(),
             canonical_remote.as_deref(),
         )?,
+        live_status: RepoLiveStatus::Clean,
+        live_warnings: Vec::new(),
+        changed_files: Vec::new(),
+        dependency_state: None,
+        last_scanned_at: None,
         created_at: row.get(13)?,
         updated_at: row.get(14)?,
     })
@@ -929,6 +999,7 @@ fn map_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationRecord> {
 
 fn map_checkpoint(row: &rusqlite::Row<'_>) -> rusqlite::Result<RepoCheckpoint> {
     let old_tracked_target_kind_json: Option<String> = row.get(7)?;
+    let dependency_state_json: Option<String> = row.get(14)?;
     Ok(RepoCheckpoint {
         id: row.get(0)?,
         repo_id: row.get(1)?,
@@ -945,7 +1016,13 @@ fn map_checkpoint(row: &rusqlite::Row<'_>) -> rusqlite::Result<RepoCheckpoint> {
         old_tracked_target_resolved_sha: row.get(9)?,
         stash_created: row.get::<_, i64>(10)? != 0,
         stash_ref: row.get(11)?,
-        created_at: row.get(12)?,
+        label: row.get(12)?,
+        reason: row.get(13)?,
+        dependency_state: dependency_state_json
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(to_sql_err)?,
+        created_at: row.get(15)?,
     })
 }
 
@@ -984,6 +1061,9 @@ fn ensure_repo_checkpoint_tracking_columns(conn: &Connection) -> AppResult<()> {
         ("old_tracked_target_kind", "TEXT"),
         ("old_tracked_target_input", "TEXT"),
         ("old_tracked_target_resolved_sha", "TEXT"),
+        ("label", "TEXT"),
+        ("reason", "TEXT"),
+        ("dependency_state_json", "TEXT"),
     ] {
         if !columns.iter().any(|existing| existing == column_name) {
             conn.execute(

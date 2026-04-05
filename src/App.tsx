@@ -12,6 +12,7 @@ import type {
   LaunchProfile,
   ManagedRepo,
   OperationEvent,
+  RepoActionPreview,
   ResolveTargetInput,
   ResolvedTarget,
   SaveInstallationInput,
@@ -163,6 +164,80 @@ function repoSearchText(repo: ManagedRepo): string {
     .toLocaleLowerCase();
 }
 
+function renderRepoActionPreview(preview: RepoActionPreview | null) {
+  if (!preview) {
+    return null;
+  }
+  return (
+    <div className="preview repo-preview-card">
+      <div className="row between repo-preview-header">
+        <div>
+          <div><strong>{preview.targetSummary}</strong></div>
+          <div className="muted small">{preview.action}</div>
+        </div>
+        {preview.targetHeadSha ? <div className="mono small">{preview.targetHeadSha}</div> : null}
+      </div>
+
+      <div className="grid two compact-grid">
+        <div>
+          <div className="label">Current HEAD</div>
+          <div className="mono small">{preview.currentHeadSha ?? "none"}</div>
+        </div>
+        <div>
+          <div className="label">Target ref</div>
+          <div className="mono small">{preview.targetRef ?? "n/a"}</div>
+        </div>
+      </div>
+
+      {preview.warnings.length ? (
+        <div className="repo-warning-list">
+          {preview.warnings.map((warning) => (
+            <div key={warning} className="muted small">{warning}</div>
+          ))}
+        </div>
+      ) : null}
+
+      {preview.conflictFiles.length ? (
+        <div className="repo-warning-list">
+          {preview.conflictFiles.map((file) => (
+            <div key={file} className="mono small">{file}</div>
+          ))}
+        </div>
+      ) : null}
+
+      {preview.commits.length ? (
+        <div className="repo-change-list">
+          {preview.commits.slice(0, 8).map((commit) => (
+            <div key={commit.sha} className="repo-change-item">
+              <div className="mono small">{commit.sha.slice(0, 12)}</div>
+              <div className="small">{commit.subject}</div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {preview.fileChanges.length ? (
+        <div className="repo-change-list">
+          {preview.fileChanges.slice(0, 16).map((file) => (
+            <div key={`${file.status}-${file.path}`} className="repo-change-item">
+              <span className="badge">{file.status}</span>
+              <span className="mono small">{file.path}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {preview.dependencyState ? (
+        <div className="muted small">
+          {preview.dependencyState.plan
+            ? `Dependency state: ${preview.dependencyState.plan.strategy} (${preview.dependencyState.plan.reason})`
+            : preview.dependencyState.error ?? "No dependency metadata"}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export default function App() {
   const [installations, setInstallations] = useState<Installation[]>([]);
   const [selectedInstallationId, setSelectedInstallationId] = useState<string | null>(null);
@@ -173,6 +248,9 @@ export default function App() {
   const [corePreview, setCorePreview] = useState<ResolvedTarget | null>(null);
   const [frontendPreview, setFrontendPreview] = useState<ResolvedTarget | null>(null);
   const [nodePreview, setNodePreview] = useState<ResolvedTarget | null>(null);
+  const [coreActionPreview, setCoreActionPreview] = useState<RepoActionPreview | null>(null);
+  const [frontendActionPreview, setFrontendActionPreview] = useState<RepoActionPreview | null>(null);
+  const [nodeActionPreview, setNodeActionPreview] = useState<RepoActionPreview | null>(null);
   const [corePreviewError, setCorePreviewError] = useState<string | null>(null);
   const [frontendPreviewError, setFrontendPreviewError] = useState<string | null>(null);
   const [nodePreviewError, setNodePreviewError] = useState<string | null>(null);
@@ -394,6 +472,9 @@ export default function App() {
     setCorePreview(null);
     setFrontendPreview(null);
     setNodePreview(null);
+    setCoreActionPreview(null);
+    setFrontendActionPreview(null);
+    setNodeActionPreview(null);
     setCorePreviewError(null);
     setFrontendPreviewError(null);
     setNodePreviewError(null);
@@ -439,12 +520,12 @@ export default function App() {
         setEvents((prev) => [event, ...prev].slice(0, 100));
         if (event.phase === "done" || event.phase === "error") {
           setRegistryRefreshToken((value) => value + 1);
+          const installationId = selectedInstallationIdRef.current;
+          if (installationId) {
+            void refreshDetail(installationId);
+          }
+          void refreshInstallations();
         }
-        const installationId = selectedInstallationIdRef.current;
-        if (installationId) {
-          void refreshDetail(installationId);
-        }
-        void refreshInstallations();
       })
       .then((fn) => {
         if (cancelled) {
@@ -461,18 +542,21 @@ export default function App() {
 
   useEffect(() => {
     setCorePreview(null);
+    setCoreActionPreview(null);
     setCorePreviewError(null);
     corePreviewRequestSeq.current += 1;
   }, [coreInput]);
 
   useEffect(() => {
     setFrontendPreview(null);
+    setFrontendActionPreview(null);
     setFrontendPreviewError(null);
     frontendPreviewRequestSeq.current += 1;
   }, [frontendInput]);
 
   useEffect(() => {
     setNodePreview(null);
+    setNodeActionPreview(null);
     setNodePreviewError(null);
     nodePreviewRequestSeq.current += 1;
   }, [nodeInput]);
@@ -501,22 +585,31 @@ export default function App() {
 
     try {
       const resolved = await api.resolveTarget(input);
+      const preview = await api.previewRepoTarget({
+        installationId: input.installationId,
+        kind: input.kind,
+        input: input.input,
+        repoId: input.repoId ?? null
+      });
 
       if (selectedInstallationIdRef.current !== input.installationId) return;
       if (target === "core") {
         if (corePreviewRequestSeq.current !== requestSeq) return;
         if (coreInputRef.current !== input.input) return;
         setCorePreview(resolved);
+        setCoreActionPreview(preview);
         setCorePreviewError(null);
       } else if (target === "frontend") {
         if (frontendPreviewRequestSeq.current !== requestSeq) return;
         if (frontendInputRef.current !== input.input) return;
         setFrontendPreview(resolved);
+        setFrontendActionPreview(preview);
         setFrontendPreviewError(null);
       } else {
         if (nodePreviewRequestSeq.current !== requestSeq) return;
         if (nodeInputRef.current !== input.input) return;
         setNodePreview(resolved);
+        setNodeActionPreview(preview);
         setNodePreviewError(null);
       }
     } catch (error) {
@@ -526,16 +619,19 @@ export default function App() {
         if (corePreviewRequestSeq.current !== requestSeq) return;
         if (coreInputRef.current !== input.input) return;
         setCorePreview(null);
+        setCoreActionPreview(null);
         setCorePreviewError(message);
       } else if (target === "frontend") {
         if (frontendPreviewRequestSeq.current !== requestSeq) return;
         if (frontendInputRef.current !== input.input) return;
         setFrontendPreview(null);
+        setFrontendActionPreview(null);
         setFrontendPreviewError(message);
       } else {
         if (nodePreviewRequestSeq.current !== requestSeq) return;
         if (nodeInputRef.current !== input.input) return;
         setNodePreview(null);
+        setNodeActionPreview(null);
         setNodePreviewError(message);
       }
     }
@@ -806,6 +902,17 @@ export default function App() {
                 </div>
                 <div className="row gap page-actions">
                   <button
+                    className="secondary"
+                    onClick={() =>
+                      void runAction(async () => {
+                        const next = await api.reconcileInstallation(selectedInstallation.id);
+                        setDetail(next);
+                      })
+                    }
+                  >
+                    Reconcile
+                  </button>
+                  <button
                     onClick={() =>
                       void runAction(async () => {
                         await api.updateAll({
@@ -883,6 +990,29 @@ export default function App() {
                   </button>
                 </div>
                 <div className="mono small alert-copy">{actionError}</div>
+              </section>
+            ) : null}
+
+            {detail?.warnings.length ? (
+              <section className="card alert-card">
+                <div className="row between alert-header">
+                  <div>
+                    <h3>Reconcile warnings</h3>
+                    <div className="muted small">
+                      Tracked state and disk state diverged during the latest reconciliation pass.
+                    </div>
+                  </div>
+                  <div className="muted small">
+                    {detail.lastReconciledAt
+                      ? `Last reconciled ${new Date(detail.lastReconciledAt).toLocaleString()}`
+                      : ""}
+                  </div>
+                </div>
+                <div className="repo-warning-list">
+                  {detail.warnings.map((warning) => (
+                    <div key={warning} className="mono small">{warning}</div>
+                  ))}
+                </div>
               </section>
             ) : null}
 
@@ -1199,6 +1329,7 @@ export default function App() {
                   <div className="mono small">{corePreview.resolvedSha ?? corePreview.checkoutRef}</div>
                 </div>
               ) : null}
+              {renderRepoActionPreview(coreActionPreview)}
               {corePreviewError ? <div className="muted">{corePreviewError}</div> : null}
               {coreRepo ? (
                 <RepoCard
@@ -1340,6 +1471,7 @@ export default function App() {
                   <div className="mono small">{frontendPreview.resolvedSha ?? frontendPreview.checkoutRef}</div>
                 </div>
               ) : null}
+              {renderRepoActionPreview(frontendActionPreview)}
               {frontendPreviewError ? <div className="muted">{frontendPreviewError}</div> : null}
               {frontendRepo ? (
                 <RepoCard
@@ -1476,6 +1608,7 @@ export default function App() {
                   <div className="mono small">{nodePreview.suggestedLocalDirName}</div>
                 </div>
               ) : null}
+              {renderRepoActionPreview(nodeActionPreview)}
               {nodePreviewError ? <div className="muted">{nodePreviewError}</div> : null}
             </section>
 
