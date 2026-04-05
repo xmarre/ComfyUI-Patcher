@@ -4441,6 +4441,8 @@ async fn start_installation(
     state: State<'_, AppState>,
     input: StartInstallationInput,
 ) -> Result<OperationStart, String> {
+    let lifecycle_lock = state.lifecycle_lock();
+    let _lifecycle_accept_guard = lifecycle_lock.lock().await;
     let installation = state
         .db
         .get_installation(&input.installation_id)
@@ -4532,6 +4534,8 @@ async fn stop_installation(
     state: State<'_, AppState>,
     input: StopInstallationInput,
 ) -> Result<OperationStart, String> {
+    let lifecycle_lock = state.lifecycle_lock();
+    let _lifecycle_accept_guard = lifecycle_lock.lock().await;
     let installation = state
         .db
         .get_installation(&input.installation_id)
@@ -4631,6 +4635,8 @@ async fn restart_installation(
     state: State<'_, AppState>,
     input: RestartInstallationInput,
 ) -> Result<OperationStart, String> {
+    let lifecycle_lock = state.lifecycle_lock();
+    let _lifecycle_accept_guard = lifecycle_lock.lock().await;
     let installation = state
         .db
         .get_installation(&input.installation_id)
@@ -4859,6 +4865,13 @@ mod app_updates {
         if state
             .db
             .has_in_flight_background_operations()
+            .map_err(|e| e.to_string())?
+        {
+            return Err("cannot install update while operations are running".to_string());
+        }
+        if state
+            .db
+            .has_in_flight_lifecycle_operations()
             .map_err(|e| e.to_string())?
         {
             return Err("cannot install update while operations are running".to_string());
