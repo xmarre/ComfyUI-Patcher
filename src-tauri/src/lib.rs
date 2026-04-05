@@ -266,6 +266,11 @@ async fn discover_custom_node_repos_best_effort(
     installation: &Installation,
 ) -> AppResult<Vec<ManagedRepo>> {
     let mut custom_node_repos = Vec::new();
+    let ignored_paths: HashSet<String> = state
+        .db
+        .list_ignored_repo_paths(&installation.id)?
+        .into_iter()
+        .collect();
     let custom_nodes_dir = PathBuf::from(&installation.custom_nodes_dir);
     if !custom_nodes_dir.exists() {
         return Ok(custom_node_repos);
@@ -296,7 +301,12 @@ async fn discover_custom_node_repos_best_effort(
             }
         };
         let path = entry.path();
-        if !path.is_dir() || !has_git_marker(&path) || !is_git_repo(&path).await {
+        let path_string = path.to_string_lossy().to_string();
+        if ignored_paths.contains(&path_string)
+            || !path.is_dir()
+            || !has_git_marker(&path)
+            || !is_git_repo(&path).await
+        {
             continue;
         }
 
@@ -322,7 +332,7 @@ async fn discover_custom_node_repos_best_effort(
             &installation.id,
             RepoKind::CustomNode,
             &display_name,
-            &path.to_string_lossy(),
+            &path_string,
             status.origin_url.as_deref(),
             status.head_sha.as_deref(),
             status.branch.as_deref(),
@@ -547,7 +557,6 @@ async fn hydrate_installation_detail(
         .ok_or_else(|| AppError::NotFound("installation not found".to_string()))?;
     let _ = discover_repositories_for_installation(state, &installation, false).await?;
     let mut detail = state.db.get_installation_detail(installation_id)?;
-    detail.last_reconciled_at = Some(crate::util::now_rfc3339());
 
     if let Some(repo) = detail.core_repo.take() {
         let repo = enrich_managed_repo(state, &installation, &repo).await?;
@@ -2440,10 +2449,12 @@ fn list_installations(state: State<'_, AppState>) -> Result<Vec<Installation>, S
 async fn load_installation_detail_response(
     state: &AppState,
     installation_id: &str,
+    mark_reconciled: bool,
 ) -> Result<InstallationDetail, String> {
     let mut detail = hydrate_installation_detail(state, installation_id)
         .await
         .map_err(|e| e.to_string())?;
+    detail.last_reconciled_at = mark_reconciled.then(crate::util::now_rfc3339);
     detail.is_running = state
         .processes
         .is_running(installation_id)
@@ -2457,7 +2468,7 @@ async fn get_installation_detail(
     state: State<'_, AppState>,
     installation_id: String,
 ) -> Result<InstallationDetail, String> {
-    load_installation_detail_response(&state, &installation_id).await
+    load_installation_detail_response(&state, &installation_id, false).await
 }
 
 #[tauri::command]
@@ -2465,7 +2476,7 @@ async fn reconcile_installation(
     state: State<'_, AppState>,
     installation_id: String,
 ) -> Result<InstallationDetail, String> {
-    load_installation_detail_response(&state, &installation_id).await
+    load_installation_detail_response(&state, &installation_id, true).await
 }
 
 #[tauri::command]
@@ -2806,6 +2817,8 @@ async fn preview_repo_target(
         )
         .await
         .map_err(|e| e.to_string())?;
+        let repo_lock = state.repo_lock(&repo.id).await;
+        let _guard = repo_lock.lock().await;
         preview_tracked_state_application(
             &state,
             &installation,
@@ -2841,6 +2854,8 @@ async fn preview_tracked_repo_update(
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "repo has no tracked target".to_string())?;
+    let repo_lock = state.repo_lock(&repo.id).await;
+    let _guard = repo_lock.lock().await;
     preview_tracked_state_application(&state, &installation, &repo, &tracked_state, "Preview update")
         .await
         .map_err(|e| e.to_string())
@@ -5056,6 +5071,29 @@ async fn run_rollback_repo(
             .db
             .latest_checkpoint(&repo.id)?
             .ok_or_else(|| AppError::NotFound("no checkpoint available for repo".to_string()))?;
+        let safety_checkpoint = create_checkpoint_if_needed(
+            &state,
+            &installation,
+            &repo,
+            &operation_id,
+            &DirtyRepoStrategy::Stash,
+        )
+        .await?;
+        log_operation(
+            &state,
+            &app,
+            &operation_id,
+            "checkpoint",
+            "info",
+            format!(
+                "created safety checkpoint {} ({}) before restore",
+                safety_checkpoint
+                    .label
+                    .as_deref()
+                    .unwrap_or(&safety_checkpoint.id),
+                safety_checkpoint.old_head_sha
+            ),
+        );
         log_operation(
             &state,
             &app,
@@ -5190,6 +5228,29 @@ async fn run_restore_checkpoint(
             ));
         }
         let path = Path::new(&repo.local_path);
+        let safety_checkpoint = create_checkpoint_if_needed(
+            &state,
+            &installation,
+            &repo,
+            &operation_id,
+            &DirtyRepoStrategy::Stash,
+        )
+        .await?;
+        log_operation(
+            &state,
+            &app,
+            &operation_id,
+            "checkpoint",
+            "info",
+            format!(
+                "created safety checkpoint {} ({}) before restore",
+                safety_checkpoint
+                    .label
+                    .as_deref()
+                    .unwrap_or(&safety_checkpoint.id),
+                safety_checkpoint.old_head_sha
+            ),
+        );
         log_operation(
             &state,
             &app,
