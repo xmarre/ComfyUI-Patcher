@@ -323,6 +323,10 @@ impl Database {
             params![installation_id],
         )?;
         tx.execute("DELETE FROM operations WHERE installation_id = ?1", params![installation_id])?;
+        tx.execute(
+            "DELETE FROM ignored_repo_paths WHERE installation_id = ?1",
+            params![installation_id],
+        )?;
         tx.execute("DELETE FROM managed_repos WHERE installation_id = ?1", params![installation_id])?;
         tx.execute("DELETE FROM installations WHERE id = ?1", params![installation_id])?;
         tx.commit()?;

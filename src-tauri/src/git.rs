@@ -146,7 +146,7 @@ pub async fn diff_name_status(
         .filter_map(|line| {
             let mut parts = line.split('\t');
             let status = parts.next()?.trim();
-            let path = parts.last().or_else(|| parts.next())?.trim();
+            let path = parts.next_back()?.trim();
             Some(RepoActionPreviewFile {
                 status: status.to_string(),
                 path: path.to_string(),

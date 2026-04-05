@@ -2437,20 +2437,27 @@ fn list_installations(state: State<'_, AppState>) -> Result<Vec<Installation>, S
     state.db.list_installations().map_err(|e| e.to_string())
 }
 
+async fn load_installation_detail_response(
+    state: &AppState,
+    installation_id: &str,
+) -> Result<InstallationDetail, String> {
+    let mut detail = hydrate_installation_detail(state, installation_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    detail.is_running = state
+        .processes
+        .is_running(installation_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(detail)
+}
+
 #[tauri::command]
 async fn get_installation_detail(
     state: State<'_, AppState>,
     installation_id: String,
 ) -> Result<InstallationDetail, String> {
-    let mut detail = hydrate_installation_detail(&state, &installation_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    detail.is_running = state
-        .processes
-        .is_running(&installation_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(detail)
+    load_installation_detail_response(&state, &installation_id).await
 }
 
 #[tauri::command]
@@ -2458,15 +2465,7 @@ async fn reconcile_installation(
     state: State<'_, AppState>,
     installation_id: String,
 ) -> Result<InstallationDetail, String> {
-    let mut detail = hydrate_installation_detail(&state, &installation_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    detail.is_running = state
-        .processes
-        .is_running(&installation_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(detail)
+    load_installation_detail_response(&state, &installation_id).await
 }
 
 #[tauri::command]
@@ -2525,7 +2524,7 @@ async fn save_installation(
     let _repo_guards = acquire_installation_repo_locks(&state, &installation.id)
         .await
         .map_err(|e| e.to_string())?;
-    let _ = discover_repositories_for_installation(&state, &installation)
+    let _ = discover_repositories_for_installation(&state, &installation, true)
         .await
         .map_err(|e| e.to_string())?;
     let installation = state

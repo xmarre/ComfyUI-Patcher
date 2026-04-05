@@ -565,12 +565,15 @@ export default function App() {
     if (!input.installationId || !input.input.trim()) {
       if (target === "core") {
         setCorePreview(null);
+        setCoreActionPreview(null);
         setCorePreviewError(null);
       } else if (target === "frontend") {
         setFrontendPreview(null);
+        setFrontendActionPreview(null);
         setFrontendPreviewError(null);
       } else {
         setNodePreview(null);
+        setNodeActionPreview(null);
         setNodePreviewError(null);
       }
       return;
@@ -585,32 +588,69 @@ export default function App() {
 
     try {
       const resolved = await api.resolveTarget(input);
-      const preview = await api.previewRepoTarget({
-        installationId: input.installationId,
-        kind: input.kind,
-        input: input.input,
-        repoId: input.repoId ?? null
-      });
 
       if (selectedInstallationIdRef.current !== input.installationId) return;
       if (target === "core") {
         if (corePreviewRequestSeq.current !== requestSeq) return;
         if (coreInputRef.current !== input.input) return;
         setCorePreview(resolved);
-        setCoreActionPreview(preview);
         setCorePreviewError(null);
       } else if (target === "frontend") {
         if (frontendPreviewRequestSeq.current !== requestSeq) return;
         if (frontendInputRef.current !== input.input) return;
         setFrontendPreview(resolved);
-        setFrontendActionPreview(preview);
         setFrontendPreviewError(null);
       } else {
         if (nodePreviewRequestSeq.current !== requestSeq) return;
         if (nodeInputRef.current !== input.input) return;
         setNodePreview(resolved);
-        setNodeActionPreview(preview);
         setNodePreviewError(null);
+      }
+
+      try {
+        const preview = await api.previewRepoTarget({
+          installationId: input.installationId,
+          kind: input.kind,
+          input: input.input,
+          repoId: input.repoId ?? null
+        });
+
+        if (selectedInstallationIdRef.current !== input.installationId) return;
+        if (target === "core") {
+          if (corePreviewRequestSeq.current !== requestSeq) return;
+          if (coreInputRef.current !== input.input) return;
+          setCoreActionPreview(preview);
+          setCorePreviewError(null);
+        } else if (target === "frontend") {
+          if (frontendPreviewRequestSeq.current !== requestSeq) return;
+          if (frontendInputRef.current !== input.input) return;
+          setFrontendActionPreview(preview);
+          setFrontendPreviewError(null);
+        } else {
+          if (nodePreviewRequestSeq.current !== requestSeq) return;
+          if (nodeInputRef.current !== input.input) return;
+          setNodeActionPreview(preview);
+          setNodePreviewError(null);
+        }
+      } catch (error) {
+        if (selectedInstallationIdRef.current !== input.installationId) return;
+        const message = error instanceof Error ? error.message : String(error);
+        if (target === "core") {
+          if (corePreviewRequestSeq.current !== requestSeq) return;
+          if (coreInputRef.current !== input.input) return;
+          setCoreActionPreview(null);
+          setCorePreviewError(message);
+        } else if (target === "frontend") {
+          if (frontendPreviewRequestSeq.current !== requestSeq) return;
+          if (frontendInputRef.current !== input.input) return;
+          setFrontendActionPreview(null);
+          setFrontendPreviewError(message);
+        } else {
+          if (nodePreviewRequestSeq.current !== requestSeq) return;
+          if (nodeInputRef.current !== input.input) return;
+          setNodeActionPreview(null);
+          setNodePreviewError(message);
+        }
       }
     } catch (error) {
       if (selectedInstallationIdRef.current !== input.installationId) return;
@@ -1336,7 +1376,7 @@ export default function App() {
                   key={coreRepo.id}
                   repo={coreRepo}
                   onUpdate={() =>
-                    void runAction(async () => {
+                    runAction(async () => {
                       await api.updateRepo({
                         repoId: coreRepo.id,
                         dirtyRepoStrategy: "abort",
@@ -1398,7 +1438,7 @@ export default function App() {
                     })
                   }
                   onRollback={() =>
-                    void runAction(async () => {
+                    runAction(async () => {
                       await api.rollbackRepo({
                         repoId: coreRepo.id,
                         restoreStash: true,
@@ -1478,7 +1518,7 @@ export default function App() {
                   key={frontendRepo.id}
                   repo={frontendRepo}
                   onUpdate={() =>
-                    void runAction(async () => {
+                    runAction(async () => {
                       await api.updateRepo({
                         repoId: frontendRepo.id,
                         dirtyRepoStrategy: "abort",
@@ -1540,7 +1580,7 @@ export default function App() {
                     })
                   }
                   onRollback={() =>
-                    void runAction(async () => {
+                    runAction(async () => {
                       await api.rollbackRepo({
                         repoId: frontendRepo.id,
                         restoreStash: true,
@@ -1731,7 +1771,7 @@ export default function App() {
                             })
                           }
                           onUpdate={() =>
-                            void runAction(async () => {
+                            runAction(async () => {
                               await api.updateRepo({
                                 repoId: repo.id,
                                 dirtyRepoStrategy: "abort",
@@ -1740,7 +1780,7 @@ export default function App() {
                             })
                           }
                           onRollback={() =>
-                            void runAction(async () => {
+                            runAction(async () => {
                               await api.rollbackRepo({
                                 repoId: repo.id,
                                 restoreStash: true,

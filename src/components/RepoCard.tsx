@@ -12,8 +12,8 @@ import type {
 
 type Props = {
   repo: ManagedRepo;
-  onUpdate?: () => void;
-  onRollback?: () => void;
+  onUpdate?: () => Promise<void>;
+  onRollback?: () => Promise<void>;
   onSetBaseTarget?: (input: string, clearOverlays: boolean) => Promise<boolean>;
   onAddOverlay?: (input: string) => Promise<boolean>;
   onSetOverlayEnabled?: (overlayId: string, enabled: boolean) => Promise<boolean>;
@@ -527,9 +527,17 @@ export default function RepoCard({
         >
           Preview update
         </button>
-        {onUpdate ? <button disabled={isSubmitting} onClick={onUpdate}>Update</button> : null}
+        {onUpdate ? (
+          <button disabled={isSubmitting} onClick={() => void runLocalAction(onUpdate)}>
+            Update
+          </button>
+        ) : null}
         {onRollback ? (
-          <button className="secondary" disabled={isSubmitting} onClick={onRollback}>
+          <button
+            className="secondary"
+            disabled={isSubmitting}
+            onClick={() => void runLocalAction(onRollback)}
+          >
             Rollback latest
           </button>
         ) : null}
