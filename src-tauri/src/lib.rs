@@ -1638,6 +1638,8 @@ async fn maybe_restart_installation(
     if !enabled {
         return Ok(());
     }
+    let lifecycle_lock = state.lifecycle_lock();
+    let _lifecycle_guard = lifecycle_lock.lock().await;
     if !state.processes.is_running(&installation.id).await? {
         log_operation(
             state,
@@ -4430,6 +4432,8 @@ async fn run_start_installation(
     state.db.set_operation_running(&operation_id)?;
     let lock = state.installation_lock(&installation.id).await;
     let _guard = lock.lock().await;
+    let lifecycle_lock = state.lifecycle_lock();
+    let _lifecycle_guard = lifecycle_lock.lock().await;
     let result = async {
         let require_managed_frontend_dist = state
             .db
@@ -4519,6 +4523,8 @@ async fn run_stop_installation(
     state.db.set_operation_running(&operation_id)?;
     let lock = state.installation_lock(&installation.id).await;
     let _guard = lock.lock().await;
+    let lifecycle_lock = state.lifecycle_lock();
+    let _lifecycle_guard = lifecycle_lock.lock().await;
     let result = async {
         let profile = installation
             .launch_profile
@@ -4616,6 +4622,8 @@ async fn run_restart_installation(
     state.db.set_operation_running(&operation_id)?;
     let lock = state.installation_lock(&installation.id).await;
     let _guard = lock.lock().await;
+    let lifecycle_lock = state.lifecycle_lock();
+    let _lifecycle_guard = lifecycle_lock.lock().await;
     let result = async {
         let require_managed_frontend_dist = state
             .db
@@ -4800,6 +4808,8 @@ mod app_updates {
         state: State<'_, AppState>,
         pending_update: State<'_, PendingUpdate>,
     ) -> Result<(), String> {
+        let lifecycle_lock = state.lifecycle_lock();
+        let _lifecycle_guard = lifecycle_lock.lock().await;
         let update = {
             let mut pending = pending_update.0.lock().await;
             pending

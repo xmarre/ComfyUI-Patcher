@@ -14,6 +14,7 @@ pub struct AppState {
     pub github: GithubClient,
     pub processes: ProcessRegistry,
     pub manager_registry: ManagerRegistryClient,
+    lifecycle_lock: Arc<Mutex<()>>,
     repo_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     installation_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
@@ -33,9 +34,14 @@ impl AppState {
             github,
             processes: ProcessRegistry::new(),
             manager_registry,
+            lifecycle_lock: Arc::new(Mutex::new(())),
             repo_locks: Arc::new(Mutex::new(HashMap::new())),
             installation_locks: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    pub fn lifecycle_lock(&self) -> Arc<Mutex<()>> {
+        self.lifecycle_lock.clone()
     }
 
     pub async fn repo_lock(&self, repo_id: &str) -> Arc<Mutex<()>> {

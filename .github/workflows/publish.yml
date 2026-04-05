@@ -24,6 +24,15 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Validate updater key
+        shell: pwsh
+        env:
+          COMFYUI_PATCHER_UPDATER_PUBKEY: ${{ secrets.COMFYUI_PATCHER_UPDATER_PUBKEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:COMFYUI_PATCHER_UPDATER_PUBKEY)) {
+            throw "COMFYUI_PATCHER_UPDATER_PUBKEY must be set for release builds."
+          }
+
       - name: Install dependencies
         run: npm ci
 

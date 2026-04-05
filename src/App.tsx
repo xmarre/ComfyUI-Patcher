@@ -290,6 +290,7 @@ export default function App() {
       setUpdateCheck(result);
     } catch (error) {
       const message = toErrorMessage(error);
+      setUpdateCheck(null);
       if (!options?.silent) {
         setUpdateError(message);
       }
