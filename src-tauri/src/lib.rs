@@ -1638,6 +1638,8 @@ async fn maybe_restart_installation(
     if !enabled {
         return Ok(());
     }
+    let lifecycle_lock = state.lifecycle_lock();
+    let _lifecycle_guard = lifecycle_lock.lock().await;
     if !state.processes.is_running(&installation.id).await? {
         log_operation(
             state,
@@ -1665,6 +1667,12 @@ async fn maybe_restart_installation(
     );
     state.processes.restart(&installation.id, &profile).await?;
     Ok(())
+}
+
+async fn acquire_background_work_guard(
+    state: &AppState,
+) -> tokio::sync::OwnedMutexGuard<()> {
+    state.background_work_lock().lock_owned().await
 }
 
 fn validate_frontend_restart_preconditions(
@@ -2177,6 +2185,8 @@ async fn patch_core(
     let repo = detail
         .core_repo
         .ok_or_else(|| "core repository is not registered".to_string())?;
+    let background_work_lock = state.background_work_lock();
+    let _background_work_accept_guard = background_work_lock.lock().await;
     let op = state
         .db
         .create_operation(
@@ -2204,6 +2214,7 @@ async fn run_patch_core(
     input: PatchCoreInput,
     operation_id: String,
 ) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
     state.db.set_operation_running(&operation_id)?;
     let repo_lock = state.repo_lock(&repo.id).await;
     let _guard = repo_lock.lock().await;
@@ -2326,6 +2337,8 @@ async fn install_or_patch_frontend(
     } else {
         OperationKind::InstallFrontend
     };
+    let background_work_lock = state.background_work_lock();
+    let _background_work_accept_guard = background_work_lock.lock().await;
     let op = state
         .db
         .create_operation(
@@ -2352,6 +2365,7 @@ async fn run_install_or_patch_frontend(
     input: PatchFrontendInput,
     operation_id: String,
 ) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
     state.db.set_operation_running(&operation_id)?;
     let installation_lock = state.installation_lock(&installation.id).await;
     let _installation_guard = installation_lock.lock().await;
@@ -3062,6 +3076,8 @@ async fn install_or_patch_custom_node(
         .get_installation(&input.installation_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "installation not found".to_string())?;
+    let background_work_lock = state.background_work_lock();
+    let _background_work_accept_guard = background_work_lock.lock().await;
     let op = state
         .db
         .create_operation(
@@ -3089,6 +3105,7 @@ async fn run_install_or_patch_custom_node(
     input: PatchCustomNodeInput,
     operation_id: String,
 ) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
     state.db.set_operation_running(&operation_id)?;
     let installation_lock = state.installation_lock(&installation.id).await;
     let _installation_guard = installation_lock.lock().await;
@@ -3150,6 +3167,8 @@ async fn adopt_tracked_custom_nodes(
         .get_installation(&input.installation_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "installation not found".to_string())?;
+    let background_work_lock = state.background_work_lock();
+    let _background_work_accept_guard = background_work_lock.lock().await;
     let op = state
         .db
         .create_operation(
@@ -3175,6 +3194,7 @@ async fn run_adopt_tracked_custom_nodes(
     installation: Installation,
     operation_id: String,
 ) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
     state.db.set_operation_running(&operation_id)?;
     let installation_lock = state.installation_lock(&installation.id).await;
     let _installation_guard = installation_lock.lock().await;
@@ -3435,6 +3455,8 @@ async fn set_repo_base_target(
         .get_installation(&repo.installation_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "installation not found".to_string())?;
+    let background_work_lock = state.background_work_lock();
+    let _background_work_accept_guard = background_work_lock.lock().await;
     let op = state
         .db
         .create_operation(
@@ -3462,6 +3484,7 @@ async fn run_set_repo_base_target(
     input: SetRepoBaseTargetInput,
     operation_id: String,
 ) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
     state.db.set_operation_running(&operation_id)?;
     let repo_lock = state.repo_lock(&repo.id).await;
     let _guard = repo_lock.lock().await;
@@ -3556,6 +3579,8 @@ async fn add_repo_overlay(
         .get_installation(&repo.installation_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "installation not found".to_string())?;
+    let background_work_lock = state.background_work_lock();
+    let _background_work_accept_guard = background_work_lock.lock().await;
     let op = state
         .db
         .create_operation(
@@ -3583,6 +3608,7 @@ async fn run_add_repo_overlay(
     input: AddRepoOverlayInput,
     operation_id: String,
 ) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
     state.db.set_operation_running(&operation_id)?;
     let repo_lock = state.repo_lock(&repo.id).await;
     let _guard = repo_lock.lock().await;
@@ -3668,6 +3694,8 @@ async fn set_repo_overlay_enabled(
         .get_installation(&repo.installation_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "installation not found".to_string())?;
+    let background_work_lock = state.background_work_lock();
+    let _background_work_accept_guard = background_work_lock.lock().await;
     let op = state
         .db
         .create_operation(
@@ -3696,6 +3724,7 @@ async fn run_set_repo_overlay_enabled(
     input: SetRepoOverlayEnabledInput,
     operation_id: String,
 ) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
     state.db.set_operation_running(&operation_id)?;
     let repo_lock = state.repo_lock(&repo.id).await;
     let _guard = repo_lock.lock().await;
@@ -3778,6 +3807,8 @@ async fn remove_repo_overlay(
         .get_installation(&repo.installation_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "installation not found".to_string())?;
+    let background_work_lock = state.background_work_lock();
+    let _background_work_accept_guard = background_work_lock.lock().await;
     let op = state
         .db
         .create_operation(
@@ -3805,6 +3836,7 @@ async fn run_remove_repo_overlay(
     input: RemoveRepoOverlayInput,
     operation_id: String,
 ) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
     state.db.set_operation_running(&operation_id)?;
     let repo_lock = state.repo_lock(&repo.id).await;
     let _guard = repo_lock.lock().await;
@@ -3890,6 +3922,8 @@ async fn move_repo_overlay(
         .get_installation(&repo.installation_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "installation not found".to_string())?;
+    let background_work_lock = state.background_work_lock();
+    let _background_work_accept_guard = background_work_lock.lock().await;
     let op = state
         .db
         .create_operation(
@@ -3917,6 +3951,7 @@ async fn run_move_repo_overlay(
     input: MoveRepoOverlayInput,
     operation_id: String,
 ) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
     state.db.set_operation_running(&operation_id)?;
     let repo_lock = state.repo_lock(&repo.id).await;
     let _guard = repo_lock.lock().await;
@@ -4007,6 +4042,8 @@ async fn update_repo(
         .get_installation(&repo.installation_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "installation not found".to_string())?;
+    let background_work_lock = state.background_work_lock();
+    let _background_work_accept_guard = background_work_lock.lock().await;
     let op = state
         .db
         .create_operation(
@@ -4037,6 +4074,7 @@ async fn run_update_repo(
     input: UpdateRepoInput,
     operation_id: String,
 ) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
     state.db.set_operation_running(&operation_id)?;
     let repo_lock = state.repo_lock(&repo.id).await;
     let _guard = repo_lock.lock().await;
@@ -4112,6 +4150,8 @@ async fn update_all(
         .get_installation(&input.installation_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "installation not found".to_string())?;
+    let background_work_lock = state.background_work_lock();
+    let _background_work_accept_guard = background_work_lock.lock().await;
     let op = state
         .db
         .create_operation(&installation.id, None, OperationKind::UpdateAll, None)
@@ -4133,6 +4173,7 @@ async fn run_update_all(
     input: UpdateAllInput,
     operation_id: String,
 ) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
     state.db.set_operation_running(&operation_id)?;
     log_operation(
         &state,
@@ -4282,6 +4323,8 @@ async fn rollback_repo(
         .get_installation(&repo.installation_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "installation not found".to_string())?;
+    let background_work_lock = state.background_work_lock();
+    let _background_work_accept_guard = background_work_lock.lock().await;
     let op = state
         .db
         .create_operation(
@@ -4309,6 +4352,7 @@ async fn run_rollback_repo(
     input: RollbackRepoInput,
     operation_id: String,
 ) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
     state.db.set_operation_running(&operation_id)?;
     let repo_lock = state.repo_lock(&repo.id).await;
     let _guard = repo_lock.lock().await;
@@ -4397,6 +4441,8 @@ async fn start_installation(
     state: State<'_, AppState>,
     input: StartInstallationInput,
 ) -> Result<OperationStart, String> {
+    let lifecycle_lock = state.lifecycle_lock();
+    let _lifecycle_accept_guard = lifecycle_lock.lock().await;
     let installation = state
         .db
         .get_installation(&input.installation_id)
@@ -4430,6 +4476,8 @@ async fn run_start_installation(
     state.db.set_operation_running(&operation_id)?;
     let lock = state.installation_lock(&installation.id).await;
     let _guard = lock.lock().await;
+    let lifecycle_lock = state.lifecycle_lock();
+    let _lifecycle_guard = lifecycle_lock.lock().await;
     let result = async {
         let require_managed_frontend_dist = state
             .db
@@ -4486,6 +4534,8 @@ async fn stop_installation(
     state: State<'_, AppState>,
     input: StopInstallationInput,
 ) -> Result<OperationStart, String> {
+    let lifecycle_lock = state.lifecycle_lock();
+    let _lifecycle_accept_guard = lifecycle_lock.lock().await;
     let installation = state
         .db
         .get_installation(&input.installation_id)
@@ -4519,6 +4569,8 @@ async fn run_stop_installation(
     state.db.set_operation_running(&operation_id)?;
     let lock = state.installation_lock(&installation.id).await;
     let _guard = lock.lock().await;
+    let lifecycle_lock = state.lifecycle_lock();
+    let _lifecycle_guard = lifecycle_lock.lock().await;
     let result = async {
         let profile = installation
             .launch_profile
@@ -4583,6 +4635,8 @@ async fn restart_installation(
     state: State<'_, AppState>,
     input: RestartInstallationInput,
 ) -> Result<OperationStart, String> {
+    let lifecycle_lock = state.lifecycle_lock();
+    let _lifecycle_accept_guard = lifecycle_lock.lock().await;
     let installation = state
         .db
         .get_installation(&input.installation_id)
@@ -4616,6 +4670,8 @@ async fn run_restart_installation(
     state.db.set_operation_running(&operation_id)?;
     let lock = state.installation_lock(&installation.id).await;
     let _guard = lock.lock().await;
+    let lifecycle_lock = state.lifecycle_lock();
+    let _lifecycle_guard = lifecycle_lock.lock().await;
     let result = async {
         let require_managed_frontend_dist = state
             .db
@@ -4696,32 +4752,269 @@ fn list_checkpoints(
         .map_err(|e| e.to_string())
 }
 
-async fn shutdown_managed_installations(state: AppState) {
+#[cfg(desktop)]
+mod app_updates {
+    use super::shutdown_managed_installations;
+    use crate::state::AppState;
+    use serde::Serialize;
+    use tauri::{AppHandle, Emitter, State};
+    use tauri_plugin_updater::{Update, UpdaterExt};
+
+    const APP_UPDATE_EVENT: &str = "app-update-event";
+    const UPDATE_ENDPOINT: &str =
+        "https://github.com/xmarre/ComfyUI-Patcher/releases/latest/download/latest.json";
+
+    #[derive(Default)]
+    pub struct PendingUpdate(pub tokio::sync::Mutex<Option<Update>>);
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct UpdateMetadata {
+        version: String,
+        current_version: String,
+    }
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct UpdateCheckResult {
+        enabled: bool,
+        disabled_reason: Option<String>,
+        update: Option<UpdateMetadata>,
+    }
+
+    #[derive(Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct UpdateEvent {
+        kind: String,
+        chunk_length: Option<usize>,
+        content_length: Option<u64>,
+    }
+
+    fn embedded_updater_pubkey() -> Option<&'static str> {
+        option_env!("COMFYUI_PATCHER_UPDATER_PUBKEY")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+
+    fn emit_update_event(app: &AppHandle, event: UpdateEvent) {
+        let _ = app.emit(APP_UPDATE_EVENT, event);
+    }
+
+    #[tauri::command]
+    pub async fn fetch_app_update(
+        app: AppHandle,
+        pending_update: State<'_, PendingUpdate>,
+    ) -> Result<UpdateCheckResult, String> {
+        {
+            let mut pending = pending_update.0.lock().await;
+            pending.take();
+        }
+
+        let Some(pubkey) = embedded_updater_pubkey() else {
+            return Ok(UpdateCheckResult {
+                enabled: false,
+                disabled_reason: Some(
+                    "Updater is disabled in this build because COMFYUI_PATCHER_UPDATER_PUBKEY was not embedded at build time.".to_string(),
+                ),
+                update: None,
+            });
+        };
+
+        let update = app
+            .updater_builder()
+            .pubkey(pubkey)
+            .endpoints(vec![
+                UPDATE_ENDPOINT
+                    .parse()
+                    .map_err(|e: url::ParseError| e.to_string())?,
+            ])
+            .map_err(|e| e.to_string())?
+            .build()
+            .map_err(|e| e.to_string())?
+            .check()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let metadata = update.as_ref().map(|update| UpdateMetadata {
+            version: update.version.clone(),
+            current_version: app.package_info().version.to_string(),
+        });
+
+        let mut pending = pending_update.0.lock().await;
+        *pending = update;
+
+        Ok(UpdateCheckResult {
+            enabled: true,
+            disabled_reason: None,
+            update: metadata,
+        })
+    }
+
+    #[tauri::command]
+    pub async fn install_app_update(
+        app: AppHandle,
+        state: State<'_, AppState>,
+        pending_update: State<'_, PendingUpdate>,
+    ) -> Result<(), String> {
+        let lifecycle_lock = state.lifecycle_lock();
+        let _lifecycle_guard = lifecycle_lock.lock().await;
+        let background_work_lock = state.background_work_lock();
+        let _background_work_guard = background_work_lock.try_lock().map_err(|_| {
+            "cannot install update while operations are running".to_string()
+        })?;
+        if state
+            .db
+            .has_in_flight_background_operations()
+            .map_err(|e| e.to_string())?
+        {
+            return Err("cannot install update while operations are running".to_string());
+        }
+        if state
+            .db
+            .has_in_flight_lifecycle_operations()
+            .map_err(|e| e.to_string())?
+        {
+            return Err("cannot install update while operations are running".to_string());
+        }
+        let update = {
+            let mut pending = pending_update.0.lock().await;
+            pending
+                .take()
+                .ok_or_else(|| "there is no pending update; check for updates first".to_string())?
+        };
+
+        shutdown_managed_installations(state.inner().clone())
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut started = false;
+        update
+            .download_and_install(
+                |chunk_length, content_length| {
+                    if !started {
+                        emit_update_event(
+                            &app,
+                            UpdateEvent {
+                                kind: "started".to_string(),
+                                chunk_length: None,
+                                content_length,
+                            },
+                        );
+                        started = true;
+                    }
+                    emit_update_event(
+                        &app,
+                        UpdateEvent {
+                            kind: "progress".to_string(),
+                            chunk_length: Some(chunk_length),
+                            content_length: None,
+                        },
+                    );
+                },
+                || {
+                    emit_update_event(
+                        &app,
+                        UpdateEvent {
+                            kind: "finished".to_string(),
+                            chunk_length: None,
+                            content_length: None,
+                        },
+                    );
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(not(desktop))]
+mod app_updates {
+    use serde::Serialize;
+    use tauri::{AppHandle, State};
+
+    #[derive(Default)]
+    pub struct PendingUpdate;
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct UpdateMetadata {
+        version: String,
+        current_version: String,
+    }
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct UpdateCheckResult {
+        enabled: bool,
+        disabled_reason: Option<String>,
+        update: Option<UpdateMetadata>,
+    }
+
+    #[tauri::command]
+    pub async fn fetch_app_update(
+        _app: AppHandle,
+        _pending_update: State<'_, PendingUpdate>,
+    ) -> Result<UpdateCheckResult, String> {
+        Ok(UpdateCheckResult {
+            enabled: false,
+            disabled_reason: Some("Updater is only supported on desktop builds.".to_string()),
+            update: None,
+        })
+    }
+
+    #[tauri::command]
+    pub async fn install_app_update(
+        _app: AppHandle,
+        _pending_update: State<'_, PendingUpdate>,
+    ) -> Result<(), String> {
+        Err("Updater is only supported on desktop builds.".to_string())
+    }
+}
+
+async fn shutdown_managed_installations(state: AppState) -> AppResult<()> {
     let installations = match state.db.list_installations() {
         Ok(installations) => installations,
         Err(_) => {
             state.processes.shutdown_all().await;
-            return;
+            return Ok(());
         }
     };
 
     for installation in installations {
         if let Some(profile) = installation.launch_profile.as_ref() {
             if state.processes.stop(&installation.id, profile).await.is_err() {
-                let _ = state.processes.force_stop(&installation.id).await;
+                if let Err(force_stop_error) = state.processes.force_stop(&installation.id).await {
+                    return Err(AppError::Process(format!(
+                        "failed to stop managed installation '{}' during app update handoff: {}",
+                        installation.name, force_stop_error
+                    )));
+                }
             }
         } else {
-            let _ = state.processes.force_stop(&installation.id).await;
+            state.processes.force_stop(&installation.id).await.map_err(|error| {
+                AppError::Process(format!(
+                    "failed to force-stop managed installation '{}' during app update handoff: {}",
+                    installation.name, error
+                ))
+            })?;
         }
     }
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            #[cfg(desktop)]
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())
+                .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+
             let state = AppState::new(app.handle())?;
             app.manage(state);
+            app.manage(app_updates::PendingUpdate::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -4750,6 +5043,8 @@ pub fn run() {
             list_operations,
             get_operation_log,
             list_checkpoints,
+            app_updates::fetch_app_update,
+            app_updates::install_app_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building ComfyUI Patcher");
@@ -4758,7 +5053,7 @@ pub fn run() {
         if let tauri::RunEvent::ExitRequested { .. } = event {
             let state = app_handle.state::<AppState>().inner().clone();
             tauri::async_runtime::block_on(async move {
-                shutdown_managed_installations(state).await;
+                let _ = shutdown_managed_installations(state).await;
             });
         }
     });

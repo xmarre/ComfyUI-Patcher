@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { api } from "./api";
 import RepoCard from "./components/RepoCard";
 import OperationPanel from "./components/OperationPanel";
@@ -13,7 +14,8 @@ import type {
   OperationEvent,
   ResolveTargetInput,
   ResolvedTarget,
-  SaveInstallationInput
+  SaveInstallationInput,
+  AppUpdateCheckResult
 } from "./types";
 
 const defaultLaunchProfile: LaunchProfile = {
@@ -93,6 +95,23 @@ function toErrorMessage(error: unknown): string {
   return String(error);
 }
 
+const UPDATE_INSTALL_BLOCKED_MESSAGE = "cannot install update while operations are running";
+
+function formatBytes(value: number | null): string {
+  if (value == null || !Number.isFinite(value) || value < 0) {
+    return "unknown size";
+  }
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let next = value;
+  let unitIndex = 0;
+  while (next >= 1024 && unitIndex < units.length - 1) {
+    next /= 1024;
+    unitIndex += 1;
+  }
+  const precision = unitIndex === 0 ? 0 : next >= 100 ? 0 : next >= 10 ? 1 : 2;
+  return `${next.toFixed(precision)} ${units[unitIndex]}`;
+}
+
 const defaultFrontendPackageManager: FrontendPackageManager = "auto";
 
 type MainTab = "overview" | "patching" | "custom_nodes" | "activity";
@@ -162,6 +181,12 @@ export default function App() {
   const [registryRefreshToken, setRegistryRefreshToken] = useState(0);
   const [activeTab, setActiveTab] = useState<MainTab>("overview");
   const [managedCustomNodeQuery, setManagedCustomNodeQuery] = useState("");
+  const [updateCheck, setUpdateCheck] = useState<AppUpdateCheckResult | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [isCheckingForUpdates, setIsCheckingForUpdates] = useState(false);
+  const [isInstallingUpdate, setIsInstallingUpdate] = useState(false);
+  const [updateContentLength, setUpdateContentLength] = useState<number | null>(null);
+  const [updateDownloadedBytes, setUpdateDownloadedBytes] = useState(0);
   const [registerForm, setRegisterForm] = useState({
     name: "Primary ComfyUI",
     comfyRoot: "",
@@ -197,6 +222,8 @@ export default function App() {
   const coreInputRef = useRef("");
   const frontendInputRef = useRef("");
   const nodeInputRef = useRef("");
+  const updateCheckInFlightRef = useRef(false);
+  const updateInstallInFlightRef = useRef(false);
 
   useEffect(() => {
     selectedInstallationIdRef.current = selectedInstallationId;
@@ -257,6 +284,58 @@ export default function App() {
     });
   }, [detail, selectedInstallation]);
 
+  async function checkForUpdates(options?: { silent?: boolean }) {
+    if (updateCheckInFlightRef.current) {
+      return;
+    }
+    updateCheckInFlightRef.current = true;
+    setIsCheckingForUpdates(true);
+    setUpdateError(null);
+    setUpdateDownloadedBytes(0);
+    setUpdateContentLength(null);
+    try {
+      const result = await api.fetchAppUpdate();
+      setUpdateCheck(result);
+    } catch (error) {
+      const message = toErrorMessage(error);
+      setUpdateCheck(null);
+      if (!options?.silent) {
+        setUpdateError(message);
+      }
+    } finally {
+      updateCheckInFlightRef.current = false;
+      setIsCheckingForUpdates(false);
+    }
+  }
+
+  async function installAvailableUpdate() {
+    if (
+      updateInstallInFlightRef.current ||
+      updateCheckInFlightRef.current ||
+      isCheckingForUpdates ||
+      !availableUpdate
+    ) {
+      return;
+    }
+    updateInstallInFlightRef.current = true;
+    setIsInstallingUpdate(true);
+    setUpdateError(null);
+    setUpdateDownloadedBytes(0);
+    try {
+      await api.installAppUpdate();
+      await relaunch();
+    } catch (error) {
+      const message = toErrorMessage(error);
+      if (message !== UPDATE_INSTALL_BLOCKED_MESSAGE) {
+        setUpdateCheck(null);
+      }
+      setUpdateError(message);
+      setIsInstallingUpdate(false);
+    } finally {
+      updateInstallInFlightRef.current = false;
+    }
+  }
+
   async function refreshInstallations() {
     const next = await api.listInstallations();
     setInstallations(next);
@@ -308,6 +387,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    void checkForUpdates({ silent: true });
+  }, []);
+
+  useEffect(() => {
     setCorePreview(null);
     setFrontendPreview(null);
     setNodePreview(null);
@@ -318,6 +401,34 @@ export default function App() {
     setActiveTab("overview");
     void refreshDetail(selectedInstallationId, { clear: true });
   }, [selectedInstallationId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    api
+      .subscribeAppUpdateEvents((event) => {
+        if (cancelled) return;
+        if (event.kind === "started") {
+          setUpdateDownloadedBytes(0);
+          setUpdateContentLength(event.contentLength);
+          return;
+        }
+        if (event.kind === "progress") {
+          setUpdateDownloadedBytes((prev) => prev + event.chunkLength);
+        }
+      })
+      .then((fn) => {
+        if (cancelled) {
+          fn();
+          return;
+        }
+        unlisten = fn;
+      });
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -443,6 +554,11 @@ export default function App() {
     detail?.installation.frontendSettings ??
     selectedInstallation?.frontendSettings ??
     null;
+  const availableUpdate = updateCheck?.update ?? null;
+  const updateDownloadPercent =
+    updateContentLength && updateContentLength > 0
+      ? Math.min(100, Math.round((updateDownloadedBytes / updateContentLength) * 100))
+      : null;
   const filteredCustomNodeRepos = useMemo(() => {
     const normalizedQuery = managedCustomNodeQuery.trim().toLocaleLowerCase();
     if (!normalizedQuery) {
@@ -469,6 +585,56 @@ export default function App() {
               </button>
             ))}
           </div>
+        </div>
+
+        <div className="card">
+          <div className="row between gap updater-card-header">
+            <div>
+              <h3>App updates</h3>
+              <div className="muted small">
+                Checks the latest stable GitHub release for a signed in-app update.
+              </div>
+            </div>
+            <button
+              className="secondary"
+              disabled={isCheckingForUpdates || isInstallingUpdate}
+              onClick={() => void checkForUpdates()}
+            >
+              {isCheckingForUpdates ? "Checking..." : "Check now"}
+            </button>
+          </div>
+          {availableUpdate ? (
+            <div className="stack">
+              <div>
+                <div><strong>Update available</strong></div>
+                <div className="muted small">
+                  Current {availableUpdate.currentVersion} -&gt; latest {availableUpdate.version}
+                </div>
+              </div>
+              <button
+                disabled={isInstallingUpdate || isCheckingForUpdates}
+                onClick={() => void installAvailableUpdate()}
+              >
+                {isInstallingUpdate ? "Installing..." : "Download and install"}
+              </button>
+              {isInstallingUpdate ? (
+                <div className="muted small">
+                  Downloaded {formatBytes(updateDownloadedBytes)}
+                  {updateContentLength != null ? ` / ${formatBytes(updateContentLength)}` : ""}
+                  {updateDownloadPercent != null ? ` (${updateDownloadPercent}%)` : ""}
+                </div>
+              ) : null}
+            </div>
+          ) : updateCheck && !updateCheck.enabled ? (
+            <div className="muted small">
+              {updateCheck.disabledReason ?? "Updater is disabled in this build."}
+            </div>
+          ) : updateCheck ? (
+            <div className="muted small">No newer stable release is available.</div>
+          ) : (
+            <div className="muted small">No update check has completed yet.</div>
+          )}
+          {updateError ? <div className="muted small">{updateError}</div> : null}
         </div>
 
         <div className="card">

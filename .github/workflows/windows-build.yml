@@ -21,10 +21,10 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Build frontend
         run: npm run build
 
       - name: Build Rust backend
-        run: cargo build --manifest-path src-tauri/Cargo.toml --locked
+        run: cargo build --manifest-path src-tauri/Cargo.toml
