@@ -1669,6 +1669,12 @@ async fn maybe_restart_installation(
     Ok(())
 }
 
+async fn acquire_background_work_guard(
+    state: &AppState,
+) -> tokio::sync::OwnedMutexGuard<()> {
+    state.background_work_lock().lock_owned().await
+}
+
 fn validate_frontend_restart_preconditions(
     frontend_settings: &FrontendSettings,
     is_running: bool,
@@ -2206,6 +2212,7 @@ async fn run_patch_core(
     input: PatchCoreInput,
     operation_id: String,
 ) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
     state.db.set_operation_running(&operation_id)?;
     let repo_lock = state.repo_lock(&repo.id).await;
     let _guard = repo_lock.lock().await;
@@ -2354,6 +2361,7 @@ async fn run_install_or_patch_frontend(
     input: PatchFrontendInput,
     operation_id: String,
 ) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
     state.db.set_operation_running(&operation_id)?;
     let installation_lock = state.installation_lock(&installation.id).await;
     let _installation_guard = installation_lock.lock().await;
@@ -3091,6 +3099,7 @@ async fn run_install_or_patch_custom_node(
     input: PatchCustomNodeInput,
     operation_id: String,
 ) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
     state.db.set_operation_running(&operation_id)?;
     let installation_lock = state.installation_lock(&installation.id).await;
     let _installation_guard = installation_lock.lock().await;
@@ -3177,6 +3186,7 @@ async fn run_adopt_tracked_custom_nodes(
     installation: Installation,
     operation_id: String,
 ) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
     state.db.set_operation_running(&operation_id)?;
     let installation_lock = state.installation_lock(&installation.id).await;
     let _installation_guard = installation_lock.lock().await;
@@ -3464,6 +3474,7 @@ async fn run_set_repo_base_target(
     input: SetRepoBaseTargetInput,
     operation_id: String,
 ) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
     state.db.set_operation_running(&operation_id)?;
     let repo_lock = state.repo_lock(&repo.id).await;
     let _guard = repo_lock.lock().await;
@@ -3585,6 +3596,7 @@ async fn run_add_repo_overlay(
     input: AddRepoOverlayInput,
     operation_id: String,
 ) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
     state.db.set_operation_running(&operation_id)?;
     let repo_lock = state.repo_lock(&repo.id).await;
     let _guard = repo_lock.lock().await;
@@ -3698,6 +3710,7 @@ async fn run_set_repo_overlay_enabled(
     input: SetRepoOverlayEnabledInput,
     operation_id: String,
 ) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
     state.db.set_operation_running(&operation_id)?;
     let repo_lock = state.repo_lock(&repo.id).await;
     let _guard = repo_lock.lock().await;
@@ -3807,6 +3820,7 @@ async fn run_remove_repo_overlay(
     input: RemoveRepoOverlayInput,
     operation_id: String,
 ) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
     state.db.set_operation_running(&operation_id)?;
     let repo_lock = state.repo_lock(&repo.id).await;
     let _guard = repo_lock.lock().await;
@@ -3919,6 +3933,7 @@ async fn run_move_repo_overlay(
     input: MoveRepoOverlayInput,
     operation_id: String,
 ) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
     state.db.set_operation_running(&operation_id)?;
     let repo_lock = state.repo_lock(&repo.id).await;
     let _guard = repo_lock.lock().await;
@@ -4039,6 +4054,7 @@ async fn run_update_repo(
     input: UpdateRepoInput,
     operation_id: String,
 ) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
     state.db.set_operation_running(&operation_id)?;
     let repo_lock = state.repo_lock(&repo.id).await;
     let _guard = repo_lock.lock().await;
@@ -4135,6 +4151,7 @@ async fn run_update_all(
     input: UpdateAllInput,
     operation_id: String,
 ) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
     state.db.set_operation_running(&operation_id)?;
     log_operation(
         &state,
@@ -4311,6 +4328,7 @@ async fn run_rollback_repo(
     input: RollbackRepoInput,
     operation_id: String,
 ) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
     state.db.set_operation_running(&operation_id)?;
     let repo_lock = state.repo_lock(&repo.id).await;
     let _guard = repo_lock.lock().await;
@@ -4810,6 +4828,10 @@ mod app_updates {
     ) -> Result<(), String> {
         let lifecycle_lock = state.lifecycle_lock();
         let _lifecycle_guard = lifecycle_lock.lock().await;
+        let background_work_lock = state.background_work_lock();
+        let _background_work_guard = background_work_lock.try_lock().map_err(|_| {
+            "cannot install update while operations are running".to_string()
+        })?;
         let update = {
             let mut pending = pending_update.0.lock().await;
             pending

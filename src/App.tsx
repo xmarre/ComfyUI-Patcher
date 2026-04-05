@@ -96,7 +96,7 @@ function toErrorMessage(error: unknown): string {
 }
 
 function formatBytes(value: number | null): string {
-  if (value == null || !Number.isFinite(value) || value <= 0) {
+  if (value == null || !Number.isFinite(value) || value < 0) {
     return "unknown size";
   }
   const units = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -220,6 +220,8 @@ export default function App() {
   const coreInputRef = useRef("");
   const frontendInputRef = useRef("");
   const nodeInputRef = useRef("");
+  const updateCheckInFlightRef = useRef(false);
+  const updateInstallInFlightRef = useRef(false);
 
   useEffect(() => {
     selectedInstallationIdRef.current = selectedInstallationId;
@@ -281,6 +283,10 @@ export default function App() {
   }, [detail, selectedInstallation]);
 
   async function checkForUpdates(options?: { silent?: boolean }) {
+    if (updateCheckInFlightRef.current) {
+      return;
+    }
+    updateCheckInFlightRef.current = true;
     setIsCheckingForUpdates(true);
     setUpdateError(null);
     setUpdateDownloadedBytes(0);
@@ -295,14 +301,21 @@ export default function App() {
         setUpdateError(message);
       }
     } finally {
+      updateCheckInFlightRef.current = false;
       setIsCheckingForUpdates(false);
     }
   }
 
   async function installAvailableUpdate() {
-    if (isCheckingForUpdates || !availableUpdate) {
+    if (
+      updateInstallInFlightRef.current ||
+      updateCheckInFlightRef.current ||
+      isCheckingForUpdates ||
+      !availableUpdate
+    ) {
       return;
     }
+    updateInstallInFlightRef.current = true;
     setIsInstallingUpdate(true);
     setUpdateError(null);
     setUpdateDownloadedBytes(0);
@@ -313,6 +326,8 @@ export default function App() {
       setUpdateCheck(null);
       setUpdateError(toErrorMessage(error));
       setIsInstallingUpdate(false);
+    } finally {
+      updateInstallInFlightRef.current = false;
     }
   }
 
