@@ -1,6 +1,6 @@
 [package]
 name = "comfyui-patcher"
-version = "0.1.7"
+version = "0.1.8"
 description = "Desktop patcher for ComfyUI and custom nodes"
 authors = ["xmarre"]
 edition = "2021"
