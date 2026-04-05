@@ -95,6 +95,8 @@ function toErrorMessage(error: unknown): string {
   return String(error);
 }
 
+const UPDATE_INSTALL_BLOCKED_MESSAGE = "cannot install update while operations are running";
+
 function formatBytes(value: number | null): string {
   if (value == null || !Number.isFinite(value) || value < 0) {
     return "unknown size";
@@ -323,8 +325,11 @@ export default function App() {
       await api.installAppUpdate();
       await relaunch();
     } catch (error) {
-      setUpdateCheck(null);
-      setUpdateError(toErrorMessage(error));
+      const message = toErrorMessage(error);
+      if (message !== UPDATE_INSTALL_BLOCKED_MESSAGE) {
+        setUpdateCheck(null);
+      }
+      setUpdateError(message);
       setIsInstallingUpdate(false);
     } finally {
       updateInstallInFlightRef.current = false;

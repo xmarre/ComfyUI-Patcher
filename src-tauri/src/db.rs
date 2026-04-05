@@ -628,6 +628,27 @@ impl Database {
         Ok(out)
     }
 
+    pub fn has_in_flight_background_operations(&self) -> AppResult<bool> {
+        let conn = self.connect()?;
+        let queued = serde_json::to_string(&OperationStatus::Queued)?;
+        let running = serde_json::to_string(&OperationStatus::Running)?;
+        let start = serde_json::to_string(&OperationKind::StartInstallation)?;
+        let stop = serde_json::to_string(&OperationKind::StopInstallation)?;
+        let restart = serde_json::to_string(&OperationKind::RestartInstallation)?;
+        let exists = conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM operations
+                 WHERE status IN (?1, ?2)
+                   AND kind NOT IN (?3, ?4, ?5)
+                 LIMIT 1
+             )",
+            params![queued, running, start, stop, restart],
+            |row| row.get::<_, i64>(0),
+        )? != 0;
+        Ok(exists)
+    }
+
     pub fn append_operation_log(&self, operation_id: &str, line: &str) -> AppResult<()> {
         use std::io::Write;
 

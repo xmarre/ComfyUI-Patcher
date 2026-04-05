@@ -2185,6 +2185,8 @@ async fn patch_core(
     let repo = detail
         .core_repo
         .ok_or_else(|| "core repository is not registered".to_string())?;
+    let background_work_lock = state.background_work_lock();
+    let _background_work_accept_guard = background_work_lock.lock().await;
     let op = state
         .db
         .create_operation(
@@ -2335,6 +2337,8 @@ async fn install_or_patch_frontend(
     } else {
         OperationKind::InstallFrontend
     };
+    let background_work_lock = state.background_work_lock();
+    let _background_work_accept_guard = background_work_lock.lock().await;
     let op = state
         .db
         .create_operation(
@@ -3072,6 +3076,8 @@ async fn install_or_patch_custom_node(
         .get_installation(&input.installation_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "installation not found".to_string())?;
+    let background_work_lock = state.background_work_lock();
+    let _background_work_accept_guard = background_work_lock.lock().await;
     let op = state
         .db
         .create_operation(
@@ -3161,6 +3167,8 @@ async fn adopt_tracked_custom_nodes(
         .get_installation(&input.installation_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "installation not found".to_string())?;
+    let background_work_lock = state.background_work_lock();
+    let _background_work_accept_guard = background_work_lock.lock().await;
     let op = state
         .db
         .create_operation(
@@ -3447,6 +3455,8 @@ async fn set_repo_base_target(
         .get_installation(&repo.installation_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "installation not found".to_string())?;
+    let background_work_lock = state.background_work_lock();
+    let _background_work_accept_guard = background_work_lock.lock().await;
     let op = state
         .db
         .create_operation(
@@ -3569,6 +3579,8 @@ async fn add_repo_overlay(
         .get_installation(&repo.installation_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "installation not found".to_string())?;
+    let background_work_lock = state.background_work_lock();
+    let _background_work_accept_guard = background_work_lock.lock().await;
     let op = state
         .db
         .create_operation(
@@ -3682,6 +3694,8 @@ async fn set_repo_overlay_enabled(
         .get_installation(&repo.installation_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "installation not found".to_string())?;
+    let background_work_lock = state.background_work_lock();
+    let _background_work_accept_guard = background_work_lock.lock().await;
     let op = state
         .db
         .create_operation(
@@ -3793,6 +3807,8 @@ async fn remove_repo_overlay(
         .get_installation(&repo.installation_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "installation not found".to_string())?;
+    let background_work_lock = state.background_work_lock();
+    let _background_work_accept_guard = background_work_lock.lock().await;
     let op = state
         .db
         .create_operation(
@@ -3906,6 +3922,8 @@ async fn move_repo_overlay(
         .get_installation(&repo.installation_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "installation not found".to_string())?;
+    let background_work_lock = state.background_work_lock();
+    let _background_work_accept_guard = background_work_lock.lock().await;
     let op = state
         .db
         .create_operation(
@@ -4024,6 +4042,8 @@ async fn update_repo(
         .get_installation(&repo.installation_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "installation not found".to_string())?;
+    let background_work_lock = state.background_work_lock();
+    let _background_work_accept_guard = background_work_lock.lock().await;
     let op = state
         .db
         .create_operation(
@@ -4130,6 +4150,8 @@ async fn update_all(
         .get_installation(&input.installation_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "installation not found".to_string())?;
+    let background_work_lock = state.background_work_lock();
+    let _background_work_accept_guard = background_work_lock.lock().await;
     let op = state
         .db
         .create_operation(&installation.id, None, OperationKind::UpdateAll, None)
@@ -4301,6 +4323,8 @@ async fn rollback_repo(
         .get_installation(&repo.installation_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "installation not found".to_string())?;
+    let background_work_lock = state.background_work_lock();
+    let _background_work_accept_guard = background_work_lock.lock().await;
     let op = state
         .db
         .create_operation(
@@ -4832,6 +4856,13 @@ mod app_updates {
         let _background_work_guard = background_work_lock.try_lock().map_err(|_| {
             "cannot install update while operations are running".to_string()
         })?;
+        if state
+            .db
+            .has_in_flight_background_operations()
+            .map_err(|e| e.to_string())?
+        {
+            return Err("cannot install update while operations are running".to_string());
+        }
         let update = {
             let mut pending = pending_update.0.lock().await;
             pending
