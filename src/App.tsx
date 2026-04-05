@@ -300,6 +300,9 @@ export default function App() {
   }
 
   async function installAvailableUpdate() {
+    if (isCheckingForUpdates || !availableUpdate) {
+      return;
+    }
     setIsInstallingUpdate(true);
     setUpdateError(null);
     setUpdateDownloadedBytes(0);
@@ -307,6 +310,7 @@ export default function App() {
       await api.installAppUpdate();
       await relaunch();
     } catch (error) {
+      setUpdateCheck(null);
       setUpdateError(toErrorMessage(error));
       setIsInstallingUpdate(false);
     }
@@ -587,7 +591,10 @@ export default function App() {
                   Current {availableUpdate.currentVersion} -&gt; latest {availableUpdate.version}
                 </div>
               </div>
-              <button disabled={isInstallingUpdate} onClick={() => void installAvailableUpdate()}>
+              <button
+                disabled={isInstallingUpdate || isCheckingForUpdates}
+                onClick={() => void installAvailableUpdate()}
+              >
                 {isInstallingUpdate ? "Installing..." : "Download and install"}
               </button>
               {isInstallingUpdate ? (

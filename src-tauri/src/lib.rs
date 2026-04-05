@@ -4817,7 +4817,9 @@ mod app_updates {
                 .ok_or_else(|| "there is no pending update; check for updates first".to_string())?
         };
 
-        shutdown_managed_installations(state.inner().clone()).await;
+        shutdown_managed_installations(state.inner().clone())
+            .await
+            .map_err(|e| e.to_string())?;
 
         let mut started = false;
         update
@@ -4903,24 +4905,35 @@ mod app_updates {
     }
 }
 
-async fn shutdown_managed_installations(state: AppState) {
+async fn shutdown_managed_installations(state: AppState) -> AppResult<()> {
     let installations = match state.db.list_installations() {
         Ok(installations) => installations,
         Err(_) => {
             state.processes.shutdown_all().await;
-            return;
+            return Ok(());
         }
     };
 
     for installation in installations {
         if let Some(profile) = installation.launch_profile.as_ref() {
             if state.processes.stop(&installation.id, profile).await.is_err() {
-                let _ = state.processes.force_stop(&installation.id).await;
+                if let Err(force_stop_error) = state.processes.force_stop(&installation.id).await {
+                    return Err(AppError::Process(format!(
+                        "failed to stop managed installation '{}' during app update handoff: {}",
+                        installation.name, force_stop_error
+                    )));
+                }
             }
         } else {
-            let _ = state.processes.force_stop(&installation.id).await;
+            state.processes.force_stop(&installation.id).await.map_err(|error| {
+                AppError::Process(format!(
+                    "failed to force-stop managed installation '{}' during app update handoff: {}",
+                    installation.name, error
+                ))
+            })?;
         }
     }
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -4974,7 +4987,7 @@ pub fn run() {
         if let tauri::RunEvent::ExitRequested { .. } = event {
             let state = app_handle.state::<AppState>().inner().clone();
             tauri::async_runtime::block_on(async move {
-                shutdown_managed_installations(state).await;
+                let _ = shutdown_managed_installations(state).await;
             });
         }
     });
