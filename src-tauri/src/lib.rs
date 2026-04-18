@@ -1144,11 +1144,12 @@ async fn infer_overlay_base_ref(repo: &ManagedRepo) -> Option<String> {
     )
     .await
     .ok()
-    .flatten();
-    if upstream.is_none() {
+    .flatten()?;
+    let (_, upstream_branch) = upstream.split_once('/')?;
+    if upstream_branch.is_empty() {
         return None;
     }
-    Some(branch)
+    Some(upstream_branch.to_string())
 }
 
 async fn try_resolve_same_repo_pr_without_github_api(
