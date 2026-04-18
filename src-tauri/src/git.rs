@@ -12,6 +12,8 @@ pub struct RepoStatus {
     pub is_detached: bool,
     pub is_dirty: bool,
     pub changed_files: Vec<String>,
+    pub tracked_changed_files: Vec<String>,
+    pub untracked_files: Vec<String>,
     pub origin_url: Option<String>,
 }
 
@@ -167,16 +169,29 @@ pub async fn inspect_repo(path: &Path) -> AppResult<RepoStatus> {
     let status = run_git(path, &["status", "--porcelain", "--branch"]).await?;
     let branch_metadata = parse_status_branch_metadata(&status);
     let status_entries = filter_meaningful_status_entries(parse_status_entries(&status));
+    let tracked_changed_files: Vec<String> = status_entries
+        .iter()
+        .filter(|entry| entry.code != "??")
+        .flat_map(|entry| entry.paths.iter().cloned())
+        .collect();
+    let untracked_files: Vec<String> = status_entries
+        .iter()
+        .filter(|entry| entry.code == "??")
+        .flat_map(|entry| entry.paths.iter().cloned())
+        .collect();
+    let changed_files: Vec<String> = status_entries
+        .iter()
+        .flat_map(|entry| entry.paths.iter().cloned())
+        .collect();
     let origin_url = run_git_allow_fail(path, &["remote", "get-url", "origin"]).await?;
     Ok(RepoStatus {
         head_sha,
         branch: branch_metadata.branch.clone(),
         is_detached: branch_metadata.is_detached,
-        is_dirty: !status_entries.is_empty(),
-        changed_files: status_entries
-            .into_iter()
-            .flat_map(|entry| entry.paths)
-            .collect(),
+        is_dirty: !changed_files.is_empty(),
+        changed_files,
+        tracked_changed_files,
+        untracked_files,
         origin_url: origin_url.and_then(|value| canonicalize_remote(&value)),
     })
 }

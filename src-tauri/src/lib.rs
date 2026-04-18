@@ -729,6 +729,139 @@ async fn ensure_preview_target_available(
     }
 }
 
+fn normalize_repo_relative_path(path: &str) -> String {
+    path.replace('\\', "/")
+        .trim_start_matches("./")
+        .trim_matches('/')
+        .to_string()
+}
+
+fn file_change_writes_path(status: &str) -> bool {
+    !matches!(status.chars().next(), Some('D'))
+}
+
+fn repo_relative_paths_collide(left: &str, right: &str) -> bool {
+    let left = normalize_repo_relative_path(left);
+    let right = normalize_repo_relative_path(right);
+    if left.is_empty() || right.is_empty() {
+        return false;
+    }
+    left == right
+        || left.strip_prefix(&(right.clone() + "/")).is_some()
+        || right.strip_prefix(&(left + "/")).is_some()
+}
+
+async fn incoming_write_paths_for_tracked_state(
+    state: &AppState,
+    installation: &Installation,
+    repo: &ManagedRepo,
+    tracked_state: &TrackedRepoState,
+    current_head: &str,
+) -> AppResult<HashSet<String>> {
+    let path = Path::new(&repo.local_path);
+    let base_resolved = resolve_existing_base_target(state, installation, repo, tracked_state).await?;
+    let base_ref = ensure_preview_target_available(path, &base_resolved).await?;
+    let mut write_paths = HashSet::new();
+
+    for file_change in diff_name_status(path, current_head, &base_ref).await? {
+        if file_change_writes_path(&file_change.status) {
+            write_paths.insert(normalize_repo_relative_path(&file_change.path));
+        }
+    }
+
+    for overlay in tracked_state.overlays.iter().filter(|overlay| overlay.enabled) {
+        let overlay_resolved = resolve_target_for_context(
+            state,
+            installation,
+            &repo.kind,
+            Some(&repo.id),
+            &overlay.source_input,
+        )
+        .await?;
+
+        if !matches!(overlay_resolved.target_kind, TargetKind::Pr) {
+            return Err(AppError::Conflict(format!(
+                "overlay '{}' no longer resolves to a pull request",
+                overlay.source_input
+            )));
+        }
+
+        ensure_remote_matches(repo.canonical_remote.as_deref(), &overlay_resolved)?;
+
+        let overlay_base_ref = overlay_resolved.pr_base_ref.clone().unwrap_or_default();
+        if overlay_base_ref != base_resolved.checkout_ref {
+            return Err(AppError::Conflict(format!(
+                "PR #{} targets base branch '{}' but this stack is based on '{}'",
+                overlay_resolved.pr_number.unwrap_or_default(),
+                overlay_base_ref,
+                base_resolved.checkout_ref
+            )));
+        }
+
+        let overlay_ref = ensure_preview_target_available(path, &overlay_resolved).await?;
+        for file_change in diff_name_status(path, &base_ref, &overlay_ref).await? {
+            if file_change_writes_path(&file_change.status) {
+                write_paths.insert(normalize_repo_relative_path(&file_change.path));
+            }
+        }
+    }
+
+    Ok(write_paths)
+}
+
+async fn preflight_abort_strategy_for_tracked_state(
+    state: &AppState,
+    installation: &Installation,
+    repo: &ManagedRepo,
+    tracked_state: &TrackedRepoState,
+    status: &crate::git::RepoStatus,
+) -> AppResult<()> {
+    if !status.is_dirty {
+        return Ok(());
+    }
+
+    if !status.tracked_changed_files.is_empty() {
+        return Err(AppError::Conflict(format!(
+            "repository has tracked local changes: {}",
+            status.tracked_changed_files.join(", ")
+        )));
+    }
+
+    if status.untracked_files.is_empty() {
+        return Ok(());
+    }
+
+    let current_head = status
+        .head_sha
+        .as_deref()
+        .ok_or_else(|| AppError::Git("repository has no HEAD".to_string()))?;
+    let incoming_write_paths =
+        incoming_write_paths_for_tracked_state(state, installation, repo, tracked_state, current_head)
+            .await?;
+
+    let mut colliding_paths = status
+        .untracked_files
+        .iter()
+        .filter(|untracked| {
+            incoming_write_paths
+                .iter()
+                .any(|incoming| repo_relative_paths_collide(untracked, incoming))
+        })
+        .map(|path| normalize_repo_relative_path(path))
+        .collect::<Vec<_>>();
+    colliding_paths.sort();
+    colliding_paths.dedup();
+
+    if colliding_paths.is_empty() {
+        return Ok(());
+    }
+
+    Err(AppError::Conflict(format!(
+        "repository has untracked local paths that would be overwritten by the incoming update: {}",
+        colliding_paths.join(", ")
+    )))
+}
+
 async fn preview_tracked_state_application(
     state: &AppState,
     installation: &Installation,
@@ -1511,9 +1644,15 @@ async fn apply_repo_tracking_state(
     sync_dependencies: bool,
     write_tracked_target: bool,
 ) -> AppResult<RepoCheckpoint> {
-    let checkpoint =
-        create_checkpoint_if_needed(state, installation, repo, operation_id, dirty_repo_strategy)
-            .await?;
+    let checkpoint = create_checkpoint_if_needed(
+        state,
+        installation,
+        repo,
+        Some(tracked_state),
+        operation_id,
+        dirty_repo_strategy,
+    )
+    .await?;
     log_operation(
         state,
         app,
@@ -2102,6 +2241,7 @@ async fn create_checkpoint_if_needed(
     state: &AppState,
     installation: &Installation,
     repo: &ManagedRepo,
+    tracked_state: Option<&TrackedRepoState>,
     operation_id: &str,
     strategy: &DirtyRepoStrategy,
 ) -> AppResult<RepoCheckpoint> {
@@ -2113,9 +2253,20 @@ async fn create_checkpoint_if_needed(
         .ok_or_else(|| AppError::Git("repository has no HEAD".to_string()))?;
 
     if status.is_dirty && matches!(strategy, DirtyRepoStrategy::Abort) {
-        return Err(AppError::Conflict(
-            "repository has local changes".to_string(),
-        ));
+        let tracked_state = tracked_state.ok_or_else(|| {
+            AppError::Conflict(
+                "tracked target state is required for abort-strategy dirtiness preflight"
+                    .to_string(),
+            )
+        })?;
+        preflight_abort_strategy_for_tracked_state(
+            state,
+            installation,
+            repo,
+            tracked_state,
+            &status,
+        )
+        .await?;
     }
 
     let operation = state
@@ -2142,7 +2293,11 @@ async fn create_checkpoint_if_needed(
         dependency_state.as_ref(),
     )?;
 
-    let stash_ref = ensure_clean_or_apply_strategy(path, strategy).await?;
+    let stash_ref = if matches!(strategy, DirtyRepoStrategy::Abort) {
+        None
+    } else {
+        ensure_clean_or_apply_strategy(path, strategy).await?
+    };
     if let Some(stash_ref) = stash_ref {
         if let Err(db_err) =
             state
@@ -5128,6 +5283,7 @@ async fn run_rollback_repo(
             &state,
             &installation,
             &repo,
+            None,
             &operation_id,
             &DirtyRepoStrategy::Stash,
         )
@@ -5285,6 +5441,7 @@ async fn run_restore_checkpoint(
             &state,
             &installation,
             &repo,
+            None,
             &operation_id,
             &DirtyRepoStrategy::Stash,
         )
