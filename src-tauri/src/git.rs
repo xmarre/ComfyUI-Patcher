@@ -140,6 +140,19 @@ pub async fn run_git(path: &Path, args: &[&str]) -> AppResult<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+async fn run_git_raw(path: &Path, args: &[&str]) -> AppResult<String> {
+    let args_vec: Vec<String> = args.iter().map(|value| (*value).to_string()).collect();
+    let output = output_command("git", &args_vec, Some(path)).await?;
+    if !output.status.success() {
+        return Err(AppError::Git(format!(
+            "{}\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
 pub async fn run_git_allow_fail(path: &Path, args: &[&str]) -> AppResult<Option<String>> {
     let args_vec: Vec<String> = args.iter().map(|value| (*value).to_string()).collect();
     let output = output_command("git", &args_vec, Some(path)).await?;
@@ -169,7 +182,8 @@ pub async fn inspect_repo(path: &Path) -> AppResult<RepoStatus> {
     let status = run_git(path, &["status", "--porcelain", "--branch"]).await?;
     let branch_metadata = parse_status_branch_metadata(&status);
     let status_entries = filter_meaningful_status_entries(parse_status_entries(&status));
-    let untracked_output = run_git(path, &["ls-files", "--others", "--exclude-standard", "-z"]).await?;
+    let untracked_output =
+        run_git_raw(path, &["ls-files", "--others", "--exclude-standard", "-z"]).await?;
     let untracked_files: Vec<String> = untracked_output
         .split('\0')
         .filter(|path| !path.is_empty())
