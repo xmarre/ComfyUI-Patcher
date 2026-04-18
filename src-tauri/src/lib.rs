@@ -1169,8 +1169,13 @@ async fn try_resolve_same_repo_pr_without_github_api(
     let path = Path::new(&repo.local_path);
     let overlay_ref = format!("patcher/pr-{pr_number}");
     let refspec = format!("pull/{pr_number}/head:{overlay_ref}");
-    fetch_refspec(path, "origin", &refspec).await?;
-    let resolved_sha = rev_parse(path, &overlay_ref).await?;
+    if fetch_refspec(path, "origin", &refspec).await.is_err() {
+        return Ok(None);
+    }
+    let resolved_sha = match rev_parse(path, &overlay_ref).await {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
     let short_sha = resolved_sha
         .as_deref()
         .map(|sha| sha.chars().take(7).collect::<String>())
