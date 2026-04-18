@@ -12,6 +12,8 @@ pub struct RepoStatus {
     pub is_detached: bool,
     pub is_dirty: bool,
     pub changed_files: Vec<String>,
+    pub tracked_changed_files: Vec<String>,
+    pub untracked_files: Vec<String>,
     pub origin_url: Option<String>,
 }
 
@@ -138,6 +140,19 @@ pub async fn run_git(path: &Path, args: &[&str]) -> AppResult<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+async fn run_git_raw(path: &Path, args: &[&str]) -> AppResult<String> {
+    let args_vec: Vec<String> = args.iter().map(|value| (*value).to_string()).collect();
+    let output = output_command("git", &args_vec, Some(path)).await?;
+    if !output.status.success() {
+        return Err(AppError::Git(format!(
+            "{}\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
 pub async fn run_git_allow_fail(path: &Path, args: &[&str]) -> AppResult<Option<String>> {
     let args_vec: Vec<String> = args.iter().map(|value| (*value).to_string()).collect();
     let output = output_command("git", &args_vec, Some(path)).await?;
@@ -167,16 +182,30 @@ pub async fn inspect_repo(path: &Path) -> AppResult<RepoStatus> {
     let status = run_git(path, &["status", "--porcelain", "--branch"]).await?;
     let branch_metadata = parse_status_branch_metadata(&status);
     let status_entries = filter_meaningful_status_entries(parse_status_entries(&status));
+    let untracked_output =
+        run_git_raw(path, &["ls-files", "--others", "--exclude-standard", "-z"]).await?;
+    let untracked_files: Vec<String> = untracked_output
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(normalize_status_path)
+        .filter(|path| !is_ignorable_generated_untracked_path(path))
+        .collect();
+    let tracked_changed_files: Vec<String> = status_entries
+        .iter()
+        .filter(|entry| entry.code != "??")
+        .flat_map(|entry| entry.paths.iter().cloned())
+        .collect();
+    let mut changed_files = tracked_changed_files.clone();
+    changed_files.extend(untracked_files.iter().cloned());
     let origin_url = run_git_allow_fail(path, &["remote", "get-url", "origin"]).await?;
     Ok(RepoStatus {
         head_sha,
         branch: branch_metadata.branch.clone(),
         is_detached: branch_metadata.is_detached,
-        is_dirty: !status_entries.is_empty(),
-        changed_files: status_entries
-            .into_iter()
-            .flat_map(|entry| entry.paths)
-            .collect(),
+        is_dirty: !changed_files.is_empty(),
+        changed_files,
+        tracked_changed_files,
+        untracked_files,
         origin_url: origin_url.and_then(|value| canonicalize_remote(&value)),
     })
 }
