@@ -15,6 +15,7 @@ use crate::errors::{AppError, AppResult};
 use crate::git::{
     apply_stash, canonicalize_remote, clone_repo, commits_between, diff_name_status,
     ensure_clean_or_apply_strategy, fetch_origin, fetch_refspec, inspect_repo, is_git_repo,
+    RepoStatus,
     join_custom_node_path, merge_abort, merge_no_ff, preview_merge_conflicts, reset_hard,
     rev_parse, run_git_allow_fail, submodule_update, switch_branch, switch_detached,
     validate_custom_node_dir_name,
@@ -152,11 +153,21 @@ fn checkpoint_label_and_reason(operation: &OperationRecord, repo: &ManagedRepo) 
     (label, reason)
 }
 
+#[derive(Debug, Clone)]
+struct DiscoveredRepoState {
+    repo: ManagedRepo,
+    status: RepoStatus,
+}
+
 async fn discover_repositories_for_installation(
     state: &AppState,
     installation: &Installation,
     prune_missing: bool,
-) -> AppResult<(Option<ManagedRepo>, Option<ManagedRepo>, Vec<ManagedRepo>)> {
+) -> AppResult<(
+    Option<DiscoveredRepoState>,
+    Option<DiscoveredRepoState>,
+    Vec<DiscoveredRepoState>,
+)> {
     let root = PathBuf::from(&installation.comfy_root);
     let mut core_repo = None;
     let mut frontend_repo = None;
@@ -170,7 +181,7 @@ async fn discover_repositories_for_installation(
 
     if !ignored_paths.contains(&root_string) && has_git_marker(&root) && is_git_repo(&root).await {
         let status = inspect_repo(&root).await?;
-        core_repo = Some(state.db.upsert_repo(
+        let repo = state.db.upsert_repo(
             &installation.id,
             RepoKind::Core,
             "ComfyUI",
@@ -180,7 +191,8 @@ async fn discover_repositories_for_installation(
             status.branch.as_deref(),
             status.is_detached,
             status.is_dirty,
-        )?);
+        )?;
+        core_repo = Some(DiscoveredRepoState { repo, status });
     }
 
     if let Some(frontend_settings) = installation.frontend_settings.as_ref() {
@@ -191,7 +203,7 @@ async fn discover_repositories_for_installation(
             && is_git_repo(&frontend_root).await
         {
             let status = inspect_repo(&frontend_root).await?;
-            frontend_repo = Some(state.db.upsert_repo(
+            let repo = state.db.upsert_repo(
                 &installation.id,
                 RepoKind::Frontend,
                 "ComfyUI Frontend",
@@ -201,7 +213,8 @@ async fn discover_repositories_for_installation(
                 status.branch.as_deref(),
                 status.is_detached,
                 status.is_dirty,
-            )?);
+            )?;
+            frontend_repo = Some(DiscoveredRepoState { repo, status });
         }
     }
 
@@ -235,19 +248,19 @@ async fn discover_repositories_for_installation(
                 status.is_detached,
                 status.is_dirty,
             )?;
-            custom_node_repos.push(repo);
+            custom_node_repos.push(DiscoveredRepoState { repo, status });
         }
     }
 
     let mut discovered_paths: HashSet<String> = HashSet::new();
     if let Some(repo) = core_repo.as_ref() {
-        discovered_paths.insert(repo.local_path.clone());
+        discovered_paths.insert(repo.repo.local_path.clone());
     }
     if let Some(repo) = frontend_repo.as_ref() {
-        discovered_paths.insert(repo.local_path.clone());
+        discovered_paths.insert(repo.repo.local_path.clone());
     }
     for repo in &custom_node_repos {
-        discovered_paths.insert(repo.local_path.clone());
+        discovered_paths.insert(repo.repo.local_path.clone());
     }
 
     if prune_missing {
@@ -419,10 +432,12 @@ async fn enrich_managed_repo(
     state: &AppState,
     installation: &Installation,
     repo: &ManagedRepo,
+    precomputed_status: Option<RepoStatus>,
 ) -> AppResult<ManagedRepo> {
     let mut repo = repo.clone();
     let path = PathBuf::from(&repo.local_path);
     repo.last_scanned_at = Some(crate::util::now_rfc3339());
+    repo.live_warnings.clear();
 
     if !path.exists() {
         repo.current_head_sha = None;
@@ -435,18 +450,21 @@ async fn enrich_managed_repo(
         return Ok(repo);
     }
 
-    if !has_git_marker(&path) || !is_git_repo(&path).await {
-        repo.current_head_sha = None;
-        repo.current_branch = None;
-        repo.changed_files.clear();
-        repo.dependency_state = None;
-        repo.live_status = RepoLiveStatus::NotGit;
-        repo.live_warnings
-            .push("Tracked path is no longer a git repository.".to_string());
-        return Ok(repo);
-    }
-
-    let status = inspect_repo(&path).await?;
+    let status = if let Some(status) = precomputed_status {
+        status
+    } else {
+        if !has_git_marker(&path) || !is_git_repo(&path).await {
+            repo.current_head_sha = None;
+            repo.current_branch = None;
+            repo.changed_files.clear();
+            repo.dependency_state = None;
+            repo.live_status = RepoLiveStatus::NotGit;
+            repo.live_warnings
+                .push("Tracked path is no longer a git repository.".to_string());
+            return Ok(repo);
+        }
+        inspect_repo(&path).await?
+    };
     state.db.update_repo_state(
         &repo.id,
         status.origin_url.as_deref(),
@@ -555,11 +573,28 @@ async fn hydrate_installation_detail(
         .db
         .get_installation(installation_id)?
         .ok_or_else(|| AppError::NotFound("installation not found".to_string()))?;
-    let _ = discover_repositories_for_installation(state, &installation, false).await?;
+    let (core_repo, frontend_repo, discovered_custom_nodes) =
+        discover_repositories_for_installation(state, &installation, false).await?;
+    let mut discovered_statuses = HashMap::new();
+    if let Some(repo) = core_repo {
+        discovered_statuses.insert(repo.repo.id.clone(), repo.status);
+    }
+    if let Some(repo) = frontend_repo {
+        discovered_statuses.insert(repo.repo.id.clone(), repo.status);
+    }
+    for repo in discovered_custom_nodes {
+        discovered_statuses.insert(repo.repo.id.clone(), repo.status);
+    }
     let mut detail = state.db.get_installation_detail(installation_id)?;
 
     if let Some(repo) = detail.core_repo.take() {
-        let repo = enrich_managed_repo(state, &installation, &repo).await?;
+        let repo = enrich_managed_repo(
+            state,
+            &installation,
+            &repo,
+            discovered_statuses.get(&repo.id).cloned(),
+        )
+        .await?;
         for warning in &repo.live_warnings {
             detail
                 .warnings
@@ -569,7 +604,13 @@ async fn hydrate_installation_detail(
     }
 
     if let Some(repo) = detail.frontend_repo.take() {
-        let repo = enrich_managed_repo(state, &installation, &repo).await?;
+        let repo = enrich_managed_repo(
+            state,
+            &installation,
+            &repo,
+            discovered_statuses.get(&repo.id).cloned(),
+        )
+        .await?;
         for warning in &repo.live_warnings {
             detail
                 .warnings
@@ -580,7 +621,13 @@ async fn hydrate_installation_detail(
 
     let mut enriched_custom_nodes = Vec::with_capacity(detail.custom_node_repos.len());
     for repo in detail.custom_node_repos.drain(..) {
-        let repo = enrich_managed_repo(state, &installation, &repo).await?;
+        let repo = enrich_managed_repo(
+            state,
+            &installation,
+            &repo,
+            discovered_statuses.get(&repo.id).cloned(),
+        )
+        .await?;
         for warning in &repo.live_warnings {
             detail
                 .warnings
@@ -689,7 +736,7 @@ async fn preview_tracked_state_application(
     tracked_state: &TrackedRepoState,
     action: &str,
 ) -> AppResult<RepoActionPreview> {
-    let live_repo = enrich_managed_repo(state, installation, repo).await?;
+    let live_repo = enrich_managed_repo(state, installation, repo, None).await?;
     let path = Path::new(&repo.local_path);
     let base_resolved = resolve_existing_base_target(state, installation, repo, tracked_state).await?;
     let enabled_overlays: Vec<&TrackedPrOverlay> =
@@ -2434,9 +2481,12 @@ async fn register_installation_impl(
         discover_repositories_for_installation(state, &installation, true).await?;
     Ok(RegisterInstallationResult {
         installation,
-        core_repo,
-        frontend_repo,
-        discovered_custom_nodes,
+        core_repo: core_repo.map(|repo| repo.repo),
+        frontend_repo: frontend_repo.map(|repo| repo.repo),
+        discovered_custom_nodes: discovered_custom_nodes
+            .into_iter()
+            .map(|repo| repo.repo)
+            .collect(),
         warnings: Vec::new(),
     })
 }
@@ -5350,7 +5400,7 @@ async fn compare_checkpoint(
     }
     let repo_lock = state.repo_lock(&repo.id).await;
     let _guard = repo_lock.lock().await;
-    let live_repo = enrich_managed_repo(&state, &installation, &repo)
+    let live_repo = enrich_managed_repo(&state, &installation, &repo, None)
         .await
         .map_err(|e| e.to_string())?;
     let mut commits = Vec::new();

@@ -21,10 +21,16 @@ struct StatusEntry {
     paths: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct StatusBranchMetadata {
+    branch: Option<String>,
+    is_detached: bool,
+}
+
 fn parse_status_entries(output: &str) -> Vec<StatusEntry> {
     let mut entries = Vec::new();
     for line in output.lines() {
-        if line.len() < 4 {
+        if line.starts_with("## ") || line.len() < 4 {
             continue;
         }
         let code = line[..2].to_string();
@@ -59,6 +65,36 @@ fn normalize_status_path(path: &str) -> String {
     path.replace('\\', "/")
         .trim_start_matches("./")
         .to_string()
+}
+
+fn parse_status_branch_metadata(output: &str) -> StatusBranchMetadata {
+    let mut metadata = StatusBranchMetadata::default();
+    for line in output.lines() {
+        let Some(summary) = line.strip_prefix("## ") else {
+            continue;
+        };
+        let branch_summary = summary.split("...").next().unwrap_or(summary).trim();
+        if branch_summary.eq_ignore_ascii_case("HEAD (no branch)")
+            || branch_summary.eq_ignore_ascii_case("HEAD")
+        {
+            metadata.branch = None;
+            metadata.is_detached = true;
+            continue;
+        }
+        if let Some(branch) = branch_summary.strip_prefix("No commits yet on ") {
+            metadata.branch = Some(branch.trim().to_string());
+            metadata.is_detached = false;
+            continue;
+        }
+        if let Some(branch) = branch_summary.strip_prefix("Initial commit on ") {
+            metadata.branch = Some(branch.trim().to_string());
+            metadata.is_detached = false;
+            continue;
+        }
+        metadata.branch = Some(branch_summary.to_string());
+        metadata.is_detached = false;
+    }
+    metadata
 }
 
 fn is_ignorable_generated_untracked_path(path: &str) -> bool {
@@ -128,14 +164,14 @@ async fn run_git_no_cwd(args: &[&str]) -> AppResult<String> {
 
 pub async fn inspect_repo(path: &Path) -> AppResult<RepoStatus> {
     let head_sha = run_git_allow_fail(path, &["rev-parse", "HEAD"]).await?;
-    let branch = run_git_allow_fail(path, &["symbolic-ref", "--short", "-q", "HEAD"]).await?;
-    let status = run_git(path, &["status", "--porcelain"]).await?;
+    let status = run_git(path, &["status", "--porcelain", "--branch"]).await?;
+    let branch_metadata = parse_status_branch_metadata(&status);
     let status_entries = filter_meaningful_status_entries(parse_status_entries(&status));
     let origin_url = run_git_allow_fail(path, &["remote", "get-url", "origin"]).await?;
     Ok(RepoStatus {
         head_sha,
-        branch: branch.clone(),
-        is_detached: branch.is_none(),
+        branch: branch_metadata.branch.clone(),
+        is_detached: branch_metadata.is_detached,
         is_dirty: !status_entries.is_empty(),
         changed_files: status_entries
             .into_iter()
@@ -637,6 +673,31 @@ mod tests {
     fn ignores_missing_ls_remote_default_branch() {
         let output = "0123456789abcdef\tHEAD";
         assert_eq!(parse_ls_remote_default_branch(output), None);
+    }
+
+    #[test]
+    fn parses_status_branch_metadata_for_named_branch() {
+        let metadata = parse_status_branch_metadata("## main...origin/main\n M src/lib.rs\n");
+        assert_eq!(metadata.branch.as_deref(), Some("main"));
+        assert!(!metadata.is_detached);
+    }
+
+    #[test]
+    fn parses_status_branch_metadata_for_detached_head() {
+        let metadata = parse_status_branch_metadata("## HEAD (no branch)\n M src/lib.rs\n");
+        assert_eq!(metadata.branch, None);
+        assert!(metadata.is_detached);
+    }
+
+    #[test]
+    fn status_entries_ignore_branch_header_lines() {
+        let entries = parse_status_entries(
+            "## main...origin/main\n M src/lib.rs\n?? __pycache__/mod.pyc\n",
+        );
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].paths, vec!["src/lib.rs".to_string()]);
+        assert_eq!(entries[1].paths, vec!["__pycache__/mod.pyc".to_string()]);
     }
 
     #[test]
