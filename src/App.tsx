@@ -718,6 +718,23 @@ export default function App() {
     }
     return customNodeRepos.filter((repo) => repoSearchText(repo).includes(normalizedQuery));
   }, [customNodeRepos, managedCustomNodeQuery]);
+  const repairTrackedRepos = async () => {
+    if (!selectedInstallation) {
+      return;
+    }
+    if (
+      !window.confirm(
+        `Re-materialize ${trackedRepoCount} tracked repo${trackedRepoCount === 1 ? "" : "s"} for ${selectedInstallation.name} with hard reset? This discards tracked local worktree changes in managed repos and rebuilds their tracked checkout/overlay state.`
+      )
+    ) {
+      return;
+    }
+    await api.rematerializeTrackedRepos({
+      installationId: selectedInstallation.id,
+      syncDependencies: false,
+      restartAfterSuccess: false
+    });
+  };
 
   return (
     <div className="app-shell">
@@ -971,22 +988,7 @@ export default function App() {
                   <button
                     className="secondary"
                     disabled={!trackedRepoCount}
-                    onClick={() =>
-                      void runAction(async () => {
-                        if (
-                          !window.confirm(
-                            `Re-materialize ${trackedRepoCount} tracked repo${trackedRepoCount === 1 ? "" : "s"} for ${selectedInstallation.name} with hard reset? This discards tracked local worktree changes in managed repos and rebuilds their tracked checkout/overlay state.`
-                          )
-                        ) {
-                          return;
-                        }
-                        await api.rematerializeTrackedRepos({
-                          installationId: selectedInstallation.id,
-                          syncDependencies: false,
-                          restartAfterSuccess: false
-                        });
-                      })
-                    }
+                    onClick={() => void runAction(repairTrackedRepos)}
                   >
                     Repair tracked repos
                   </button>
@@ -1093,22 +1095,7 @@ export default function App() {
                       <button
                         className="secondary"
                         type="button"
-                        onClick={() =>
-                          void runAction(async () => {
-                            if (
-                              !window.confirm(
-                                `Re-materialize ${trackedRepoCount} tracked repo${trackedRepoCount === 1 ? "" : "s"} for ${selectedInstallation.name} with hard reset? This discards tracked local worktree changes in managed repos and rebuilds their tracked checkout/overlay state.`
-                              )
-                            ) {
-                              return;
-                            }
-                            await api.rematerializeTrackedRepos({
-                              installationId: selectedInstallation.id,
-                              syncDependencies: false,
-                              restartAfterSuccess: false
-                            });
-                          })
-                        }
+                        onClick={() => void runAction(repairTrackedRepos)}
                       >
                         Repair tracked repos
                       </button>

@@ -5446,20 +5446,24 @@ async fn run_rematerialize_tracked_repos(
     .await;
 
     if let Err(err) = result {
-        state.db.finish_operation(
-            &operation_id,
-            OperationStatus::Failed,
-            Some(&err.to_string()),
-            None,
-        )?;
-        log_operation(
-            &state,
-            &app,
-            &operation_id,
-            "error",
-            "error",
-            err.to_string(),
-        );
+        if let Some(op) = state.db.get_operation(&operation_id)? {
+            if matches!(op.status, OperationStatus::Running) {
+                state.db.finish_operation(
+                    &operation_id,
+                    OperationStatus::Failed,
+                    Some(&err.to_string()),
+                    op.checkpoint_id.as_deref(),
+                )?;
+                log_operation(
+                    &state,
+                    &app,
+                    &operation_id,
+                    "error",
+                    "error",
+                    err.to_string(),
+                );
+            }
+        }
         return Err(err);
     }
     Ok(())
@@ -5571,8 +5575,10 @@ async fn run_rollback_repo(
             input.sync_dependencies,
         )
         .await?;
-        ensure_repo_clean_after_patcher_mutation(path, "patcher-controlled rollback restore")
-            .await?;
+        if !(input.restore_stash && checkpoint.stash_created) {
+            ensure_repo_clean_after_patcher_mutation(path, "patcher-controlled rollback restore")
+                .await?;
+        }
         refresh_repo_state(&state, &repo.id).await?;
         maybe_restart_installation(
             &state,
@@ -5727,8 +5733,10 @@ async fn run_restore_checkpoint(
             input.sync_dependencies,
         )
         .await?;
-        ensure_repo_clean_after_patcher_mutation(path, "patcher-controlled checkpoint restore")
-            .await?;
+        if !(input.restore_stash && checkpoint.stash_created) {
+            ensure_repo_clean_after_patcher_mutation(path, "patcher-controlled checkpoint restore")
+                .await?;
+        }
         refresh_repo_state(&state, &repo.id).await?;
         maybe_restart_installation(
             &state,
