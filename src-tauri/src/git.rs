@@ -32,18 +32,20 @@ fn parse_status_entries(output: &str) -> Vec<StatusEntry> {
         if path.is_empty() {
             continue;
         }
-        if let Some((old_path, new_path)) = path.split_once(" -> ") {
-            let old_path = old_path.trim();
-            let new_path = new_path.trim();
-            let paths = [old_path, new_path]
-                .into_iter()
-                .filter(|value| !value.is_empty())
-                .map(|value| value.to_string())
-                .collect::<Vec<_>>();
-            if !paths.is_empty() {
-                entries.push(StatusEntry { code, paths });
+        if code == "R " || code.starts_with('R') {
+            if let Some((old_path, new_path)) = path.split_once(" -> ") {
+                let old_path = old_path.trim();
+                let new_path = new_path.trim();
+                let paths = [old_path, new_path]
+                    .into_iter()
+                    .filter(|value| !value.is_empty())
+                    .map(|value| value.to_string())
+                    .collect::<Vec<_>>();
+                if !paths.is_empty() {
+                    entries.push(StatusEntry { code, paths });
+                }
+                continue;
             }
-            continue;
         }
         entries.push(StatusEntry {
             code,
