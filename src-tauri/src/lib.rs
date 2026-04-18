@@ -1120,7 +1120,7 @@ fn parse_github_pr_url_same_repo(input: &str) -> Option<(String, u64)> {
 
 async fn infer_overlay_base_ref(repo: &ManagedRepo) -> Option<String> {
     if let Some(base_ref) = repo.tracked_state.as_ref().and_then(|state| {
-        if branch_like_target_kind(&state.base.target_kind) {
+        if matches!(state.base.target_kind, TargetKind::Branch | TargetKind::NamedRef) {
             Some(state.base.checkout_ref.clone())
         } else {
             None
@@ -1148,11 +1148,14 @@ async fn try_resolve_same_repo_pr_without_github_api(
     let Some(repo) = repo else {
         return Ok(None);
     };
+    let path = Path::new(&repo.local_path);
     let Some((pr_repo_url, pr_number)) = parse_github_pr_url_same_repo(input) else {
         return Ok(None);
     };
-    let Some(current_remote) = repo
-        .canonical_remote
+    let Some(current_remote) = inspect_repo(path)
+        .await
+        .ok()
+        .and_then(|status| status.origin_url)
         .as_deref()
         .and_then(canonicalize_remote)
     else {
@@ -1168,7 +1171,6 @@ async fn try_resolve_same_repo_pr_without_github_api(
         return Ok(None);
     };
 
-    let path = Path::new(&repo.local_path);
     let overlay_ref = format!("patcher/pr-{pr_number}");
     let resolved_sha = rev_parse(path, &overlay_ref).await.ok().flatten();
     let summary_label = resolved_sha
