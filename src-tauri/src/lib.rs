@@ -1138,6 +1138,16 @@ async fn infer_overlay_base_ref(repo: &ManagedRepo) -> Option<String> {
     if branch == STACK_BRANCH_NAME {
         return None;
     }
+    let upstream = run_git_allow_fail(
+        path,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+    )
+    .await
+    .ok()
+    .flatten();
+    if upstream.is_none() {
+        return None;
+    }
     Some(branch)
 }
 
