@@ -1100,6 +1100,99 @@ async fn preview_resolved_install_target(
     })
 }
 
+fn parse_github_pr_url_same_repo(input: &str) -> Option<(String, u64)> {
+    let parsed = url::Url::parse(input.trim()).ok()?;
+    if !parsed.host_str()?.eq_ignore_ascii_case("github.com") {
+        return None;
+    }
+    let segments: Vec<_> = parsed
+        .path_segments()?
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if segments.len() < 4 || segments[2] != "pull" {
+        return None;
+    }
+    let owner = segments[0].to_ascii_lowercase();
+    let repo = segments[1].trim_end_matches(".git").to_ascii_lowercase();
+    let pr_number = segments[3].parse().ok()?;
+    Some((format!("https://github.com/{owner}/{repo}"), pr_number))
+}
+
+fn infer_overlay_base_ref(repo: &ManagedRepo) -> Option<String> {
+    repo.tracked_state
+        .as_ref()
+        .and_then(|state| {
+            if branch_like_target_kind(&state.base.target_kind) {
+                Some(state.base.checkout_ref.clone())
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            repo.current_branch.as_ref().and_then(|branch| {
+                if repo.is_detached || branch == STACK_BRANCH_NAME {
+                    None
+                } else {
+                    Some(branch.clone())
+                }
+            })
+        })
+}
+
+async fn try_resolve_same_repo_pr_without_github_api(
+    repo: Option<&ManagedRepo>,
+    input: &str,
+) -> AppResult<Option<ResolvedTarget>> {
+    let Some(repo) = repo else {
+        return Ok(None);
+    };
+    let Some((pr_repo_url, pr_number)) = parse_github_pr_url_same_repo(input) else {
+        return Ok(None);
+    };
+    let Some(current_remote) = repo
+        .canonical_remote
+        .as_deref()
+        .and_then(canonicalize_remote)
+    else {
+        return Ok(None);
+    };
+    let Some(pr_remote) = canonicalize_remote(&pr_repo_url) else {
+        return Ok(None);
+    };
+    if current_remote != pr_remote {
+        return Ok(None);
+    }
+    let Some(base_ref) = infer_overlay_base_ref(repo) else {
+        return Ok(None);
+    };
+
+    let path = Path::new(&repo.local_path);
+    let overlay_ref = format!("patcher/pr-{pr_number}");
+    let refspec = format!("pull/{pr_number}/head:{overlay_ref}");
+    fetch_refspec(path, "origin", &refspec).await?;
+    let resolved_sha = rev_parse(path, &overlay_ref).await?;
+    let short_sha = resolved_sha
+        .as_deref()
+        .map(|sha| sha.chars().take(7).collect::<String>())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    Ok(Some(ResolvedTarget {
+        source_input: input.trim().to_string(),
+        target_kind: TargetKind::Pr,
+        canonical_repo_url: current_remote.clone(),
+        fetch_url: format!("{current_remote}.git"),
+        checkout_ref: overlay_ref,
+        resolved_sha,
+        pr_number: Some(pr_number),
+        pr_base_repo_url: Some(current_remote),
+        pr_base_ref: Some(base_ref),
+        pr_head_repo_url: None,
+        pr_head_ref: None,
+        summary_label: format!("PR #{pr_number} @ {short_sha}"),
+        suggested_local_dir_name: String::new(),
+    }))
+}
+
 async fn resolve_target_for_context(
     state: &AppState,
     installation: &Installation,
@@ -1125,6 +1218,10 @@ async fn resolve_target_for_context(
             RepoKind::CustomNode => None,
         },
     };
+    if let Some(resolved) = try_resolve_same_repo_pr_without_github_api(repo.as_ref(), input).await?
+    {
+        return Ok(resolved);
+    }
     let current_remote = repo.as_ref().and_then(|r| r.canonical_remote.as_deref());
     let current_repo_path = repo.as_ref().map(|r| Path::new(&r.local_path));
     state
