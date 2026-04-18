@@ -169,20 +169,20 @@ pub async fn inspect_repo(path: &Path) -> AppResult<RepoStatus> {
     let status = run_git(path, &["status", "--porcelain", "--branch"]).await?;
     let branch_metadata = parse_status_branch_metadata(&status);
     let status_entries = filter_meaningful_status_entries(parse_status_entries(&status));
+    let untracked_output = run_git(path, &["ls-files", "--others", "--exclude-standard", "-z"]).await?;
+    let untracked_files: Vec<String> = untracked_output
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(normalize_status_path)
+        .filter(|path| !is_ignorable_generated_untracked_path(path))
+        .collect();
     let tracked_changed_files: Vec<String> = status_entries
         .iter()
         .filter(|entry| entry.code != "??")
         .flat_map(|entry| entry.paths.iter().cloned())
         .collect();
-    let untracked_files: Vec<String> = status_entries
-        .iter()
-        .filter(|entry| entry.code == "??")
-        .flat_map(|entry| entry.paths.iter().cloned())
-        .collect();
-    let changed_files: Vec<String> = status_entries
-        .iter()
-        .flat_map(|entry| entry.paths.iter().cloned())
-        .collect();
+    let mut changed_files = tracked_changed_files.clone();
+    changed_files.extend(untracked_files.iter().cloned());
     let origin_url = run_git_allow_fail(path, &["remote", "get-url", "origin"]).await?;
     Ok(RepoStatus {
         head_sha,

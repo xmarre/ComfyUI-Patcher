@@ -729,6 +729,16 @@ async fn ensure_preview_target_available(
     }
 }
 
+#[cfg(windows)]
+fn normalize_repo_relative_path(path: &str) -> String {
+    path.replace('\\', "/")
+        .trim_start_matches("./")
+        .trim_matches('/')
+        .to_ascii_lowercase()
+        .to_string()
+}
+
+#[cfg(not(windows))]
 fn normalize_repo_relative_path(path: &str) -> String {
     path.replace('\\', "/")
         .trim_start_matches("./")
