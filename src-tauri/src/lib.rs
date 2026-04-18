@@ -159,6 +159,10 @@ struct DiscoveredRepoState {
     status: RepoStatus,
 }
 
+fn repo_has_tracked_local_changes(status: &RepoStatus) -> bool {
+    !status.tracked_changed_files.is_empty()
+}
+
 async fn discover_repositories_for_installation(
     state: &AppState,
     installation: &Installation,
@@ -190,7 +194,7 @@ async fn discover_repositories_for_installation(
             status.head_sha.as_deref(),
             status.branch.as_deref(),
             status.is_detached,
-            status.is_dirty,
+            repo_has_tracked_local_changes(&status),
         )?;
         core_repo = Some(DiscoveredRepoState { repo, status });
     }
@@ -212,7 +216,7 @@ async fn discover_repositories_for_installation(
                 status.head_sha.as_deref(),
                 status.branch.as_deref(),
                 status.is_detached,
-                status.is_dirty,
+                repo_has_tracked_local_changes(&status),
             )?;
             frontend_repo = Some(DiscoveredRepoState { repo, status });
         }
@@ -246,7 +250,7 @@ async fn discover_repositories_for_installation(
                 status.head_sha.as_deref(),
                 status.branch.as_deref(),
                 status.is_detached,
-                status.is_dirty,
+                repo_has_tracked_local_changes(&status),
             )?;
             custom_node_repos.push(DiscoveredRepoState { repo, status });
         }
@@ -350,7 +354,7 @@ async fn discover_custom_node_repos_best_effort(
             status.head_sha.as_deref(),
             status.branch.as_deref(),
             status.is_detached,
-            status.is_dirty,
+            repo_has_tracked_local_changes(&status),
         )?;
         custom_node_repos.push(repo);
     }
@@ -471,27 +475,29 @@ async fn enrich_managed_repo(
         status.head_sha.as_deref(),
         status.branch.as_deref(),
         status.is_detached,
-        status.is_dirty,
+        repo_has_tracked_local_changes(&status),
     )?;
+
+    let tracked_dirty = repo_has_tracked_local_changes(&status);
 
     repo.canonical_remote = status.origin_url.clone();
     repo.current_head_sha = status.head_sha.clone();
     repo.current_branch = status.branch.clone();
     repo.is_detached = status.is_detached;
-    repo.is_dirty = status.is_dirty;
-    repo.changed_files = status.changed_files.clone();
+    repo.is_dirty = tracked_dirty;
+    repo.changed_files = status.tracked_changed_files.clone();
     repo.dependency_state =
-        build_repo_dependency_state(installation, &repo, &path, &status.changed_files);
+        build_repo_dependency_state(installation, &repo, &path, &status.tracked_changed_files);
 
-    let mut live_status = if status.is_dirty {
+    let mut live_status = if tracked_dirty {
         RepoLiveStatus::Dirty
     } else {
         RepoLiveStatus::Clean
     };
 
-    if status.is_dirty {
+    if tracked_dirty {
         repo.live_warnings
-            .push("Worktree has local changes outside ComfyUI Patcher.".to_string());
+            .push("Worktree has local tracked changes outside ComfyUI Patcher.".to_string());
     }
 
     if let Some(expected_sha) = repo.tracked_target_resolved_sha.as_deref() {
@@ -651,7 +657,7 @@ async fn refresh_repo_state(state: &AppState, repo_id: &str) -> AppResult<()> {
         status.head_sha.as_deref(),
         status.branch.as_deref(),
         status.is_detached,
-        status.is_dirty,
+        repo_has_tracked_local_changes(&status),
     )?;
     Ok(())
 }
@@ -1924,7 +1930,7 @@ async fn find_existing_custom_node_repo_by_remote(
                 status.head_sha.as_deref(),
                 status.branch.as_deref(),
                 status.is_detached,
-                status.is_dirty,
+                repo_has_tracked_local_changes(&status),
             )?;
             if !matches.iter().any(|existing| existing.id == repo.id) {
                 matches.push(repo);
@@ -3360,7 +3366,7 @@ async fn run_install_or_patch_frontend(
                             status.head_sha.as_deref(),
                             status.branch.as_deref(),
                             status.is_detached,
-                            status.is_dirty,
+                            repo_has_tracked_local_changes(&status),
                         )?;
                         let repo_lock = state.repo_lock(&repo.id).await;
                         let _guard = repo_lock.lock().await;
@@ -3486,7 +3492,7 @@ async fn run_install_or_patch_frontend(
                 status.head_sha.as_deref(),
                 status.branch.as_deref(),
                 status.is_detached,
-                status.is_dirty,
+                repo_has_tracked_local_changes(&status),
             )?;
             if replaced_backup_path.is_some() {
                 rollback_repo_id = Some(repo.id.clone());
@@ -3752,7 +3758,7 @@ async fn execute_install_or_patch_custom_node(
                     status.head_sha.as_deref(),
                     status.branch.as_deref(),
                     status.is_detached,
-                    status.is_dirty,
+                    repo_has_tracked_local_changes(&status),
                 )?;
                 let repo_lock = state.repo_lock(&repo.id).await;
                 let _guard = repo_lock.lock().await;
@@ -3870,7 +3876,7 @@ async fn execute_install_or_patch_custom_node(
             status.head_sha.as_deref(),
             status.branch.as_deref(),
             status.is_detached,
-            status.is_dirty,
+            repo_has_tracked_local_changes(&status),
         )?;
         if tracking_backup_path.is_some() {
             rollback_repo_id = Some(repo.id.clone());
