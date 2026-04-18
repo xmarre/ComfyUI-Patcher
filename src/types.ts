@@ -9,6 +9,7 @@ export type OperationKind =
   | "install_custom_node"
   | "patch_custom_node"
   | "manage_repo_stack"
+  | "rematerialize_tracked_repos"
   | "uninstall_repo"
   | "disable_repo"
   | "untrack_repo"
@@ -404,6 +405,12 @@ export type MoveRepoOverlayInput = {
 export type UpdateAllInput = {
   installationId: string;
   dirtyRepoStrategy: DirtyRepoStrategy;
+  syncDependencies: boolean;
+  restartAfterSuccess: boolean;
+};
+
+export type RematerializeTrackedReposInput = {
+  installationId: string;
   syncDependencies: boolean;
   restartAfterSuccess: boolean;
 };
