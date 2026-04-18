@@ -813,14 +813,7 @@ async fn incoming_write_paths_for_tracked_state(
     }
 
     for overlay in tracked_state.overlays.iter().filter(|overlay| overlay.enabled) {
-        let overlay_resolved = resolve_target_for_context(
-            state,
-            installation,
-            &repo.kind,
-            Some(&repo.id),
-            &overlay.source_input,
-        )
-        .await?;
+        let overlay_resolved = resolve_stored_overlay_target(overlay);
 
         if !matches!(overlay_resolved.target_kind, TargetKind::Pr) {
             return Err(AppError::Conflict(format!(
@@ -1009,14 +1002,7 @@ async fn preview_tracked_state_application(
         };
         if let Some(base_probe_head) = base_probe_head.as_deref() {
             for overlay in &enabled_overlays {
-                let overlay_resolved = resolve_target_for_context(
-                    state,
-                    installation,
-                    &repo.kind,
-                    Some(&repo.id),
-                    &overlay.source_input,
-                )
-                .await?;
+                let overlay_resolved = resolve_stored_overlay_target(overlay);
                 match ensure_preview_target_available(path, &overlay_resolved).await {
                     Ok(overlay_ref) => match preview_merge_conflicts(path, base_probe_head, &overlay_ref).await {
                         Ok(next_conflict_files) => conflict_files.extend(next_conflict_files),
@@ -1203,6 +1189,27 @@ fn make_tracked_base_target(resolved: &ResolvedTarget) -> AppResult<TrackedBaseT
 
 fn make_overlay_id(pr_number: u64) -> String {
     format!("pr-{pr_number}")
+}
+
+fn resolve_stored_overlay_target(overlay: &TrackedPrOverlay) -> ResolvedTarget {
+    let canonical_repo_url = canonicalize_remote(&overlay.pr_base_repo_url)
+        .or_else(|| canonicalize_remote(&overlay.canonical_repo_url))
+        .unwrap_or_else(|| overlay.pr_base_repo_url.clone());
+    ResolvedTarget {
+        source_input: overlay.source_input.clone(),
+        target_kind: TargetKind::Pr,
+        canonical_repo_url: canonical_repo_url.clone(),
+        fetch_url: format!("{canonical_repo_url}.git"),
+        checkout_ref: format!("patcher/pr-{}", overlay.pr_number),
+        resolved_sha: overlay.resolved_sha.clone(),
+        pr_number: Some(overlay.pr_number),
+        pr_base_repo_url: Some(overlay.pr_base_repo_url.clone()),
+        pr_base_ref: Some(overlay.pr_base_ref.clone()),
+        pr_head_repo_url: overlay.pr_head_repo_url.clone(),
+        pr_head_ref: overlay.pr_head_ref.clone(),
+        summary_label: overlay.summary_label.clone(),
+        suggested_local_dir_name: String::new(),
+    }
 }
 
 fn make_tracked_overlay(resolved: &ResolvedTarget, position: usize) -> AppResult<TrackedPrOverlay> {
@@ -1545,22 +1552,7 @@ async fn materialize_tracked_state(
             continue;
         }
 
-        let overlay_resolved = match resolve_target_for_context(
-            state,
-            installation,
-            &repo.kind,
-            Some(&repo.id),
-            &overlay.source_input,
-        )
-        .await
-        {
-            Ok(resolved) => resolved,
-            Err(err) => {
-                overlay.last_apply_status = Some(OverlayApplyStatus::Error);
-                overlay.last_error = Some(err.to_string());
-                return Err((next_state, err));
-            }
-        };
+        let overlay_resolved = resolve_stored_overlay_target(overlay);
 
         if !matches!(overlay_resolved.target_kind, TargetKind::Pr) {
             let err = AppError::Conflict(format!(
