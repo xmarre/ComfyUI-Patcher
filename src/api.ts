@@ -17,6 +17,7 @@ import type {
   RepoActionPreview,
   RepoCheckpointComparison,
   RepoLifecycleInput,
+  RematerializeTrackedReposInput,
   RemoveRepoOverlayInput,
   DeleteInstallationInput,
   RegisterInstallationInput,
@@ -81,6 +82,8 @@ export const api = {
     invoke<RepoActionPreview>("preview_tracked_repo_update", { repoId }),
   updateAll: (input: UpdateAllInput) =>
     invoke<OperationStart>("update_all", { input }),
+  rematerializeTrackedRepos: (input: RematerializeTrackedReposInput) =>
+    invoke<OperationStart>("rematerialize_tracked_repos", { input }),
   rollbackRepo: (input: RollbackRepoInput) =>
     invoke<OperationStart>("rollback_repo", { input }),
   restoreCheckpoint: (input: RestoreCheckpointInput) =>

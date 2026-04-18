@@ -137,7 +137,9 @@ fn checkpoint_label_and_reason(operation: &OperationRecord, repo: &ManagedRepo) 
         OperationKind::InstallFrontend | OperationKind::InstallCustomNode => {
             format!("Before installing {}", reason)
         }
-        OperationKind::UpdateRepo | OperationKind::UpdateAll => {
+        OperationKind::UpdateRepo
+        | OperationKind::UpdateAll
+        | OperationKind::RematerializeTrackedRepos => {
             format!("Before updating {}", repo.display_name)
         }
         OperationKind::RollbackRepo | OperationKind::RestoreCheckpoint => {
@@ -161,6 +163,31 @@ struct DiscoveredRepoState {
 
 fn repo_has_tracked_local_changes(status: &RepoStatus) -> bool {
     !status.tracked_changed_files.is_empty()
+}
+
+fn collect_installation_repos(detail: InstallationDetail) -> Vec<ManagedRepo> {
+    let mut repos = Vec::new();
+    if let Some(core) = detail.core_repo {
+        repos.push(core);
+    }
+    if let Some(frontend) = detail.frontend_repo {
+        repos.push(frontend);
+    }
+    repos.extend(detail.custom_node_repos);
+    repos
+}
+
+async fn ensure_repo_clean_after_patcher_mutation(path: &Path, context: &str) -> AppResult<()> {
+    let status = inspect_repo(path).await?;
+    if status.tracked_changed_files.is_empty() {
+        return Ok(());
+    }
+
+    Err(AppError::Conflict(format!(
+        "{} left tracked worktree changes: {}. This usually means dependency sync or repository-defined scripts modified tracked files; the operation should be rolled back instead of persisting a dirty managed state.",
+        context,
+        status.tracked_changed_files.join(", ")
+    )))
 }
 
 async fn discover_repositories_for_installation(
@@ -1701,6 +1728,8 @@ async fn apply_repo_tracking_state(
             sync_dependencies,
         )
         .await?;
+        ensure_repo_clean_after_patcher_mutation(path, "patcher-controlled checkout materialization")
+            .await?;
         refresh_repo_state(state, &repo.id).await?;
         let refreshed_repo = state.db.get_repo(&repo.id)?.ok_or_else(|| {
             AppError::NotFound("managed repo not found after stack apply".to_string())
@@ -5119,14 +5148,7 @@ async fn run_update_all(
     );
     let result = async {
         let detail = state.db.get_installation_detail(&installation.id)?;
-        let mut repos = Vec::new();
-        if let Some(core) = detail.core_repo {
-            repos.push(core);
-        }
-        if let Some(frontend) = detail.frontend_repo {
-            repos.push(frontend);
-        }
-        repos.extend(detail.custom_node_repos);
+        let repos = collect_installation_repos(detail);
         let mut checkpoints = Vec::new();
         let mut failures = Vec::new();
 
@@ -5242,6 +5264,208 @@ async fn run_update_all(
 }
 
 #[tauri::command]
+async fn rematerialize_tracked_repos(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: RematerializeTrackedReposInput,
+) -> Result<OperationStart, String> {
+    let installation = state
+        .db
+        .get_installation(&input.installation_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "installation not found".to_string())?;
+    let background_work_lock = state.background_work_lock();
+    let _background_work_accept_guard = background_work_lock.lock().await;
+    let op = state
+        .db
+        .create_operation(
+            &installation.id,
+            None,
+            OperationKind::RematerializeTrackedRepos,
+            Some("repair tracked repos"),
+        )
+        .map_err(|e| e.to_string())?;
+    let op_id = op.id.clone();
+    let state_handle = app.state::<AppState>().inner().clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = run_rematerialize_tracked_repos(app, state_handle, installation, input, op_id).await;
+    });
+    Ok(OperationStart {
+        operation_id: op.id,
+    })
+}
+
+async fn run_rematerialize_tracked_repos(
+    app: AppHandle,
+    state: AppState,
+    installation: Installation,
+    input: RematerializeTrackedReposInput,
+    operation_id: String,
+) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
+    state.db.set_operation_running(&operation_id)?;
+    log_operation(
+        &state,
+        &app,
+        &operation_id,
+        "preflight",
+        "info",
+        "re-materializing tracked repositories with hard reset",
+    );
+    let result = async {
+        let detail = state.db.get_installation_detail(&installation.id)?;
+        let repos = collect_installation_repos(detail);
+        let mut checkpoints = Vec::new();
+        let mut failures = Vec::new();
+        let mut repaired = 0usize;
+        let mut skipped = 0usize;
+
+        for repo in repos {
+            let path = Path::new(&repo.local_path);
+            if !path.exists() {
+                skipped += 1;
+                log_operation(
+                    &state,
+                    &app,
+                    &operation_id,
+                    "preflight",
+                    "warn",
+                    format!("skipping {}: repository path no longer exists", repo.display_name),
+                );
+                continue;
+            }
+            if !has_git_marker(path) || !is_git_repo(path).await {
+                skipped += 1;
+                log_operation(
+                    &state,
+                    &app,
+                    &operation_id,
+                    "preflight",
+                    "warn",
+                    format!(
+                        "skipping {}: tracked path is no longer a git repository",
+                        repo.display_name
+                    ),
+                );
+                continue;
+            }
+            let Some(tracked_state) = load_repo_tracked_state(&state, &installation, &repo).await?
+            else {
+                skipped += 1;
+                log_operation(
+                    &state,
+                    &app,
+                    &operation_id,
+                    "preflight",
+                    "warn",
+                    format!("skipping {}: no tracked target", repo.display_name),
+                );
+                continue;
+            };
+
+            let repo_lock = state.repo_lock(&repo.id).await;
+            let _guard = repo_lock.lock().await;
+            log_operation(
+                &state,
+                &app,
+                &operation_id,
+                "preflight",
+                "info",
+                format!("re-materializing {} with hard reset", repo.display_name),
+            );
+
+            match apply_repo_tracking_state(
+                &state,
+                &app,
+                &operation_id,
+                &installation,
+                &repo,
+                &tracked_state,
+                &DirtyRepoStrategy::HardReset,
+                input.sync_dependencies,
+                true,
+            )
+            .await
+            {
+                Ok(checkpoint) => {
+                    repaired += 1;
+                    checkpoints.push(checkpoint.id);
+                }
+                Err(err) => failures.push(format!("{}: {}", repo.display_name, err)),
+            }
+        }
+
+        if failures.is_empty() {
+            maybe_restart_installation(
+                &state,
+                &app,
+                &operation_id,
+                &installation,
+                input.restart_after_success,
+            )
+            .await?;
+            let checkpoint_ref = checkpoints.last().map(|v| v.as_str());
+            state.db.finish_operation(
+                &operation_id,
+                OperationStatus::Succeeded,
+                None,
+                checkpoint_ref,
+            )?;
+            log_operation(
+                &state,
+                &app,
+                &operation_id,
+                "done",
+                "info",
+                format!(
+                    "tracked repo recovery completed (re-materialized {}, skipped {})",
+                    repaired, skipped
+                ),
+            );
+            Ok::<(), AppError>(())
+        } else {
+            let message = failures.join("\n");
+            let checkpoint_ref = checkpoints.last().map(|v| v.as_str());
+            state.db.finish_operation(
+                &operation_id,
+                OperationStatus::Failed,
+                Some(&message),
+                checkpoint_ref,
+            )?;
+            log_operation(
+                &state,
+                &app,
+                &operation_id,
+                "error",
+                "error",
+                message.clone(),
+            );
+            Err(AppError::Conflict(message))
+        }
+    }
+    .await;
+
+    if let Err(err) = result {
+        state.db.finish_operation(
+            &operation_id,
+            OperationStatus::Failed,
+            Some(&err.to_string()),
+            None,
+        )?;
+        log_operation(
+            &state,
+            &app,
+            &operation_id,
+            "error",
+            "error",
+            err.to_string(),
+        );
+        return Err(err);
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn rollback_repo(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -5347,6 +5571,8 @@ async fn run_rollback_repo(
             input.sync_dependencies,
         )
         .await?;
+        ensure_repo_clean_after_patcher_mutation(path, "patcher-controlled rollback restore")
+            .await?;
         refresh_repo_state(&state, &repo.id).await?;
         maybe_restart_installation(
             &state,
@@ -5501,6 +5727,8 @@ async fn run_restore_checkpoint(
             input.sync_dependencies,
         )
         .await?;
+        ensure_repo_clean_after_patcher_mutation(path, "patcher-controlled checkpoint restore")
+            .await?;
         refresh_repo_state(&state, &repo.id).await?;
         maybe_restart_installation(
             &state,
@@ -6504,6 +6732,7 @@ pub fn run() {
             move_repo_overlay,
             update_repo,
             update_all,
+            rematerialize_tracked_repos,
             rollback_repo,
             restore_checkpoint,
             compare_checkpoint,

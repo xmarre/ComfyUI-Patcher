@@ -164,6 +164,17 @@ function repoSearchText(repo: ManagedRepo): string {
     .toLocaleLowerCase();
 }
 
+function repoHasTrackedState(repo: ManagedRepo): boolean {
+  return !!repo.trackedState || !!repo.trackedTargetInput;
+}
+
+function repoNeedsTrackedRecovery(repo: ManagedRepo): boolean {
+  return (
+    repoHasTrackedState(repo) &&
+    (repo.liveStatus === "dirty" || repo.liveStatus === "drifted")
+  );
+}
+
 function renderRepoActionPreview(preview: RepoActionPreview | null) {
   if (!preview) {
     return null;
@@ -680,6 +691,11 @@ export default function App() {
   const coreRepo = detail?.coreRepo ?? null;
   const frontendRepo = detail?.frontendRepo ?? null;
   const customNodeRepos = detail?.customNodeRepos ?? [];
+  const allManagedRepos = [coreRepo, frontendRepo, ...customNodeRepos].filter(
+    (repo): repo is ManagedRepo => repo !== null
+  );
+  const trackedRepoCount = allManagedRepos.filter(repoHasTrackedState).length;
+  const recoverableTrackedRepoCount = allManagedRepos.filter(repoNeedsTrackedRecovery).length;
   const hasMatchingDetail =
     !!selectedInstallation && detail?.installation.id === selectedInstallation.id;
   const existingInstallationProfile =
@@ -953,6 +969,28 @@ export default function App() {
                     Reconcile
                   </button>
                   <button
+                    className="secondary"
+                    disabled={!trackedRepoCount}
+                    onClick={() =>
+                      void runAction(async () => {
+                        if (
+                          !window.confirm(
+                            `Re-materialize ${trackedRepoCount} tracked repo${trackedRepoCount === 1 ? "" : "s"} for ${selectedInstallation.name} with hard reset? This discards tracked local worktree changes in managed repos and rebuilds their tracked checkout/overlay state.`
+                          )
+                        ) {
+                          return;
+                        }
+                        await api.rematerializeTrackedRepos({
+                          installationId: selectedInstallation.id,
+                          syncDependencies: false,
+                          restartAfterSuccess: false
+                        });
+                      })
+                    }
+                  >
+                    Repair tracked repos
+                  </button>
+                  <button
                     onClick={() =>
                       void runAction(async () => {
                         await api.updateAll({
@@ -1041,11 +1079,45 @@ export default function App() {
                     <div className="muted small">
                       Tracked state and disk state diverged during the latest reconciliation pass.
                     </div>
+                    {recoverableTrackedRepoCount ? (
+                      <div className="muted small">
+                        {recoverableTrackedRepoCount} tracked repo
+                        {recoverableTrackedRepoCount === 1 ? "" : "s"} currently need repair. The
+                        recovery action re-materializes all {trackedRepoCount} tracked repo
+                        {trackedRepoCount === 1 ? "" : "s"} with hard reset.
+                      </div>
+                    ) : null}
                   </div>
-                  <div className="muted small">
-                    {detail.lastReconciledAt
-                      ? `Last reconciled ${new Date(detail.lastReconciledAt).toLocaleString()}`
-                      : ""}
+                  <div className="row gap">
+                    {recoverableTrackedRepoCount ? (
+                      <button
+                        className="secondary"
+                        type="button"
+                        onClick={() =>
+                          void runAction(async () => {
+                            if (
+                              !window.confirm(
+                                `Re-materialize ${trackedRepoCount} tracked repo${trackedRepoCount === 1 ? "" : "s"} for ${selectedInstallation.name} with hard reset? This discards tracked local worktree changes in managed repos and rebuilds their tracked checkout/overlay state.`
+                              )
+                            ) {
+                              return;
+                            }
+                            await api.rematerializeTrackedRepos({
+                              installationId: selectedInstallation.id,
+                              syncDependencies: false,
+                              restartAfterSuccess: false
+                            });
+                          })
+                        }
+                      >
+                        Repair tracked repos
+                      </button>
+                    ) : null}
+                    <div className="muted small">
+                      {detail.lastReconciledAt
+                        ? `Last reconciled ${new Date(detail.lastReconciledAt).toLocaleString()}`
+                        : ""}
+                    </div>
                   </div>
                 </div>
                 <div className="repo-warning-list">

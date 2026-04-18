@@ -26,6 +26,7 @@ pub enum OperationKind {
     InstallCustomNode,
     PatchCustomNode,
     ManageRepoStack,
+    RematerializeTrackedRepos,
     UninstallRepo,
     DisableRepo,
     UntrackRepo,
@@ -570,6 +571,14 @@ pub struct MoveRepoOverlayInput {
 pub struct UpdateAllInput {
     pub installation_id: String,
     pub dirty_repo_strategy: DirtyRepoStrategy,
+    pub sync_dependencies: bool,
+    pub restart_after_success: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RematerializeTrackedReposInput {
+    pub installation_id: String,
     pub sync_dependencies: bool,
     pub restart_after_success: bool,
 }
