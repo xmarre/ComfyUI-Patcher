@@ -1118,25 +1118,27 @@ fn parse_github_pr_url_same_repo(input: &str) -> Option<(String, u64)> {
     Some((format!("https://github.com/{owner}/{repo}"), pr_number))
 }
 
-fn infer_overlay_base_ref(repo: &ManagedRepo) -> Option<String> {
-    repo.tracked_state
-        .as_ref()
-        .and_then(|state| {
-            if branch_like_target_kind(&state.base.target_kind) {
-                Some(state.base.checkout_ref.clone())
-            } else {
-                None
-            }
-        })
-        .or_else(|| {
-            repo.current_branch.as_ref().and_then(|branch| {
-                if repo.is_detached || branch == STACK_BRANCH_NAME {
-                    None
-                } else {
-                    Some(branch.clone())
-                }
-            })
-        })
+async fn infer_overlay_base_ref(repo: &ManagedRepo) -> Option<String> {
+    if let Some(base_ref) = repo.tracked_state.as_ref().and_then(|state| {
+        if branch_like_target_kind(&state.base.target_kind) {
+            Some(state.base.checkout_ref.clone())
+        } else {
+            None
+        }
+    }) {
+        return Some(base_ref);
+    }
+
+    let path = Path::new(&repo.local_path);
+    let status = inspect_repo(path).await.ok()?;
+    if status.is_detached {
+        return None;
+    }
+    let branch = status.branch?;
+    if branch == STACK_BRANCH_NAME {
+        return None;
+    }
+    Some(branch)
 }
 
 async fn try_resolve_same_repo_pr_without_github_api(
@@ -1162,24 +1164,17 @@ async fn try_resolve_same_repo_pr_without_github_api(
     if current_remote != pr_remote {
         return Ok(None);
     }
-    let Some(base_ref) = infer_overlay_base_ref(repo) else {
+    let Some(base_ref) = infer_overlay_base_ref(repo).await else {
         return Ok(None);
     };
 
     let path = Path::new(&repo.local_path);
     let overlay_ref = format!("patcher/pr-{pr_number}");
-    let refspec = format!("pull/{pr_number}/head:{overlay_ref}");
-    if fetch_refspec(path, "origin", &refspec).await.is_err() {
-        return Ok(None);
-    }
-    let resolved_sha = match rev_parse(path, &overlay_ref).await {
-        Ok(value) => value,
-        Err(_) => return Ok(None),
-    };
-    let short_sha = resolved_sha
+    let resolved_sha = rev_parse(path, &overlay_ref).await.ok().flatten();
+    let summary_label = resolved_sha
         .as_deref()
-        .map(|sha| sha.chars().take(7).collect::<String>())
-        .unwrap_or_else(|| "unknown".to_string());
+        .map(|sha| format!("PR #{pr_number} @ {}", sha.chars().take(7).collect::<String>()))
+        .unwrap_or_else(|| format!("PR #{pr_number}"));
 
     Ok(Some(ResolvedTarget {
         source_input: input.trim().to_string(),
@@ -1193,7 +1188,7 @@ async fn try_resolve_same_repo_pr_without_github_api(
         pr_base_ref: Some(base_ref),
         pr_head_repo_url: None,
         pr_head_ref: None,
-        summary_label: format!("PR #{pr_number} @ {short_sha}"),
+        summary_label,
         suggested_local_dir_name: String::new(),
     }))
 }
