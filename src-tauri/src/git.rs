@@ -32,7 +32,7 @@ fn parse_status_entries(output: &str) -> Vec<StatusEntry> {
         if path.is_empty() {
             continue;
         }
-        if code == "R " || code.starts_with('R') {
+        if code.starts_with('R') || code.starts_with('C') {
             if let Some((old_path, new_path)) = path.split_once(" -> ") {
                 let old_path = old_path.trim();
                 let new_path = new_path.trim();
@@ -637,5 +637,66 @@ mod tests {
     fn ignores_missing_ls_remote_default_branch() {
         let output = "0123456789abcdef\tHEAD";
         assert_eq!(parse_ls_remote_default_branch(output), None);
+    }
+
+    #[test]
+    fn parse_status_entries_splits_rename_and_copy_only() {
+        let output = "R  old/path.py -> new/path.py\nC  src/a.py -> src/b.py\n?? literal -> arrow.py";
+        let entries = parse_status_entries(output);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].code, "R ");
+        assert_eq!(
+            entries[0].paths,
+            vec!["old/path.py".to_string(), "new/path.py".to_string()]
+        );
+        assert_eq!(entries[1].code, "C ");
+        assert_eq!(
+            entries[1].paths,
+            vec!["src/a.py".to_string(), "src/b.py".to_string()]
+        );
+        assert_eq!(entries[2].code, "??");
+        assert_eq!(entries[2].paths, vec!["literal -> arrow.py".to_string()]);
+    }
+
+    #[test]
+    fn normalize_status_path_normalizes_slashes_and_dot_prefix() {
+        assert_eq!(
+            normalize_status_path(r".\foo\__pycache__\x.pyc"),
+            "foo/__pycache__/x.pyc".to_string()
+        );
+    }
+
+    #[test]
+    fn filter_meaningful_status_entries_drops_only_fully_ignorable_untracked_entries() {
+        let entries = vec![
+            StatusEntry {
+                code: "??".to_string(),
+                paths: vec!["__pycache__/x.pyc".to_string()],
+            },
+            StatusEntry {
+                code: "??".to_string(),
+                paths: vec!["foo.py".to_string()],
+            },
+            StatusEntry {
+                code: "??".to_string(),
+                paths: vec!["__pycache__/x.pyc".to_string(), "foo.py".to_string()],
+            },
+            StatusEntry {
+                code: " M".to_string(),
+                paths: vec!["__pycache__/tracked.pyc".to_string()],
+            },
+        ];
+
+        let filtered = filter_meaningful_status_entries(entries);
+        assert_eq!(filtered.len(), 3);
+        assert_eq!(filtered[0].paths, vec!["foo.py".to_string()]);
+        assert_eq!(
+            filtered[1].paths,
+            vec!["__pycache__/x.pyc".to_string(), "foo.py".to_string()]
+        );
+        assert_eq!(
+            filtered[2].paths,
+            vec!["__pycache__/tracked.pyc".to_string()]
+        );
     }
 }
