@@ -485,9 +485,9 @@ async fn enrich_managed_repo(
     repo.current_branch = status.branch.clone();
     repo.is_detached = status.is_detached;
     repo.is_dirty = tracked_dirty;
-    repo.changed_files = status.tracked_changed_files.clone();
+    repo.changed_files = status.changed_files.clone();
     repo.dependency_state =
-        build_repo_dependency_state(installation, &repo, &path, &status.tracked_changed_files);
+        build_repo_dependency_state(installation, &repo, &path, &status.changed_files);
 
     let mut live_status = if tracked_dirty {
         RepoLiveStatus::Dirty
