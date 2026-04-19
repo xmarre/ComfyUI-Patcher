@@ -1450,7 +1450,7 @@ export default function App() {
                         input,
                         clearOverlays,
                         dirtyRepoStrategy: "abort",
-                        syncDependencies: true
+                        syncDependencies: false
                       });
                     })
                   }
@@ -1460,7 +1460,7 @@ export default function App() {
                         repoId: coreRepo.id,
                         input,
                         dirtyRepoStrategy: "abort",
-                        syncDependencies: true
+                        syncDependencies: false
                       });
                     })
                   }
@@ -1471,7 +1471,7 @@ export default function App() {
                         overlayId,
                         enabled,
                         dirtyRepoStrategy: "abort",
-                        syncDependencies: true
+                        syncDependencies: false
                       });
                     })
                   }
@@ -1481,7 +1481,7 @@ export default function App() {
                         repoId: coreRepo.id,
                         overlayId,
                         dirtyRepoStrategy: "abort",
-                        syncDependencies: true
+                        syncDependencies: false
                       });
                     })
                   }
@@ -1492,7 +1492,7 @@ export default function App() {
                         overlayId,
                         direction,
                         dirtyRepoStrategy: "abort",
-                        syncDependencies: true
+                        syncDependencies: false
                       });
                     })
                   }
@@ -1592,7 +1592,7 @@ export default function App() {
                         input,
                         clearOverlays,
                         dirtyRepoStrategy: "abort",
-                        syncDependencies: true
+                        syncDependencies: false
                       });
                     })
                   }
@@ -1602,7 +1602,7 @@ export default function App() {
                         repoId: frontendRepo.id,
                         input,
                         dirtyRepoStrategy: "abort",
-                        syncDependencies: true
+                        syncDependencies: false
                       });
                     })
                   }
@@ -1613,7 +1613,7 @@ export default function App() {
                         overlayId,
                         enabled,
                         dirtyRepoStrategy: "abort",
-                        syncDependencies: true
+                        syncDependencies: false
                       });
                     })
                   }
@@ -1623,7 +1623,7 @@ export default function App() {
                         repoId: frontendRepo.id,
                         overlayId,
                         dirtyRepoStrategy: "abort",
-                        syncDependencies: true
+                        syncDependencies: false
                       });
                     })
                   }
@@ -1634,7 +1634,7 @@ export default function App() {
                         overlayId,
                         direction,
                         dirtyRepoStrategy: "abort",
-                        syncDependencies: true
+                        syncDependencies: false
                       });
                     })
                   }
@@ -1783,7 +1783,7 @@ export default function App() {
                                 input,
                                 clearOverlays,
                                 dirtyRepoStrategy: "abort",
-                                syncDependencies: true
+                                syncDependencies: false
                               });
                             })
                           }
@@ -1793,7 +1793,7 @@ export default function App() {
                                 repoId: repo.id,
                                 input,
                                 dirtyRepoStrategy: "abort",
-                                syncDependencies: true
+                                syncDependencies: false
                               });
                             })
                           }
@@ -1804,7 +1804,7 @@ export default function App() {
                                 overlayId,
                                 enabled,
                                 dirtyRepoStrategy: "abort",
-                                syncDependencies: true
+                                syncDependencies: false
                               });
                             })
                           }
@@ -1814,7 +1814,7 @@ export default function App() {
                                 repoId: repo.id,
                                 overlayId,
                                 dirtyRepoStrategy: "abort",
-                                syncDependencies: true
+                                syncDependencies: false
                               });
                             })
                           }
@@ -1825,7 +1825,7 @@ export default function App() {
                                 overlayId,
                                 direction,
                                 dirtyRepoStrategy: "abort",
-                                syncDependencies: true
+                                syncDependencies: false
                               });
                             })
                           }
