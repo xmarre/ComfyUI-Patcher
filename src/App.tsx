@@ -97,6 +97,8 @@ function toErrorMessage(error: unknown): string {
 }
 
 const UPDATE_INSTALL_BLOCKED_MESSAGE = "cannot install update while operations are running";
+const DEFERRED_DEPENDENCY_SYNC_MESSAGE =
+  "Stack updated without dependency sync. Run Update on the repo card or Update all before expecting dependency/build changes.";
 
 function formatBytes(value: number | null): string {
   if (value == null || !Number.isFinite(value) || value < 0) {
@@ -266,6 +268,7 @@ export default function App() {
   const [frontendPreviewError, setFrontendPreviewError] = useState<string | null>(null);
   const [nodePreviewError, setNodePreviewError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [events, setEvents] = useState<OperationEvent[]>([]);
   const [registryRefreshToken, setRegistryRefreshToken] = useState(0);
   const [activeTab, setActiveTab] = useState<MainTab>("overview");
@@ -435,6 +438,7 @@ export default function App() {
 
   async function runAction(action: () => Promise<void>) {
     setActionError(null);
+    setActionNotice(null);
     try {
       await action();
     } catch (error) {
@@ -444,6 +448,7 @@ export default function App() {
 
   async function runActionOk(action: () => Promise<void>): Promise<boolean> {
     setActionError(null);
+    setActionNotice(null);
     try {
       await action();
       return true;
@@ -451,6 +456,14 @@ export default function App() {
       setActionError(toErrorMessage(error));
       return false;
     }
+  }
+
+  async function runStackMutationAction(action: () => Promise<void>): Promise<boolean> {
+    const ok = await runActionOk(action);
+    if (ok) {
+      setActionNotice(DEFERRED_DEPENDENCY_SYNC_MESSAGE);
+    }
+    return ok;
   }
 
   async function refreshDetail(
@@ -1073,6 +1086,25 @@ export default function App() {
               </section>
             ) : null}
 
+            {actionNotice ? (
+              <section className="card alert-card">
+                <div className="row between alert-header">
+                  <div>
+                    <h3>Dependency sync deferred</h3>
+                    <div className="muted small">{actionNotice}</div>
+                  </div>
+                  <div className="row gap">
+                    <button className="secondary" type="button" onClick={() => setActiveTab("patching")}>
+                      Open patching tab
+                    </button>
+                    <button className="secondary" type="button" onClick={() => setActionNotice(null)}>
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+              </section>
+            ) : null}
+
             {detail?.warnings.length ? (
               <section className="card alert-card">
                 <div className="row between alert-header">
@@ -1444,55 +1476,55 @@ export default function App() {
                     })
                   }
                   onSetBaseTarget={(input, clearOverlays) =>
-                    runActionOk(async () => {
+                    runStackMutationAction(async () => {
                       await api.setRepoBaseTarget({
                         repoId: coreRepo.id,
                         input,
                         clearOverlays,
                         dirtyRepoStrategy: "abort",
-                        syncDependencies: true
+                        syncDependencies: false
                       });
                     })
                   }
                   onAddOverlay={(input) =>
-                    runActionOk(async () => {
+                    runStackMutationAction(async () => {
                       await api.addRepoOverlay({
                         repoId: coreRepo.id,
                         input,
                         dirtyRepoStrategy: "abort",
-                        syncDependencies: true
+                        syncDependencies: false
                       });
                     })
                   }
                   onSetOverlayEnabled={(overlayId, enabled) =>
-                    runActionOk(async () => {
+                    runStackMutationAction(async () => {
                       await api.setRepoOverlayEnabled({
                         repoId: coreRepo.id,
                         overlayId,
                         enabled,
                         dirtyRepoStrategy: "abort",
-                        syncDependencies: true
+                        syncDependencies: false
                       });
                     })
                   }
                   onRemoveOverlay={(overlayId) =>
-                    runActionOk(async () => {
+                    runStackMutationAction(async () => {
                       await api.removeRepoOverlay({
                         repoId: coreRepo.id,
                         overlayId,
                         dirtyRepoStrategy: "abort",
-                        syncDependencies: true
+                        syncDependencies: false
                       });
                     })
                   }
                   onMoveOverlay={(overlayId, direction) =>
-                    runActionOk(async () => {
+                    runStackMutationAction(async () => {
                       await api.moveRepoOverlay({
                         repoId: coreRepo.id,
                         overlayId,
                         direction,
                         dirtyRepoStrategy: "abort",
-                        syncDependencies: true
+                        syncDependencies: false
                       });
                     })
                   }
@@ -1586,55 +1618,55 @@ export default function App() {
                     })
                   }
                   onSetBaseTarget={(input, clearOverlays) =>
-                    runActionOk(async () => {
+                    runStackMutationAction(async () => {
                       await api.setRepoBaseTarget({
                         repoId: frontendRepo.id,
                         input,
                         clearOverlays,
                         dirtyRepoStrategy: "abort",
-                        syncDependencies: true
+                        syncDependencies: false
                       });
                     })
                   }
                   onAddOverlay={(input) =>
-                    runActionOk(async () => {
+                    runStackMutationAction(async () => {
                       await api.addRepoOverlay({
                         repoId: frontendRepo.id,
                         input,
                         dirtyRepoStrategy: "abort",
-                        syncDependencies: true
+                        syncDependencies: false
                       });
                     })
                   }
                   onSetOverlayEnabled={(overlayId, enabled) =>
-                    runActionOk(async () => {
+                    runStackMutationAction(async () => {
                       await api.setRepoOverlayEnabled({
                         repoId: frontendRepo.id,
                         overlayId,
                         enabled,
                         dirtyRepoStrategy: "abort",
-                        syncDependencies: true
+                        syncDependencies: false
                       });
                     })
                   }
                   onRemoveOverlay={(overlayId) =>
-                    runActionOk(async () => {
+                    runStackMutationAction(async () => {
                       await api.removeRepoOverlay({
                         repoId: frontendRepo.id,
                         overlayId,
                         dirtyRepoStrategy: "abort",
-                        syncDependencies: true
+                        syncDependencies: false
                       });
                     })
                   }
                   onMoveOverlay={(overlayId, direction) =>
-                    runActionOk(async () => {
+                    runStackMutationAction(async () => {
                       await api.moveRepoOverlay({
                         repoId: frontendRepo.id,
                         overlayId,
                         direction,
                         dirtyRepoStrategy: "abort",
-                        syncDependencies: true
+                        syncDependencies: false
                       });
                     })
                   }
@@ -1777,55 +1809,55 @@ export default function App() {
                           key={repo.id}
                           repo={repo}
                           onSetBaseTarget={(input, clearOverlays) =>
-                            runActionOk(async () => {
+                            runStackMutationAction(async () => {
                               await api.setRepoBaseTarget({
                                 repoId: repo.id,
                                 input,
                                 clearOverlays,
                                 dirtyRepoStrategy: "abort",
-                                syncDependencies: true
+                                syncDependencies: false
                               });
                             })
                           }
                           onAddOverlay={(input) =>
-                            runActionOk(async () => {
+                            runStackMutationAction(async () => {
                               await api.addRepoOverlay({
                                 repoId: repo.id,
                                 input,
                                 dirtyRepoStrategy: "abort",
-                                syncDependencies: true
+                                syncDependencies: false
                               });
                             })
                           }
                           onSetOverlayEnabled={(overlayId, enabled) =>
-                            runActionOk(async () => {
+                            runStackMutationAction(async () => {
                               await api.setRepoOverlayEnabled({
                                 repoId: repo.id,
                                 overlayId,
                                 enabled,
                                 dirtyRepoStrategy: "abort",
-                                syncDependencies: true
+                                syncDependencies: false
                               });
                             })
                           }
                           onRemoveOverlay={(overlayId) =>
-                            runActionOk(async () => {
+                            runStackMutationAction(async () => {
                               await api.removeRepoOverlay({
                                 repoId: repo.id,
                                 overlayId,
                                 dirtyRepoStrategy: "abort",
-                                syncDependencies: true
+                                syncDependencies: false
                               });
                             })
                           }
                           onMoveOverlay={(overlayId, direction) =>
-                            runActionOk(async () => {
+                            runStackMutationAction(async () => {
                               await api.moveRepoOverlay({
                                 repoId: repo.id,
                                 overlayId,
                                 direction,
                                 dirtyRepoStrategy: "abort",
-                                syncDependencies: true
+                                syncDependencies: false
                               });
                             })
                           }
