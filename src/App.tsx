@@ -458,11 +458,12 @@ export default function App() {
     }
   }
 
-  async function runStackMutationAction(action: () => Promise<void>): Promise<void> {
+  async function runStackMutationAction(action: () => Promise<void>): Promise<boolean> {
     const ok = await runActionOk(action);
     if (ok) {
       setActionNotice(DEFERRED_DEPENDENCY_SYNC_MESSAGE);
     }
+    return ok;
   }
 
   async function refreshDetail(
