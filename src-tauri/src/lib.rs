@@ -13,12 +13,11 @@ mod util;
 use crate::deps::{execute_dependency_sync, plan_dependency_sync};
 use crate::errors::{AppError, AppResult};
 use crate::git::{
-    apply_stash, canonicalize_remote, clone_repo, commits_between, diff_name_status,
-    ensure_clean_or_apply_strategy, fetch_origin, fetch_refspec, inspect_repo, is_git_repo,
-    RepoStatus,
-    join_custom_node_path, merge_abort, merge_no_ff, preview_merge_conflicts, reset_hard,
-    rev_parse, run_git_allow_fail, submodule_update, switch_branch, switch_detached,
-    validate_custom_node_dir_name,
+    apply_stash, canonicalize_remote, checkout_paths, clean_untracked_paths, clone_repo,
+    commits_between, diff_name_status, ensure_clean_or_apply_strategy, fetch_origin,
+    fetch_refspec, inspect_repo, is_git_repo, join_custom_node_path, merge_abort, merge_no_ff,
+    preview_merge_conflicts, reset_hard, rev_parse, run_git_allow_fail, submodule_update,
+    switch_branch, switch_detached, validate_custom_node_dir_name, RepoStatus,
 };
 use crate::models::*;
 use crate::state::AppState;
@@ -188,6 +187,88 @@ async fn ensure_repo_clean_after_patcher_mutation(path: &Path, context: &str) ->
         context,
         status.tracked_changed_files.join(", ")
     )))
+}
+
+
+fn is_frontend_lockfile_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    let trimmed = normalized.trim_start_matches("./");
+    matches!(trimmed, "package-lock.json" | "pnpm-lock.yaml" | "yarn.lock")
+}
+
+async fn restore_frontend_lockfile_artifacts(path: &Path) -> AppResult<Vec<String>> {
+    let status = inspect_repo(path).await?;
+    if status.changed_files.is_empty() {
+        return Ok(Vec::new());
+    }
+    if status
+        .changed_files
+        .iter()
+        .any(|changed| !is_frontend_lockfile_path(changed))
+    {
+        return Ok(Vec::new());
+    }
+
+    let tracked = status
+        .tracked_changed_files
+        .iter()
+        .filter(|changed| is_frontend_lockfile_path(changed))
+        .cloned()
+        .collect::<Vec<_>>();
+    let untracked = status
+        .untracked_files
+        .iter()
+        .filter(|changed| is_frontend_lockfile_path(changed))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if tracked.is_empty() && untracked.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if !tracked.is_empty() {
+        checkout_paths(path, &tracked).await?;
+    }
+    if !untracked.is_empty() {
+        clean_untracked_paths(path, &untracked).await?;
+    }
+
+    let mut restored = tracked;
+    restored.extend(untracked);
+    restored.sort();
+    restored.dedup();
+    Ok(restored)
+}
+
+async fn cleanup_frontend_dependency_artifacts(
+    state: &AppState,
+    app: &AppHandle,
+    operation_id: &str,
+    repo: &ManagedRepo,
+    path: &Path,
+    did_sync_dependencies: bool,
+) -> AppResult<()> {
+    if repo.kind != RepoKind::Frontend || !did_sync_dependencies {
+        return Ok(());
+    }
+
+    let restored = restore_frontend_lockfile_artifacts(path).await?;
+    if restored.is_empty() {
+        return Ok(());
+    }
+
+    log_operation(
+        state,
+        app,
+        operation_id,
+        "dependency_sync",
+        "info",
+        format!(
+            "restored generated frontend lockfile changes after dependency sync: {}",
+            restored.join(", ")
+        ),
+    );
+    Ok(())
 }
 
 async fn discover_repositories_for_installation(
@@ -1825,6 +1906,15 @@ async fn apply_repo_tracking_state(
             app,
             operation_id,
             installation,
+            repo,
+            path,
+            sync_dependencies,
+        )
+        .await?;
+        cleanup_frontend_dependency_artifacts(
+            state,
+            app,
+            operation_id,
             repo,
             path,
             sync_dependencies,
@@ -5677,6 +5767,15 @@ async fn run_rollback_repo(
             input.sync_dependencies,
         )
         .await?;
+        cleanup_frontend_dependency_artifacts(
+            &state,
+            &app,
+            &operation_id,
+            &repo,
+            path,
+            input.sync_dependencies,
+        )
+        .await?;
         if !(input.restore_stash && checkpoint.stash_created) {
             ensure_repo_clean_after_patcher_mutation(path, "patcher-controlled rollback restore")
                 .await?;
@@ -5835,6 +5934,15 @@ async fn run_restore_checkpoint(
             input.sync_dependencies,
         )
         .await?;
+        cleanup_frontend_dependency_artifacts(
+            &state,
+            &app,
+            &operation_id,
+            &repo,
+            path,
+            input.sync_dependencies,
+        )
+        .await?;
         if !(input.restore_stash && checkpoint.stash_created) {
             ensure_repo_clean_after_patcher_mutation(path, "patcher-controlled checkpoint restore")
                 .await?;
@@ -5952,6 +6060,80 @@ async fn compare_checkpoint(
     })
 }
 
+fn unique_delete_staging_path(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("repo");
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    parent.join(format!(".{name}.patcher-delete-{stamp}"))
+}
+
+async fn remove_path_with_retries(path: &Path) -> AppResult<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    async fn attempt_remove(path: &Path) -> AppResult<()> {
+        if !path.exists() {
+            return Ok(());
+        }
+        if path.is_dir() {
+            std::fs::remove_dir_all(path)?;
+        } else {
+            std::fs::remove_file(path)?;
+        }
+        Ok(())
+    }
+
+    let mut last_error: Option<AppError> = None;
+    for _ in 0..3 {
+        match attempt_remove(path).await {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                last_error = Some(err);
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        }
+    }
+
+    let staged_path = unique_delete_staging_path(path);
+    if let Err(err) = std::fs::rename(path, &staged_path) {
+        return Err(last_error.unwrap_or_else(|| AppError::Io(err.to_string())));
+    }
+
+    for _ in 0..3 {
+        match attempt_remove(&staged_path).await {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                last_error = Some(err);
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        }
+    }
+
+    if staged_path.exists() {
+        if let Err(restore_err) = std::fs::rename(&staged_path, path) {
+            let base = last_error.unwrap_or_else(|| {
+                AppError::Io(format!("failed to remove {}", path.to_string_lossy()))
+            });
+            return Err(AppError::Io(format!(
+                "{base}; also failed to restore staged path {} back to {}: {}",
+                staged_path.to_string_lossy(),
+                path.to_string_lossy(),
+                restore_err
+            )));
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        AppError::Io(format!("failed to remove {}", path.to_string_lossy()))
+    }))
+}
+
 #[tauri::command]
 async fn uninstall_repo(
     app: AppHandle,
@@ -6011,11 +6193,7 @@ async fn run_uninstall_repo(
             format!("uninstalling {}", repo.display_name),
         );
         if path.exists() {
-            if path.is_dir() {
-                std::fs::remove_dir_all(&path)?;
-            } else {
-                std::fs::remove_file(&path)?;
-            }
+            remove_path_with_retries(&path).await?;
         }
         state.db.delete_repo(&repo.id)?;
         state.db.finish_operation(&operation_id, OperationStatus::Succeeded, None, None)?;

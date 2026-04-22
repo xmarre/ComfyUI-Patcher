@@ -6,6 +6,7 @@ use crate::models::{
 use serde::Deserialize;
 use serde_json::Value;
 use std::path::Path;
+use std::process::Output;
 
 #[derive(Debug, Deserialize)]
 struct PyprojectProject {
@@ -159,9 +160,7 @@ fn frontend_command_name(package_manager: &FrontendPackageManager) -> &'static s
 fn frontend_install_args(package_manager: &FrontendPackageManager) -> Vec<String> {
     match package_manager {
         FrontendPackageManager::Npm | FrontendPackageManager::Auto => vec!["install".to_string()],
-        FrontendPackageManager::Pnpm => {
-            vec!["install".to_string(), "--frozen-lockfile".to_string()]
-        }
+        FrontendPackageManager::Pnpm => vec!["install".to_string(), "--frozen-lockfile".to_string()],
         FrontendPackageManager::Yarn => vec!["install".to_string()],
     }
 }
@@ -237,7 +236,7 @@ pub fn plan_dependency_sync(
 
 pub async fn execute_dependency_sync(plan: &DependencyPlan) -> AppResult<()> {
     for step in &plan.steps {
-        let output = output_command(&step.command, &step.args, Some(Path::new(&step.cwd))).await?;
+        let output = execute_dependency_step(step).await?;
         if !output.status.success() {
             return Err(AppError::Dependency(format!(
                 "{} step failed ({}): {}\n{}",
@@ -249,4 +248,40 @@ pub async fn execute_dependency_sync(plan: &DependencyPlan) -> AppResult<()> {
         }
     }
     Ok(())
+}
+
+async fn execute_dependency_step(step: &DependencyStep) -> AppResult<Output> {
+    let output = output_command(&step.command, &step.args, Some(Path::new(&step.cwd))).await?;
+    if output.status.success() {
+        return Ok(output);
+    }
+    if should_retry_pnpm_without_frozen_lockfile(step, &output) {
+        eprintln!(
+            "dependency sync: pnpm frozen lockfile install failed due to lockfile mismatch; retrying without frozen lockfile"
+        );
+        let retry_args = vec!["install".to_string(), "--no-frozen-lockfile".to_string()];
+        return output_command(&step.command, &retry_args, Some(Path::new(&step.cwd)))
+            .await
+            .map_err(AppError::from);
+    }
+    Ok(output)
+}
+
+fn should_retry_pnpm_without_frozen_lockfile(step: &DependencyStep, output: &Output) -> bool {
+    if step.command != "pnpm"
+        || step.phase != "install"
+        || step.args != ["install".to_string(), "--frozen-lockfile".to_string()]
+        || output.status.success()
+    {
+        return false;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+    let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
+    let combined = format!("{stderr}\n{stdout}");
+    combined.contains("err_pnpm_outdated_lockfile")
+        || combined.contains("cannot install with \"frozen-lockfile\"")
+        || combined.contains("frozen-lockfile")
+            && (combined.contains("not up to date")
+                || combined.contains("pnpm-lock.yaml is absent")
+                || combined.contains("headless installation requires a pnpm-lock.yaml file"))
 }
