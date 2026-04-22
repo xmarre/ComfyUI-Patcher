@@ -314,6 +314,8 @@ export default function App() {
   const coreInputRef = useRef("");
   const frontendInputRef = useRef("");
   const operationRefreshTimerRef = useRef<number | null>(null);
+  const operationRefreshInFlightRef = useRef(false);
+  const operationRefreshPendingRef = useRef(false);
   const nodeInputRef = useRef("");
   const updateCheckInFlightRef = useRef(false);
   const updateInstallInFlightRef = useRef(false);
@@ -540,17 +542,38 @@ export default function App() {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
 
+    const runRefreshCycle = async () => {
+      if (operationRefreshInFlightRef.current) {
+        operationRefreshPendingRef.current = true;
+        return;
+      }
+      operationRefreshInFlightRef.current = true;
+      try {
+        const installationId = selectedInstallationIdRef.current;
+        if (installationId) {
+          await refreshDetail(installationId);
+        }
+        await refreshInstallations();
+      } finally {
+        operationRefreshInFlightRef.current = false;
+        if (!cancelled && operationRefreshPendingRef.current) {
+          operationRefreshPendingRef.current = false;
+          scheduleRefresh();
+        }
+      }
+    };
+
     const scheduleRefresh = () => {
+      if (operationRefreshInFlightRef.current) {
+        operationRefreshPendingRef.current = true;
+        return;
+      }
       if (operationRefreshTimerRef.current != null) {
         return;
       }
       operationRefreshTimerRef.current = window.setTimeout(() => {
         operationRefreshTimerRef.current = null;
-        const installationId = selectedInstallationIdRef.current;
-        if (installationId) {
-          void refreshDetail(installationId);
-        }
-        void refreshInstallations();
+        void runRefreshCycle();
       }, 250);
     };
 
@@ -572,6 +595,7 @@ export default function App() {
       });
     return () => {
       cancelled = true;
+      operationRefreshPendingRef.current = false;
       if (operationRefreshTimerRef.current != null) {
         window.clearTimeout(operationRefreshTimerRef.current);
         operationRefreshTimerRef.current = null;

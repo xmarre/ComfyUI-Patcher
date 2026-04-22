@@ -5761,6 +5761,7 @@ async fn run_rollback_repo(
             input.sync_dependencies,
         )
         .await?;
+        cleanup_frontend_dependency_artifacts(&state, &app, &operation_id, &repo, path).await?;
         if !(input.restore_stash && checkpoint.stash_created) {
             ensure_repo_clean_after_patcher_mutation(path, "patcher-controlled rollback restore")
                 .await?;
@@ -5919,6 +5920,7 @@ async fn run_restore_checkpoint(
             input.sync_dependencies,
         )
         .await?;
+        cleanup_frontend_dependency_artifacts(&state, &app, &operation_id, &repo, path).await?;
         if !(input.restore_stash && checkpoint.stash_created) {
             ensure_repo_clean_after_patcher_mutation(path, "patcher-controlled checkpoint restore")
                 .await?;
@@ -6093,7 +6095,17 @@ async fn remove_path_with_retries(path: &Path) -> AppResult<()> {
     }
 
     if staged_path.exists() {
-        let _ = std::fs::rename(&staged_path, path);
+        if let Err(restore_err) = std::fs::rename(&staged_path, path) {
+            let base = last_error.unwrap_or_else(|| {
+                AppError::Io(format!("failed to remove {}", path.to_string_lossy()))
+            });
+            return Err(AppError::Io(format!(
+                "{base}; also failed to restore staged path {} back to {}: {}",
+                staged_path.to_string_lossy(),
+                path.to_string_lossy(),
+                restore_err
+            )));
+        }
     }
     Err(last_error.unwrap_or_else(|| {
         AppError::Io(format!("failed to remove {}", path.to_string_lossy()))
