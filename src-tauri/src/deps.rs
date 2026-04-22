@@ -160,7 +160,7 @@ fn frontend_install_args(package_manager: &FrontendPackageManager) -> Vec<String
     match package_manager {
         FrontendPackageManager::Npm | FrontendPackageManager::Auto => vec!["install".to_string()],
         FrontendPackageManager::Pnpm => {
-            vec!["install".to_string(), "--frozen-lockfile".to_string()]
+            vec!["install".to_string(), "--no-frozen-lockfile".to_string()]
         }
         FrontendPackageManager::Yarn => vec!["install".to_string()],
     }

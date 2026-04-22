@@ -313,6 +313,7 @@ export default function App() {
   const selectedInstallationIdRef = useRef<string | null>(null);
   const coreInputRef = useRef("");
   const frontendInputRef = useRef("");
+  const operationRefreshTimerRef = useRef<number | null>(null);
   const nodeInputRef = useRef("");
   const updateCheckInFlightRef = useRef(false);
   const updateInstallInFlightRef = useRef(false);
@@ -538,17 +539,28 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
+
+    const scheduleRefresh = () => {
+      if (operationRefreshTimerRef.current != null) {
+        return;
+      }
+      operationRefreshTimerRef.current = window.setTimeout(() => {
+        operationRefreshTimerRef.current = null;
+        const installationId = selectedInstallationIdRef.current;
+        if (installationId) {
+          void refreshDetail(installationId);
+        }
+        void refreshInstallations();
+      }, 250);
+    };
+
     api
       .subscribeOperationEvents((event) => {
         if (cancelled) return;
         setEvents((prev) => [event, ...prev].slice(0, 100));
+        scheduleRefresh();
         if (event.phase === "done" || event.phase === "error") {
           setRegistryRefreshToken((value) => value + 1);
-          const installationId = selectedInstallationIdRef.current;
-          if (installationId) {
-            void refreshDetail(installationId);
-          }
-          void refreshInstallations();
         }
       })
       .then((fn) => {
@@ -560,6 +572,10 @@ export default function App() {
       });
     return () => {
       cancelled = true;
+      if (operationRefreshTimerRef.current != null) {
+        window.clearTimeout(operationRefreshTimerRef.current);
+        operationRefreshTimerRef.current = null;
+      }
       if (unlisten) unlisten();
     };
   }, []);
@@ -1618,55 +1634,55 @@ export default function App() {
                     })
                   }
                   onSetBaseTarget={(input, clearOverlays) =>
-                    runStackMutationAction(async () => {
+                    runActionOk(async () => {
                       await api.setRepoBaseTarget({
                         repoId: frontendRepo.id,
                         input,
                         clearOverlays,
                         dirtyRepoStrategy: "abort",
-                        syncDependencies: false
+                        syncDependencies: true
                       });
                     })
                   }
                   onAddOverlay={(input) =>
-                    runStackMutationAction(async () => {
+                    runActionOk(async () => {
                       await api.addRepoOverlay({
                         repoId: frontendRepo.id,
                         input,
                         dirtyRepoStrategy: "abort",
-                        syncDependencies: false
+                        syncDependencies: true
                       });
                     })
                   }
                   onSetOverlayEnabled={(overlayId, enabled) =>
-                    runStackMutationAction(async () => {
+                    runActionOk(async () => {
                       await api.setRepoOverlayEnabled({
                         repoId: frontendRepo.id,
                         overlayId,
                         enabled,
                         dirtyRepoStrategy: "abort",
-                        syncDependencies: false
+                        syncDependencies: true
                       });
                     })
                   }
                   onRemoveOverlay={(overlayId) =>
-                    runStackMutationAction(async () => {
+                    runActionOk(async () => {
                       await api.removeRepoOverlay({
                         repoId: frontendRepo.id,
                         overlayId,
                         dirtyRepoStrategy: "abort",
-                        syncDependencies: false
+                        syncDependencies: true
                       });
                     })
                   }
                   onMoveOverlay={(overlayId, direction) =>
-                    runStackMutationAction(async () => {
+                    runActionOk(async () => {
                       await api.moveRepoOverlay({
                         repoId: frontendRepo.id,
                         overlayId,
                         direction,
                         dirtyRepoStrategy: "abort",
-                        syncDependencies: false
+                        syncDependencies: true
                       });
                     })
                   }

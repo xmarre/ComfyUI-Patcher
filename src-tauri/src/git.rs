@@ -127,6 +127,19 @@ fn filter_meaningful_status_entries(entries: Vec<StatusEntry>) -> Vec<StatusEntr
         .collect()
 }
 
+async fn run_git_owned(path: &Path, args: &[String]) -> AppResult<String> {
+    let output = output_command("git", args, Some(path)).await?;
+    if !output.status.success() {
+        return Err(AppError::Git(format!(
+            "{}
+{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 pub async fn run_git(path: &Path, args: &[&str]) -> AppResult<String> {
     let args_vec: Vec<String> = args.iter().map(|value| (*value).to_string()).collect();
     let output = output_command("git", &args_vec, Some(path)).await?;
@@ -151,6 +164,26 @@ async fn run_git_raw(path: &Path, args: &[&str]) -> AppResult<String> {
         )));
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+pub async fn checkout_paths(path: &Path, paths: &[String]) -> AppResult<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let mut args = vec!["checkout".to_string(), "--".to_string()];
+    args.extend(paths.iter().cloned());
+    run_git_owned(path, &args).await?;
+    Ok(())
+}
+
+pub async fn clean_untracked_paths(path: &Path, paths: &[String]) -> AppResult<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let mut args = vec!["clean".to_string(), "-f".to_string(), "--".to_string()];
+    args.extend(paths.iter().cloned());
+    run_git_owned(path, &args).await?;
+    Ok(())
 }
 
 pub async fn run_git_allow_fail(path: &Path, args: &[&str]) -> AppResult<Option<String>> {
