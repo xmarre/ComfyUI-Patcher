@@ -246,8 +246,9 @@ async fn cleanup_frontend_dependency_artifacts(
     operation_id: &str,
     repo: &ManagedRepo,
     path: &Path,
+    did_sync_dependencies: bool,
 ) -> AppResult<()> {
-    if repo.kind != RepoKind::Frontend {
+    if repo.kind != RepoKind::Frontend || !did_sync_dependencies {
         return Ok(());
     }
 
@@ -1910,7 +1911,15 @@ async fn apply_repo_tracking_state(
             sync_dependencies,
         )
         .await?;
-        cleanup_frontend_dependency_artifacts(state, app, operation_id, repo, path).await?;
+        cleanup_frontend_dependency_artifacts(
+            state,
+            app,
+            operation_id,
+            repo,
+            path,
+            sync_dependencies,
+        )
+        .await?;
         ensure_repo_clean_after_patcher_mutation(path, "patcher-controlled checkout materialization")
             .await?;
         refresh_repo_state(state, &repo.id).await?;
@@ -2474,9 +2483,6 @@ async fn create_checkpoint_if_needed(
     strategy: &DirtyRepoStrategy,
 ) -> AppResult<RepoCheckpoint> {
     let path = Path::new(&repo.local_path);
-    if repo.kind == RepoKind::Frontend {
-        let _ = restore_frontend_lockfile_artifacts(path).await?;
-    }
     let status = inspect_repo(path).await?;
     let head = status
         .head_sha
@@ -5761,7 +5767,15 @@ async fn run_rollback_repo(
             input.sync_dependencies,
         )
         .await?;
-        cleanup_frontend_dependency_artifacts(&state, &app, &operation_id, &repo, path).await?;
+        cleanup_frontend_dependency_artifacts(
+            &state,
+            &app,
+            &operation_id,
+            &repo,
+            path,
+            input.sync_dependencies,
+        )
+        .await?;
         if !(input.restore_stash && checkpoint.stash_created) {
             ensure_repo_clean_after_patcher_mutation(path, "patcher-controlled rollback restore")
                 .await?;
@@ -5920,7 +5934,15 @@ async fn run_restore_checkpoint(
             input.sync_dependencies,
         )
         .await?;
-        cleanup_frontend_dependency_artifacts(&state, &app, &operation_id, &repo, path).await?;
+        cleanup_frontend_dependency_artifacts(
+            &state,
+            &app,
+            &operation_id,
+            &repo,
+            path,
+            input.sync_dependencies,
+        )
+        .await?;
         if !(input.restore_stash && checkpoint.stash_created) {
             ensure_repo_clean_after_patcher_mutation(path, "patcher-controlled checkpoint restore")
                 .await?;
