@@ -14,8 +14,8 @@ use crate::deps::{execute_dependency_sync, plan_dependency_sync};
 use crate::errors::{AppError, AppResult};
 use crate::git::{
     apply_stash, apply_stash_keep, canonicalize_remote, checkout_paths, clean_untracked_paths,
-    clone_repo, commits_between, diff_name_status, drop_stash, ensure_clean_or_apply_strategy,
-    fetch_origin, fetch_refspec, force_fetch_refspec, inspect_repo, is_git_repo,
+    clone_repo, commits_between, diff_name_status, ensure_clean_or_apply_strategy, fetch_origin,
+    fetch_refspec, force_fetch_refspec, inspect_repo, is_git_repo,
     join_custom_node_path, merge_abort, merge_no_ff, preview_merge_conflicts, reset_hard,
     rev_parse, run_git_allow_fail, submodule_update, switch_branch, switch_detached,
     validate_custom_node_dir_name, RepoStatus,
@@ -1933,9 +1933,9 @@ async fn apply_repo_tracking_state(
         ensure_repo_clean_after_patcher_mutation(path, "patcher-controlled checkout materialization")
             .await?;
 
-        let reapplied_stash_ref = match checkpoint.stash_ref.as_deref() {
+        let reapplied_stash_commit = match checkpoint.stash_ref.as_deref() {
             Some(stash_id) if checkpoint.stash_created => {
-                let stash_ref = apply_stash_keep(path, stash_id).await?;
+                let stash_commit = apply_stash_keep(path, stash_id).await?;
                 log_operation(
                     state,
                     app,
@@ -1944,7 +1944,7 @@ async fn apply_repo_tracking_state(
                     "info",
                     "reapplied pre-existing local worktree changes",
                 );
-                Some(stash_ref)
+                Some(stash_commit)
             }
             _ => None,
         };
@@ -1961,22 +1961,20 @@ async fn apply_repo_tracking_state(
             )?;
         }
 
-        if let Some(stash_ref) = reapplied_stash_ref {
+        if let Some(stash_commit) = reapplied_stash_commit {
             state
                 .db
                 .update_checkpoint_stash(&checkpoint.id, false, None)?;
-            if let Err(err) = drop_stash(path, &stash_ref).await {
-                log_operation(
-                    state,
-                    app,
-                    operation_id,
-                    "stash",
-                    "warn",
-                    format!(
-                        "local changes were restored, but the redundant saved stash could not be dropped: {err}"
-                    ),
-                );
-            }
+            log_operation(
+                state,
+                app,
+                operation_id,
+                "stash",
+                "info",
+                format!(
+                    "retained recovery stash {stash_commit}; automatic deletion is skipped because stash positions are mutable"
+                ),
+            );
         }
 
         Ok::<(), AppError>(())
