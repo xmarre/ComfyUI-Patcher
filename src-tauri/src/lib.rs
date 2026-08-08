@@ -15,9 +15,10 @@ use crate::errors::{AppError, AppResult};
 use crate::git::{
     apply_stash, canonicalize_remote, checkout_paths, clean_untracked_paths, clone_repo,
     commits_between, diff_name_status, ensure_clean_or_apply_strategy, fetch_origin,
-    fetch_refspec, inspect_repo, is_git_repo, join_custom_node_path, merge_abort, merge_no_ff,
-    preview_merge_conflicts, reset_hard, rev_parse, run_git_allow_fail, submodule_update,
-    switch_branch, switch_detached, validate_custom_node_dir_name, RepoStatus,
+    fetch_refspec, force_fetch_refspec, inspect_repo, is_git_repo, join_custom_node_path,
+    merge_abort, merge_no_ff, preview_merge_conflicts, reset_hard, rev_parse,
+    run_git_allow_fail, submodule_update, switch_branch, switch_detached,
+    validate_custom_node_dir_name, RepoStatus,
 };
 use crate::models::*;
 use crate::state::AppState;
@@ -815,7 +816,7 @@ async fn ensure_preview_target_available(
                 .ok_or_else(|| AppError::Github("missing PR number".to_string()))?;
             let local_ref = preview_ref_name("pr", &pr_number.to_string());
             let refspec = format!("pull/{pr_number}/head:{local_ref}");
-            fetch_refspec(path, "origin", &refspec).await?;
+            force_fetch_refspec(path, "origin", &refspec).await?;
             Ok(local_ref)
         }
         TargetKind::Branch | TargetKind::DefaultBranch | TargetKind::NamedRef => {
@@ -1797,7 +1798,7 @@ async fn materialize_tracked_state(
             "info",
             format!("fetching PR #{pr_number}"),
         );
-        if let Err(err) = fetch_refspec(path, "origin", &refspec).await {
+        if let Err(err) = force_fetch_refspec(path, "origin", &refspec).await {
             overlay.last_apply_status = Some(OverlayApplyStatus::Error);
             overlay.last_error = Some(err.to_string());
             return Err((next_state, err));
@@ -2579,7 +2580,9 @@ async fn apply_resolved_target(
             let pr_number = resolved
                 .pr_number
                 .ok_or_else(|| AppError::Github("missing PR number".to_string()))?;
-            let refspec = format!("pull/{pr_number}/head:{}", resolved.checkout_ref);
+            // Fetch into FETCH_HEAD first. The generated checkout branch may
+            // already be checked out, and PR heads may be force-pushed.
+            let refspec = format!("pull/{pr_number}/head");
             fetch_refspec(path, "origin", &refspec).await?;
             log_operation(
                 state,
