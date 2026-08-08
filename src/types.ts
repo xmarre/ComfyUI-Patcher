@@ -79,6 +79,7 @@ export type Installation = {
   frontendSettings: FrontendSettings | null;
   detectedEnvKind: "venv" | "conda" | "system" | "unknown";
   isGitRepo: boolean;
+  lastReconciledAt: string | null;
   createdAt: string;
   updatedAt: string;
 };
