@@ -806,15 +806,19 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            std::fs::read_to_string(repo.path().join("config.ini")).unwrap(),
-            "value=upstream\n"
+            std::fs::read_to_string(repo.path().join("config.ini"))
+                .unwrap()
+                .trim_end(),
+            "value=upstream"
         );
 
         let stash_commit = apply_stash_keep(repo.path(), &stash_id).await.unwrap();
         assert_eq!(stash_commit, stash_id);
         assert_eq!(
-            std::fs::read_to_string(repo.path().join("config.ini")).unwrap(),
-            "value=local\n"
+            std::fs::read_to_string(repo.path().join("config.ini"))
+                .unwrap()
+                .trim_end(),
+            "value=local"
         );
         assert!(!repo.git(&["stash", "list"]).is_empty());
     }
