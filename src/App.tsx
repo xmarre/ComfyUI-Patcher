@@ -279,6 +279,7 @@ export default function App() {
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [isCheckingForUpdates, setIsCheckingForUpdates] = useState(false);
   const [isInstallingUpdate, setIsInstallingUpdate] = useState(false);
+  const [isReconciling, setIsReconciling] = useState(false);
   const [updateContentLength, setUpdateContentLength] = useState<number | null>(null);
   const [updateDownloadedBytes, setUpdateDownloadedBytes] = useState(0);
   const [registerForm, setRegisterForm] = useState({
@@ -315,9 +316,6 @@ export default function App() {
   const selectedInstallationIdRef = useRef<string | null>(null);
   const coreInputRef = useRef("");
   const frontendInputRef = useRef("");
-  const operationRefreshTimerRef = useRef<number | null>(null);
-  const operationRefreshInFlightRef = useRef(false);
-  const operationRefreshPendingRef = useRef(false);
   const nodeInputRef = useRef("");
   const updateCheckInFlightRef = useRef(false);
   const updateInstallInFlightRef = useRef(false);
@@ -544,47 +542,20 @@ export default function App() {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
 
-    const runRefreshCycle = async () => {
-      if (operationRefreshInFlightRef.current) {
-        operationRefreshPendingRef.current = true;
-        return;
-      }
-      operationRefreshInFlightRef.current = true;
-      try {
-        const installationId = selectedInstallationIdRef.current;
-        if (installationId) {
-          await refreshDetail(installationId);
-        }
-        await refreshInstallations();
-      } finally {
-        operationRefreshInFlightRef.current = false;
-        if (!cancelled && operationRefreshPendingRef.current) {
-          operationRefreshPendingRef.current = false;
-          scheduleRefresh();
-        }
-      }
-    };
-
-    const scheduleRefresh = () => {
-      if (operationRefreshInFlightRef.current) {
-        operationRefreshPendingRef.current = true;
-        return;
-      }
-      if (operationRefreshTimerRef.current != null) {
-        return;
-      }
-      operationRefreshTimerRef.current = window.setTimeout(() => {
-        operationRefreshTimerRef.current = null;
-        void runRefreshCycle();
-      }, 250);
-    };
-
     api
       .subscribeOperationEvents((event) => {
         if (cancelled) return;
         setEvents((prev) => [event, ...prev].slice(0, 100));
-        scheduleRefresh();
         if (event.phase === "done" || event.phase === "error") {
+          const installationId = selectedInstallationIdRef.current;
+          if (installationId) {
+            void refreshDetail(installationId).catch((error) => {
+              if (!cancelled) setActionError(toErrorMessage(error));
+            });
+          }
+          void refreshInstallations().catch((error) => {
+            if (!cancelled) setActionError(toErrorMessage(error));
+          });
           setRegistryRefreshToken((value) => value + 1);
         }
       })
@@ -597,11 +568,6 @@ export default function App() {
       });
     return () => {
       cancelled = true;
-      operationRefreshPendingRef.current = false;
-      if (operationRefreshTimerRef.current != null) {
-        window.clearTimeout(operationRefreshTimerRef.current);
-        operationRefreshTimerRef.current = null;
-      }
       if (unlisten) unlisten();
     };
   }, []);
@@ -1031,14 +997,24 @@ export default function App() {
                 <div className="row gap page-actions">
                   <button
                     className="secondary"
+                    disabled={isReconciling}
                     onClick={() =>
                       void runAction(async () => {
-                        const next = await api.reconcileInstallation(selectedInstallation.id);
-                        setDetail(next);
+                        const installationId = selectedInstallation.id;
+                        setIsReconciling(true);
+                        try {
+                          const next = await api.reconcileInstallation(installationId);
+                          if (selectedInstallationIdRef.current === installationId) {
+                            setDetail(next);
+                          }
+                          await refreshInstallations();
+                        } finally {
+                          setIsReconciling(false);
+                        }
                       })
                     }
                   >
-                    Reconcile
+                    {isReconciling ? "Reconciling…" : "Reconcile"}
                   </button>
                   <button
                     className="secondary"
