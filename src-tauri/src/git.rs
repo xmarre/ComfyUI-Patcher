@@ -437,6 +437,16 @@ pub async fn fetch_refspec(path: &Path, remote: &str, refspec: &str) -> AppResul
     Ok(())
 }
 
+/// Fetches a refspec while allowing its destination ref to move backwards.
+///
+/// This must only be used for patcher-owned generated refs. Pull request heads
+/// can be force-pushed, so their cached preview/overlay refs are not guaranteed
+/// to advance by fast-forward.
+pub async fn force_fetch_refspec(path: &Path, remote: &str, refspec: &str) -> AppResult<()> {
+    run_git(path, &["fetch", "--force", remote, refspec]).await?;
+    Ok(())
+}
+
 pub async fn merge_no_ff(path: &Path, target: &str, message: &str) -> AppResult<()> {
     run_git(
         path,
