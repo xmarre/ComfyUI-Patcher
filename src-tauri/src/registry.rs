@@ -438,7 +438,7 @@ name = "right-name"
         };
         assert_eq!(
             entry.canonical_git_remote().as_deref(),
-            Some("https://github.com/wallen0322/ComfyUI-Wan22FMLF")
+            Some("https://github.com/wallen0322/comfyui-wan22fmlf")
         );
 
         let copy_entry = ManagerCustomNodeEntry {
