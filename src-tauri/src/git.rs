@@ -567,18 +567,17 @@ async fn resolve_stash_ref(path: &Path, stash_id: &str) -> AppResult<String> {
 
 /// Reapplies a saved worktree without dropping its stash entry.
 ///
-/// Keeping the stash until the caller has persisted the successful repository
-/// state makes restoration transactional: a later bookkeeping failure can
-/// still reset to the checkpoint and recover the original local changes.
+/// Applies by immutable commit ID and keeps the stash as a recovery entry.
+/// Stash positions can shift concurrently, so callers must not later delete a
+/// positional `stash@{n}` that was resolved before this apply.
 pub async fn apply_stash_keep(path: &Path, stash_id: &str) -> AppResult<String> {
-    let stash_ref = resolve_stash_ref(path, stash_id).await?;
-    let _ = run_git(path, &["stash", "apply", &stash_ref]).await?;
-    Ok(stash_ref)
-}
-
-pub async fn drop_stash(path: &Path, stash_ref: &str) -> AppResult<()> {
-    let _ = run_git(path, &["stash", "drop", stash_ref]).await?;
-    Ok(())
+    let stash_commit = if stash_id.starts_with("stash@{") {
+        run_git(path, &["rev-parse", "--verify", stash_id]).await?
+    } else {
+        stash_id.to_string()
+    };
+    let _ = run_git(path, &["stash", "apply", &stash_commit]).await?;
+    Ok(stash_commit)
 }
 
 fn normalize_linux_path(input: &str) -> String {
@@ -792,7 +791,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reapply_stash_keeps_recovery_entry_until_explicit_drop() {
+    async fn reapply_stash_by_commit_keeps_recovery_entry() {
         let repo = TestRepo::new();
         repo.git(&["init"]);
         repo.git(&["config", "user.name", "ComfyUI Patcher Test"]);
@@ -811,15 +810,13 @@ mod tests {
             "value=upstream\n"
         );
 
-        let stash_ref = apply_stash_keep(repo.path(), &stash_id).await.unwrap();
+        let stash_commit = apply_stash_keep(repo.path(), &stash_id).await.unwrap();
+        assert_eq!(stash_commit, stash_id);
         assert_eq!(
             std::fs::read_to_string(repo.path().join("config.ini")).unwrap(),
             "value=local\n"
         );
         assert!(!repo.git(&["stash", "list"]).is_empty());
-
-        drop_stash(repo.path(), &stash_ref).await.unwrap();
-        assert!(repo.git(&["stash", "list"]).is_empty());
     }
 
     #[test]
