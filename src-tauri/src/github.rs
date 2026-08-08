@@ -14,6 +14,7 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct GithubClient {
     client: reqwest::Client,
+    web_client: reqwest::Client,
     _token: Option<String>,
 }
 
@@ -76,10 +77,28 @@ impl GithubClient {
             .timeout(Duration::from_secs(30))
             .default_headers(headers)
             .build()?;
+        let web_client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30))
+            .user_agent("comfyui-patcher")
+            .build()?;
         Ok(Self {
             client,
+            web_client,
             _token: token,
         })
+    }
+
+    async fn resolve_repo_redirect(&self, repo_url: &str) -> Option<String> {
+        let response = self
+            .web_client
+            .head(repo_url)
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?;
+        canonicalize_remote(response.url().as_str())
     }
 
     async fn get_repo(&self, owner: &str, repo: &str) -> AppResult<RepoResponse> {
@@ -145,8 +164,12 @@ impl GithubClient {
         }
 
         if let Some(tree) = parse_branch_url(trimmed) {
-            let canonical_repo_url = format!("https://github.com/{}/{}", tree.owner, tree.repo);
-            let fetch_url = format!("https://github.com/{}/{}.git", tree.owner, tree.repo);
+            let requested_repo_url = format!("https://github.com/{}/{}", tree.owner, tree.repo);
+            let canonical_repo_url = self
+                .resolve_repo_redirect(&requested_repo_url)
+                .await
+                .unwrap_or(requested_repo_url);
+            let fetch_url = format!("{canonical_repo_url}.git");
             let (target_kind, checkout_ref) = resolve_tree_ref(&fetch_url, &tree.branch).await?;
             return Ok(ResolvedTarget {
                 source_input: trimmed.to_string(),
@@ -174,12 +197,16 @@ impl GithubClient {
         }
 
         if let Some(commit) = parse_commit_url(trimmed) {
-            let canonical_repo_url = format!("https://github.com/{}/{}", commit.owner, commit.repo);
+            let requested_repo_url = format!("https://github.com/{}/{}", commit.owner, commit.repo);
+            let canonical_repo_url = self
+                .resolve_repo_redirect(&requested_repo_url)
+                .await
+                .unwrap_or(requested_repo_url);
             return Ok(ResolvedTarget {
                 source_input: trimmed.to_string(),
                 target_kind: TargetKind::Commit,
                 canonical_repo_url: canonical_repo_url.clone(),
-                fetch_url: format!("https://github.com/{}/{}.git", commit.owner, commit.repo),
+                fetch_url: format!("{canonical_repo_url}.git"),
                 checkout_ref: commit.sha.clone(),
                 resolved_sha: Some(commit.sha.clone()),
                 pr_number: None,
@@ -197,7 +224,6 @@ impl GithubClient {
             let canonical_repo_url = canonicalize_remote(&canonical_repo_url).ok_or_else(|| {
                 AppError::Github("could not canonicalize repository URL".to_string())
             })?;
-            let fetch_url = format!("{canonical_repo_url}.git");
 
             match self.get_repo(&repo.owner, &repo.repo).await {
                 Ok(metadata) => {
@@ -224,6 +250,11 @@ impl GithubClient {
                     });
                 }
                 Err(api_err) => {
+                    let canonical_repo_url = self
+                        .resolve_repo_redirect(&canonical_repo_url)
+                        .await
+                        .unwrap_or(canonical_repo_url);
+                    let fetch_url = format!("{canonical_repo_url}.git");
                     let default_branch = ls_remote_default_branch_remote(&fetch_url)
                         .await
                         .map_err(|git_err| {

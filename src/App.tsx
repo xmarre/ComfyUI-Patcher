@@ -5,6 +5,7 @@ import RepoCard from "./components/RepoCard";
 import OperationPanel from "./components/OperationPanel";
 import ManagerRegistryBrowser from "./components/ManagerRegistryBrowser";
 import type {
+  DirtyRepoStrategy,
   FrontendPackageManager,
   FrontendSettings,
   Installation,
@@ -116,6 +117,7 @@ function formatBytes(value: number | null): string {
 }
 
 const defaultFrontendPackageManager: FrontendPackageManager = "auto";
+const defaultDirtyRepoStrategy: DirtyRepoStrategy = "stash";
 
 type MainTab = "overview" | "patching" | "custom_nodes" | "activity";
 
@@ -1050,7 +1052,7 @@ export default function App() {
                       void runAction(async () => {
                         await api.updateAll({
                           installationId: selectedInstallation.id,
-                          dirtyRepoStrategy: "abort",
+                          dirtyRepoStrategy: defaultDirtyRepoStrategy,
                           syncDependencies: true,
                           restartAfterSuccess: false
                         });
@@ -1479,7 +1481,7 @@ export default function App() {
                       await api.patchCore({
                         installationId: selectedInstallation.id,
                         input: coreInput,
-                        dirtyRepoStrategy: "abort",
+                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
                         setTrackedTarget: true,
                         syncDependencies: true,
                         restartAfterSuccess: false
@@ -1510,7 +1512,7 @@ export default function App() {
                     runAction(async () => {
                       await api.updateRepo({
                         repoId: coreRepo.id,
-                        dirtyRepoStrategy: "abort",
+                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
                         syncDependencies: true
                       });
                     })
@@ -1521,7 +1523,7 @@ export default function App() {
                         repoId: coreRepo.id,
                         input,
                         clearOverlays,
-                        dirtyRepoStrategy: "abort",
+                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
                         syncDependencies: false
                       });
                     })
@@ -1531,7 +1533,7 @@ export default function App() {
                       await api.addRepoOverlay({
                         repoId: coreRepo.id,
                         input,
-                        dirtyRepoStrategy: "abort",
+                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
                         syncDependencies: false
                       });
                     })
@@ -1542,7 +1544,7 @@ export default function App() {
                         repoId: coreRepo.id,
                         overlayId,
                         enabled,
-                        dirtyRepoStrategy: "abort",
+                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
                         syncDependencies: false
                       });
                     })
@@ -1552,7 +1554,7 @@ export default function App() {
                       await api.removeRepoOverlay({
                         repoId: coreRepo.id,
                         overlayId,
-                        dirtyRepoStrategy: "abort",
+                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
                         syncDependencies: false
                       });
                     })
@@ -1563,7 +1565,7 @@ export default function App() {
                         repoId: coreRepo.id,
                         overlayId,
                         direction,
-                        dirtyRepoStrategy: "abort",
+                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
                         syncDependencies: false
                       });
                     })
@@ -1618,7 +1620,7 @@ export default function App() {
                         installationId: selectedInstallation.id,
                         input: frontendInput,
                         existingRepoConflictStrategy: "replace",
-                        dirtyRepoStrategy: "abort",
+                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
                         setTrackedTarget: true,
                         syncDependencies: true,
                         restartAfterSuccess: false
@@ -1652,7 +1654,7 @@ export default function App() {
                     runAction(async () => {
                       await api.updateRepo({
                         repoId: frontendRepo.id,
-                        dirtyRepoStrategy: "abort",
+                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
                         syncDependencies: true
                       });
                     })
@@ -1663,7 +1665,7 @@ export default function App() {
                         repoId: frontendRepo.id,
                         input,
                         clearOverlays,
-                        dirtyRepoStrategy: "abort",
+                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
                         syncDependencies: true
                       });
                     })
@@ -1673,7 +1675,7 @@ export default function App() {
                       await api.addRepoOverlay({
                         repoId: frontendRepo.id,
                         input,
-                        dirtyRepoStrategy: "abort",
+                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
                         syncDependencies: true
                       });
                     })
@@ -1684,7 +1686,7 @@ export default function App() {
                         repoId: frontendRepo.id,
                         overlayId,
                         enabled,
-                        dirtyRepoStrategy: "abort",
+                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
                         syncDependencies: true
                       });
                     })
@@ -1694,7 +1696,7 @@ export default function App() {
                       await api.removeRepoOverlay({
                         repoId: frontendRepo.id,
                         overlayId,
-                        dirtyRepoStrategy: "abort",
+                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
                         syncDependencies: true
                       });
                     })
@@ -1705,7 +1707,7 @@ export default function App() {
                         repoId: frontendRepo.id,
                         overlayId,
                         direction,
-                        dirtyRepoStrategy: "abort",
+                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
                         syncDependencies: true
                       });
                     })
@@ -1758,7 +1760,7 @@ export default function App() {
                         installationId: selectedInstallation.id,
                         input: nodeInput,
                         existingRepoConflictStrategy: "install_with_suffix",
-                        dirtyRepoStrategy: "abort",
+                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
                         setTrackedTarget: true,
                         syncDependencies: true,
                         restartAfterSuccess: false
@@ -1798,7 +1800,7 @@ export default function App() {
                       input: entry.sourceInput ?? "",
                       targetLocalDirName,
                       existingRepoConflictStrategy: "install_with_suffix",
-                      dirtyRepoStrategy: "abort",
+                      dirtyRepoStrategy: defaultDirtyRepoStrategy,
                       setTrackedTarget: true,
                       syncDependencies: true,
                       restartAfterSuccess: false,
@@ -1854,7 +1856,7 @@ export default function App() {
                                 repoId: repo.id,
                                 input,
                                 clearOverlays,
-                                dirtyRepoStrategy: "abort",
+                                dirtyRepoStrategy: defaultDirtyRepoStrategy,
                                 syncDependencies: false
                               });
                             })
@@ -1864,7 +1866,7 @@ export default function App() {
                               await api.addRepoOverlay({
                                 repoId: repo.id,
                                 input,
-                                dirtyRepoStrategy: "abort",
+                                dirtyRepoStrategy: defaultDirtyRepoStrategy,
                                 syncDependencies: false
                               });
                             })
@@ -1875,7 +1877,7 @@ export default function App() {
                                 repoId: repo.id,
                                 overlayId,
                                 enabled,
-                                dirtyRepoStrategy: "abort",
+                                dirtyRepoStrategy: defaultDirtyRepoStrategy,
                                 syncDependencies: false
                               });
                             })
@@ -1885,7 +1887,7 @@ export default function App() {
                               await api.removeRepoOverlay({
                                 repoId: repo.id,
                                 overlayId,
-                                dirtyRepoStrategy: "abort",
+                                dirtyRepoStrategy: defaultDirtyRepoStrategy,
                                 syncDependencies: false
                               });
                             })
@@ -1896,7 +1898,7 @@ export default function App() {
                                 repoId: repo.id,
                                 overlayId,
                                 direction,
-                                dirtyRepoStrategy: "abort",
+                                dirtyRepoStrategy: defaultDirtyRepoStrategy,
                                 syncDependencies: false
                               });
                             })
@@ -1905,7 +1907,7 @@ export default function App() {
                             runAction(async () => {
                               await api.updateRepo({
                                 repoId: repo.id,
-                                dirtyRepoStrategy: "abort",
+                                dirtyRepoStrategy: defaultDirtyRepoStrategy,
                                 syncDependencies: true
                               });
                             })
