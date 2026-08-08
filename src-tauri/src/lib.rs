@@ -743,6 +743,9 @@ async fn hydrate_installation_detail(
         discovered_statuses.insert(repo.repo.id.clone(), repo.status);
     }
     let mut detail = state.db.get_installation_detail(installation_id)?;
+    // Cached warnings belong to the fast detail-read path. A full hydration
+    // rebuilds them from the freshly inspected repository state below.
+    detail.warnings.clear();
 
     if let Some(repo) = detail.core_repo.take() {
         let repo = enrich_managed_repo(
