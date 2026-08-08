@@ -45,6 +45,7 @@ impl Database {
                 frontend_settings_json TEXT,
                 detected_env_kind TEXT NOT NULL,
                 is_git_repo INTEGER NOT NULL,
+                last_reconciled_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -62,6 +63,11 @@ impl Database {
                 tracked_target_kind TEXT,
                 tracked_target_input TEXT,
                 tracked_target_resolved_sha TEXT,
+                live_status TEXT,
+                live_warnings_json TEXT NOT NULL DEFAULT '[]',
+                changed_files_json TEXT NOT NULL DEFAULT '[]',
+                dependency_state_json TEXT,
+                last_scanned_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -106,6 +112,8 @@ impl Database {
             "#,
         )?;
         ensure_installation_frontend_settings_column(&conn)?;
+        ensure_installation_reconciliation_column(&conn)?;
+        ensure_managed_repo_reconciliation_columns(&conn)?;
         ensure_repo_checkpoint_tracking_columns(&conn)?;
         let has_duplicate_roots = conn.query_row(
             "SELECT EXISTS(
@@ -183,7 +191,7 @@ impl Database {
         let now = now_rfc3339();
         let existing = {
             let mut stmt = tx.prepare(
-                "SELECT id, name, comfy_root, python_exe, custom_nodes_dir, launch_profile_json, frontend_settings_json, detected_env_kind, is_git_repo, created_at, updated_at
+                "SELECT id, name, comfy_root, python_exe, custom_nodes_dir, launch_profile_json, frontend_settings_json, detected_env_kind, is_git_repo, created_at, updated_at, last_reconciled_at
                  FROM installations
                  WHERE comfy_root = ?1
                  ORDER BY updated_at DESC, created_at DESC
@@ -269,7 +277,7 @@ impl Database {
     pub fn list_installations(&self) -> AppResult<Vec<Installation>> {
         let conn = self.connect()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, comfy_root, python_exe, custom_nodes_dir, launch_profile_json, frontend_settings_json, detected_env_kind, is_git_repo, created_at, updated_at
+            "SELECT id, name, comfy_root, python_exe, custom_nodes_dir, launch_profile_json, frontend_settings_json, detected_env_kind, is_git_repo, created_at, updated_at, last_reconciled_at
              FROM installations
              ORDER BY name ASC",
         )?;
@@ -284,7 +292,7 @@ impl Database {
     pub fn get_installation(&self, id: &str) -> AppResult<Option<Installation>> {
         let conn = self.connect()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, comfy_root, python_exe, custom_nodes_dir, launch_profile_json, frontend_settings_json, detected_env_kind, is_git_repo, created_at, updated_at
+            "SELECT id, name, comfy_root, python_exe, custom_nodes_dir, launch_profile_json, frontend_settings_json, detected_env_kind, is_git_repo, created_at, updated_at, last_reconciled_at
              FROM installations WHERE id = ?1",
         )?;
         stmt.query_row(params![id], map_installation)
@@ -295,7 +303,7 @@ impl Database {
     pub fn get_installation_by_root(&self, comfy_root: &str) -> AppResult<Option<Installation>> {
         let conn = self.connect()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, comfy_root, python_exe, custom_nodes_dir, launch_profile_json, frontend_settings_json, detected_env_kind, is_git_repo, created_at, updated_at
+            "SELECT id, name, comfy_root, python_exe, custom_nodes_dir, launch_profile_json, frontend_settings_json, detected_env_kind, is_git_repo, created_at, updated_at, last_reconciled_at
              FROM installations WHERE comfy_root = ?1
              ORDER BY updated_at DESC, created_at DESC
              LIMIT 1",
@@ -345,22 +353,40 @@ impl Database {
         let mut core_repo = None;
         let mut frontend_repo = None;
         let mut custom_node_repos = Vec::new();
+        let mut warnings = Vec::new();
         for repo in repos {
+            for warning in &repo.live_warnings {
+                warnings.push(format!("{}: {}", repo.display_name, warning));
+            }
             match repo.kind {
                 RepoKind::Core => core_repo = Some(repo),
                 RepoKind::Frontend => frontend_repo = Some(repo),
                 RepoKind::CustomNode => custom_node_repos.push(repo),
             }
         }
+        let last_reconciled_at = installation.last_reconciled_at.clone();
         Ok(InstallationDetail {
             installation,
             core_repo,
             frontend_repo,
             custom_node_repos,
-            warnings: Vec::new(),
-            last_reconciled_at: None,
+            warnings,
+            last_reconciled_at,
             is_running: false,
         })
+    }
+
+    pub fn mark_installation_reconciled(
+        &self,
+        installation_id: &str,
+        reconciled_at: &str,
+    ) -> AppResult<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            "UPDATE installations SET last_reconciled_at = ?2 WHERE id = ?1",
+            params![installation_id, reconciled_at],
+        )?;
+        Ok(())
     }
 
     pub fn upsert_repo(
@@ -474,31 +500,40 @@ impl Database {
         Ok(())
     }
 
-    pub fn update_repo_state(
-        &self,
-        repo_id: &str,
-        canonical_remote: Option<&str>,
-        current_head_sha: Option<&str>,
-        current_branch: Option<&str>,
-        is_detached: bool,
-        is_dirty: bool,
-    ) -> AppResult<()> {
+    pub fn update_repo_reconciliation_state(&self, repo: &mut ManagedRepo) -> AppResult<()> {
         let conn = self.connect()?;
+        let updated_at = now_rfc3339();
+        let live_status = serde_json::to_string(&repo.live_status)?;
+        let live_warnings_json = serde_json::to_string(&repo.live_warnings)?;
+        let changed_files_json = serde_json::to_string(&repo.changed_files)?;
+        let dependency_state_json = repo
+            .dependency_state
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         conn.execute(
             "UPDATE managed_repos
              SET canonical_remote = ?2, current_head_sha = ?3, current_branch = ?4,
-                 is_detached = ?5, is_dirty = ?6, updated_at = ?7
+                 is_detached = ?5, is_dirty = ?6, live_status = ?7,
+                 live_warnings_json = ?8, changed_files_json = ?9,
+                 dependency_state_json = ?10, last_scanned_at = ?11, updated_at = ?12
              WHERE id = ?1",
             params![
-                repo_id,
-                canonical_remote,
-                current_head_sha,
-                current_branch,
-                is_detached as i64,
-                is_dirty as i64,
-                now_rfc3339()
+                repo.id,
+                repo.canonical_remote,
+                repo.current_head_sha,
+                repo.current_branch,
+                repo.is_detached as i64,
+                repo.is_dirty as i64,
+                live_status,
+                live_warnings_json,
+                changed_files_json,
+                dependency_state_json,
+                repo.last_scanned_at,
+                updated_at,
             ],
         )?;
+        repo.updated_at = updated_at;
         Ok(())
     }
 
@@ -560,7 +595,8 @@ impl Database {
         let conn = self.connect()?;
         let mut stmt = conn.prepare(
             "SELECT id, installation_id, kind, display_name, local_path, canonical_remote, current_head_sha, current_branch,
-                    is_detached, is_dirty, tracked_target_kind, tracked_target_input, tracked_target_resolved_sha, created_at, updated_at
+                    is_detached, is_dirty, tracked_target_kind, tracked_target_input, tracked_target_resolved_sha, created_at, updated_at,
+                    live_status, live_warnings_json, changed_files_json, dependency_state_json, last_scanned_at
              FROM managed_repos WHERE id = ?1",
         )?;
         stmt.query_row(params![repo_id], map_repo)
@@ -572,7 +608,8 @@ impl Database {
         let conn = self.connect()?;
         let mut stmt = conn.prepare(
             "SELECT id, installation_id, kind, display_name, local_path, canonical_remote, current_head_sha, current_branch,
-                    is_detached, is_dirty, tracked_target_kind, tracked_target_input, tracked_target_resolved_sha, created_at, updated_at
+                    is_detached, is_dirty, tracked_target_kind, tracked_target_input, tracked_target_resolved_sha, created_at, updated_at,
+                    live_status, live_warnings_json, changed_files_json, dependency_state_json, last_scanned_at
              FROM managed_repos WHERE installation_id = ?1 ORDER BY kind, display_name",
         )?;
         let rows = stmt.query_map(params![installation_id], map_repo)?;
@@ -886,6 +923,7 @@ fn map_installation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Installation> {
             .map_err(to_sql_err)?,
         detected_env_kind: row.get(7)?,
         is_git_repo: row.get::<_, i64>(8)? != 0,
+        last_reconciled_at: row.get(11)?,
         created_at: row.get(9)?,
         updated_at: row.get(10)?,
     })
@@ -897,6 +935,11 @@ fn map_repo(row: &rusqlite::Row<'_>) -> rusqlite::Result<ManagedRepo> {
     let canonical_remote: Option<String> = row.get(5)?;
     let tracked_target_input: Option<String> = row.get(11)?;
     let tracked_target_resolved_sha: Option<String> = row.get(12)?;
+    let live_status_json: Option<String> = row.get(15)?;
+    let live_warnings_json: Option<String> = row.get(16)?;
+    let changed_files_json: Option<String> = row.get(17)?;
+    let dependency_state_json: Option<String> = row.get(18)?;
+    let is_dirty = row.get::<_, i64>(9)? != 0;
     let tracked_target_kind = tracked_kind_json
         .map(|json| serde_json::from_str(&json))
         .transpose()
@@ -911,7 +954,7 @@ fn map_repo(row: &rusqlite::Row<'_>) -> rusqlite::Result<ManagedRepo> {
         current_head_sha: row.get(6)?,
         current_branch: row.get(7)?,
         is_detached: row.get::<_, i64>(8)? != 0,
-        is_dirty: row.get::<_, i64>(9)? != 0,
+        is_dirty,
         tracked_target_kind: tracked_target_kind.clone(),
         tracked_target_input: tracked_target_input.clone(),
         tracked_target_resolved_sha: tracked_target_resolved_sha.clone(),
@@ -921,11 +964,32 @@ fn map_repo(row: &rusqlite::Row<'_>) -> rusqlite::Result<ManagedRepo> {
             tracked_target_resolved_sha.as_deref(),
             canonical_remote.as_deref(),
         )?,
-        live_status: RepoLiveStatus::Clean,
-        live_warnings: Vec::new(),
-        changed_files: Vec::new(),
-        dependency_state: None,
-        last_scanned_at: None,
+        live_status: live_status_json
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(to_sql_err)?
+            .unwrap_or_else(|| {
+                if is_dirty {
+                    RepoLiveStatus::Dirty
+                } else {
+                    RepoLiveStatus::Clean
+                }
+            }),
+        live_warnings: live_warnings_json
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(to_sql_err)?
+            .unwrap_or_default(),
+        changed_files: changed_files_json
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(to_sql_err)?
+            .unwrap_or_default(),
+        dependency_state: dependency_state_json
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(to_sql_err)?,
+        last_scanned_at: row.get(19)?,
         created_at: row.get(13)?,
         updated_at: row.get(14)?,
     })
@@ -1079,6 +1143,53 @@ fn ensure_repo_checkpoint_tracking_columns(conn: &Connection) -> AppResult<()> {
     Ok(())
 }
 
+fn ensure_installation_reconciliation_column(conn: &Connection) -> AppResult<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(installations)")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    let mut columns = Vec::new();
+    for row in rows {
+        columns.push(row?);
+    }
+    drop(stmt);
+
+    if !columns
+        .iter()
+        .any(|existing| existing == "last_reconciled_at")
+    {
+        conn.execute(
+            "ALTER TABLE installations ADD COLUMN last_reconciled_at TEXT",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+fn ensure_managed_repo_reconciliation_columns(conn: &Connection) -> AppResult<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(managed_repos)")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    let mut columns = Vec::new();
+    for row in rows {
+        columns.push(row?);
+    }
+    drop(stmt);
+
+    for (column_name, sql_type) in [
+        ("live_status", "TEXT"),
+        ("live_warnings_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("changed_files_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("dependency_state_json", "TEXT"),
+        ("last_scanned_at", "TEXT"),
+    ] {
+        if !columns.iter().any(|existing| existing == column_name) {
+            conn.execute(
+                &format!("ALTER TABLE managed_repos ADD COLUMN {column_name} {sql_type}"),
+                [],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn reconcile_in_flight_operations(conn: &Connection) -> AppResult<()> {
     let queued = serde_json::to_string(&OperationStatus::Queued)?;
     let running = serde_json::to_string(&OperationStatus::Running)?;
@@ -1096,4 +1207,82 @@ fn reconcile_in_flight_operations(conn: &Connection) -> AppResult<()> {
 
 fn to_sql_err(err: serde_json::Error) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestDataDir(PathBuf);
+
+    impl TestDataDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "comfyui-patcher-db-test-{}",
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDataDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn persists_reconciliation_state_for_fast_detail_reads() {
+        let data_dir = TestDataDir::new();
+        let db = Database::new(&data_dir.0).unwrap();
+        let installation = db
+            .upsert_installation_by_root(
+                "Test",
+                "/comfy",
+                Some("/comfy/python"),
+                "/comfy/custom_nodes",
+                None,
+                None,
+                Some("venv"),
+                true,
+            )
+            .unwrap();
+        let mut repo = db
+            .upsert_repo(
+                &installation.id,
+                RepoKind::CustomNode,
+                "test-node",
+                "/comfy/custom_nodes/test-node",
+                Some("https://github.com/example/test-node"),
+                Some("abc123"),
+                Some("main"),
+                false,
+                false,
+            )
+            .unwrap();
+
+        repo.live_status = RepoLiveStatus::Drifted;
+        repo.live_warnings = vec!["tracked state changed".to_string()];
+        repo.changed_files = vec!["requirements.txt".to_string()];
+        repo.last_scanned_at = Some("2026-08-08T05:00:00Z".to_string());
+        db.update_repo_reconciliation_state(&mut repo).unwrap();
+        db.mark_installation_reconciled(&installation.id, "2026-08-08T05:00:01Z")
+            .unwrap();
+
+        let detail = db.get_installation_detail(&installation.id).unwrap();
+        let persisted = &detail.custom_node_repos[0];
+        assert!(matches!(&persisted.live_status, RepoLiveStatus::Drifted));
+        assert_eq!(persisted.live_warnings, vec!["tracked state changed"]);
+        assert_eq!(persisted.changed_files, vec!["requirements.txt"]);
+        assert_eq!(
+            persisted.last_scanned_at.as_deref(),
+            Some("2026-08-08T05:00:00Z")
+        );
+        assert_eq!(
+            detail.last_reconciled_at.as_deref(),
+            Some("2026-08-08T05:00:01Z")
+        );
+        assert_eq!(detail.warnings, vec!["test-node: tracked state changed"]);
+    }
 }
