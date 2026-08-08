@@ -25,6 +25,7 @@ This cumulative maintenance release contains every merged change since v0.1.9.
 - Same-repository GitHub PR URLs can be resolved and fetched locally before falling back to the GitHub API.
 - Stack-edit actions defer broad dependency synchronization, while explicit updates and required frontend rebuild paths retain targeted synchronization.
 - pnpm frontend installs use frozen-lockfile mode to avoid rewriting managed lockfiles.
+- Release publishing can now be requested from a reviewed `main` commit; the workflow validates every version source and publishes the matching changelog section with the signed artifacts.
 
 ### Fixed
 

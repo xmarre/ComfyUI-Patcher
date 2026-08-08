@@ -2,8 +2,17 @@ name: publish
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
+    paths:
+      - ".github/release-request.json"
+  workflow_dispatch:
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -39,6 +48,73 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      - name: Validate release metadata
+        shell: pwsh
+        run: |
+          $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $packageLockVersion = (Get-Content package-lock.json -Raw | ConvertFrom-Json).version
+          $tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+
+          $cargoToml = Get-Content src-tauri/Cargo.toml -Raw
+          if ($cargoToml -notmatch '(?m)^version\s*=\s*"([^"]+)"\s*$') {
+            throw "Could not read the application version from src-tauri/Cargo.toml."
+          }
+          $cargoVersion = $Matches[1]
+
+          $cargoLock = Get-Content src-tauri/Cargo.lock -Raw
+          $cargoLockMatch = [regex]::Match(
+            $cargoLock,
+            '(?ms)\[\[package\]\]\s*name = "comfyui-patcher"\s*version = "([^"]+)"'
+          )
+          if (-not $cargoLockMatch.Success) {
+            throw "Could not read the application version from src-tauri/Cargo.lock."
+          }
+          $cargoLockVersion = $cargoLockMatch.Groups[1].Value
+
+          $versions = @(
+            $packageVersion,
+            $packageLockVersion,
+            $tauriVersion,
+            $cargoVersion,
+            $cargoLockVersion
+          ) | Select-Object -Unique
+          if ($versions.Count -ne 1) {
+            throw "Release version sources disagree: $($versions -join ', ')."
+          }
+
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            if ($env:GITHUB_REF_NAME -ne "v$packageVersion") {
+              throw "Tag $env:GITHUB_REF_NAME does not match app version v$packageVersion."
+            }
+          } else {
+            $requestedVersion = (
+              Get-Content .github/release-request.json -Raw | ConvertFrom-Json
+            ).version
+            if ($requestedVersion -ne $packageVersion) {
+              throw "Release request $requestedVersion does not match app version $packageVersion."
+            }
+          }
+
+      - name: Read release notes
+        id: release_notes
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $changelog = Get-Content CHANGELOG.md -Raw
+          $escapedVersion = [regex]::Escape($version)
+          $releaseSection = [regex]::Match(
+            $changelog,
+            "(?ms)^## \[$escapedVersion\].*?(?=^## \[|\z)"
+          )
+          if (-not $releaseSection.Success) {
+            throw "CHANGELOG.md has no release section for $version."
+          }
+
+          $delimiter = "RELEASE_NOTES_${{ github.run_id }}"
+          "body<<$delimiter" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          $releaseSection.Value.Trim() | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          $delimiter | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0.6.0
         env:
@@ -49,5 +125,7 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: ComfyUI Patcher v__VERSION__
+          releaseBody: ${{ steps.release_notes.outputs.body }}
+          releaseCommitish: ${{ github.sha }}
           releaseDraft: false
           prerelease: false
