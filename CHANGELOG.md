@@ -3,6 +3,23 @@
 All notable changes to ComfyUI Patcher are documented here. Earlier release notes
 remain available on the [GitHub Releases](https://github.com/xmarre/ComfyUI-Patcher/releases) page.
 
+## [0.1.12] - 2026-08-08
+
+This patch release makes UI state updates immediate after repository operations, even for large WSL installations.
+
+### Changed
+
+- Normal installation-detail refreshes now read durable reconciliation snapshots from SQLite instead of rescanning every repository.
+- Explicit reconciliation scans custom-node repositories with bounded concurrency while keeping database writes deterministic.
+- Windows CI now runs all Rust unit tests before the production backend build.
+
+### Fixed
+
+- Completed installs, updates, repairs, and removals no longer remain invisible while queued full-repository scans finish.
+- Operation progress events no longer create a storm of redundant detail rescans.
+- Reconciliation diagnostics and timestamps persist across cheap UI reads.
+- Manual reconciliation no longer races active repository mutations or allows stale in-flight reads to overwrite its result.
+
 ## [0.1.11] - 2026-08-08
 
 This patch release fixes managed-repository updates and reconciliation failures reported in v0.1.10.
@@ -52,5 +69,6 @@ This cumulative maintenance release contains every merged change since v0.1.9.
 - Fixed transient Windows directory deletion failures during uninstall with retry and safe staging behavior.
 - Fixed force-pushed pull requests failing to refresh cached PR overlay and preview refs with a non-fast-forward fetch rejection. Forced updates are restricted to disposable refs owned by ComfyUI Patcher.
 
+[0.1.12]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.11...v0.1.12
 [0.1.11]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.9...v0.1.10
