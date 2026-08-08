@@ -25,10 +25,14 @@ use crate::state::AppState;
 use crate::util::{detect_env_kind, infer_python};
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 const STACK_TRACKING_VERSION: u32 = 1;
 const STACK_BRANCH_NAME: &str = "patcher/stack";
+const RECONCILE_SCAN_CONCURRENCY: usize = 8;
 
 fn emit_operation(
     app: &AppHandle,
@@ -333,6 +337,7 @@ async fn discover_repositories_for_installation(
 
     let custom_nodes_dir = PathBuf::from(&installation.custom_nodes_dir);
     if custom_nodes_dir.exists() {
+        let mut candidates = Vec::new();
         for entry in std::fs::read_dir(&custom_nodes_dir)? {
             let entry = entry?;
             let path = entry.path();
@@ -340,16 +345,45 @@ async fn discover_repositories_for_installation(
             if ignored_paths.contains(&path_string)
                 || !path.is_dir()
                 || !has_git_marker(&path)
-                || !is_git_repo(&path).await
             {
                 continue;
             }
+            candidates.push(path);
+        }
+
+        let semaphore = Arc::new(Semaphore::new(RECONCILE_SCAN_CONCURRENCY));
+        let mut tasks = JoinSet::new();
+        for path in candidates {
+            let semaphore = semaphore.clone();
+            tasks.spawn(async move {
+                let _permit = semaphore.acquire_owned().await.map_err(|error| {
+                    AppError::Io(format!("reconcile scan semaphore closed: {error}"))
+                })?;
+                if !is_git_repo(&path).await {
+                    return Ok::<Option<(PathBuf, RepoStatus)>, AppError>(None);
+                }
+                let status = inspect_repo(&path).await?;
+                Ok(Some((path, status)))
+            });
+        }
+
+        let mut inspected_repos = Vec::new();
+        while let Some(result) = tasks.join_next().await {
+            if let Some(discovered) = result
+                .map_err(|error| AppError::Io(format!("reconcile scan task failed: {error}")))??
+            {
+                inspected_repos.push(discovered);
+            }
+        }
+        inspected_repos.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+        for (path, status) in inspected_repos {
+            let path_string = path.to_string_lossy().to_string();
             let display_name = path
                 .file_name()
                 .and_then(|v| v.to_str())
                 .unwrap_or("custom-node")
                 .to_string();
-            let status = inspect_repo(&path).await?;
             let repo = state.db.upsert_repo(
                 &installation.id,
                 RepoKind::CustomNode,
@@ -558,11 +592,14 @@ async fn enrich_managed_repo(
     if !path.exists() {
         repo.current_head_sha = None;
         repo.current_branch = None;
+        repo.is_detached = false;
+        repo.is_dirty = false;
         repo.changed_files.clear();
         repo.dependency_state = None;
         repo.live_status = RepoLiveStatus::Missing;
         repo.live_warnings
             .push("Repository path no longer exists on disk.".to_string());
+        state.db.update_repo_reconciliation_state(&mut repo)?;
         return Ok(repo);
     }
 
@@ -572,23 +609,18 @@ async fn enrich_managed_repo(
         if !has_git_marker(&path) || !is_git_repo(&path).await {
             repo.current_head_sha = None;
             repo.current_branch = None;
+            repo.is_detached = false;
+            repo.is_dirty = false;
             repo.changed_files.clear();
             repo.dependency_state = None;
             repo.live_status = RepoLiveStatus::NotGit;
             repo.live_warnings
                 .push("Tracked path is no longer a git repository.".to_string());
+            state.db.update_repo_reconciliation_state(&mut repo)?;
             return Ok(repo);
         }
         inspect_repo(&path).await?
     };
-    state.db.update_repo_state(
-        &repo.id,
-        status.origin_url.as_deref(),
-        status.head_sha.as_deref(),
-        status.branch.as_deref(),
-        status.is_detached,
-        repo_has_tracked_local_changes(&status),
-    )?;
 
     let tracked_dirty = repo_has_tracked_local_changes(&status);
 
@@ -680,6 +712,7 @@ async fn enrich_managed_repo(
     }
 
     repo.live_status = live_status;
+    state.db.update_repo_reconciliation_state(&mut repo)?;
     Ok(repo)
 }
 
@@ -710,6 +743,9 @@ async fn hydrate_installation_detail(
         discovered_statuses.insert(repo.repo.id.clone(), repo.status);
     }
     let mut detail = state.db.get_installation_detail(installation_id)?;
+    // Cached warnings belong to the fast detail-read path. A full hydration
+    // rebuilds them from the freshly inspected repository state below.
+    detail.warnings.clear();
 
     if let Some(repo) = detail.core_repo.take() {
         let repo = enrich_managed_repo(
@@ -768,15 +804,12 @@ async fn refresh_repo_state(state: &AppState, repo_id: &str) -> AppResult<()> {
         .db
         .get_repo(repo_id)?
         .ok_or_else(|| AppError::NotFound("managed repo not found".to_string()))?;
+    let installation = state
+        .db
+        .get_installation(&repo.installation_id)?
+        .ok_or_else(|| AppError::NotFound("installation not found".to_string()))?;
     let status = inspect_repo(Path::new(&repo.local_path)).await?;
-    state.db.update_repo_state(
-        &repo.id,
-        status.origin_url.as_deref(),
-        status.head_sha.as_deref(),
-        status.branch.as_deref(),
-        status.is_detached,
-        repo_has_tracked_local_changes(&status),
-    )?;
+    enrich_managed_repo(state, &installation, &repo, Some(status)).await?;
     Ok(())
 }
 
@@ -1949,17 +1982,18 @@ async fn apply_repo_tracking_state(
             _ => None,
         };
 
-        refresh_repo_state(state, &repo.id).await?;
-        let refreshed_repo = state.db.get_repo(&repo.id)?.ok_or_else(|| {
-            AppError::NotFound("managed repo not found after stack apply".to_string())
-        })?;
+        let status = inspect_repo(path).await?;
         if write_tracked_target {
             state.db.set_repo_tracked_state(
                 &repo.id,
                 Some(&final_state),
-                refreshed_repo.current_head_sha.as_deref(),
+                status.head_sha.as_deref(),
             )?;
         }
+        let refreshed_repo = state.db.get_repo(&repo.id)?.ok_or_else(|| {
+            AppError::NotFound("managed repo not found after stack apply".to_string())
+        })?;
+        enrich_managed_repo(state, installation, &refreshed_repo, Some(status)).await?;
 
         if let Some(stash_commit) = reapplied_stash_commit {
             state
@@ -2933,15 +2967,15 @@ fn list_installations(state: State<'_, AppState>) -> Result<Vec<Installation>, S
     state.db.list_installations().map_err(|e| e.to_string())
 }
 
-async fn load_installation_detail_response(
+async fn load_cached_installation_detail_response(
     state: &AppState,
     installation_id: &str,
-    mark_reconciled: bool,
 ) -> Result<InstallationDetail, String> {
-    let mut detail = hydrate_installation_detail(state, installation_id, mark_reconciled)
-        .await
+    let mut detail = state
+        .db
+        .get_installation_detail(installation_id)
         .map_err(|e| e.to_string())?;
-    detail.last_reconciled_at = mark_reconciled.then(crate::util::now_rfc3339);
+    detail.last_reconciled_at = detail.installation.last_reconciled_at.clone();
     detail.is_running = state
         .processes
         .is_running(installation_id)
@@ -2955,7 +2989,7 @@ async fn get_installation_detail(
     state: State<'_, AppState>,
     installation_id: String,
 ) -> Result<InstallationDetail, String> {
-    load_installation_detail_response(&state, &installation_id, false).await
+    load_cached_installation_detail_response(&state, &installation_id).await
 }
 
 #[tauri::command]
@@ -2963,7 +2997,26 @@ async fn reconcile_installation(
     state: State<'_, AppState>,
     installation_id: String,
 ) -> Result<InstallationDetail, String> {
-    load_installation_detail_response(&state, &installation_id, true).await
+    let background_work_lock = state.background_work_lock();
+    let _background_work_guard = background_work_lock
+        .try_lock()
+        .map_err(|_| "cannot reconcile while repository operations are running".to_string())?;
+    let mut detail = hydrate_installation_detail(&state, &installation_id, true)
+        .await
+        .map_err(|e| e.to_string())?;
+    let reconciled_at = crate::util::now_rfc3339();
+    state
+        .db
+        .mark_installation_reconciled(&installation_id, &reconciled_at)
+        .map_err(|e| e.to_string())?;
+    detail.installation.last_reconciled_at = Some(reconciled_at.clone());
+    detail.last_reconciled_at = Some(reconciled_at);
+    detail.is_running = state
+        .processes
+        .is_running(&installation_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(detail)
 }
 
 #[tauri::command]

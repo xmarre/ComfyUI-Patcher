@@ -219,6 +219,8 @@ pub struct Installation {
     pub frontend_settings: Option<FrontendSettings>,
     pub detected_env_kind: String,
     pub is_git_repo: bool,
+    #[serde(default)]
+    pub last_reconciled_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
