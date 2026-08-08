@@ -3,6 +3,21 @@
 All notable changes to ComfyUI Patcher are documented here. Earlier release notes
 remain available on the [GitHub Releases](https://github.com/xmarre/ComfyUI-Patcher/releases) page.
 
+## [0.1.11] - 2026-08-08
+
+This patch release fixes managed-repository updates and reconciliation failures reported in v0.1.10.
+
+### Changed
+
+- Repository mutations launched from the UI now preserve dirty worktrees with the stash strategy, including bulk updates, tracked-target changes, overlay edits, and custom-node adoption.
+- GitHub repository, branch, and commit targets now follow repository rename redirects before remote identity validation, including the API fallback path.
+
+### Fixed
+
+- Preserved tracked local configuration changes, such as `ffmpeg_config.ini`, across repository materialization and dependency synchronization.
+- Reapplied saved worktrees by immutable stash commit SHA and retained the recovery stash when race-free deletion could not be guaranteed, preventing a shifted `stash@{n}` from deleting unrelated user work.
+- Explicit **Reconcile** now removes stale managed custom-node records when their directories have been deleted, while retaining missing core/frontend records and existing non-Git paths as actionable warnings.
+
 ## [0.1.10] - 2026-08-08
 
 This cumulative maintenance release contains every merged change since v0.1.9.
@@ -37,4 +52,5 @@ This cumulative maintenance release contains every merged change since v0.1.9.
 - Fixed transient Windows directory deletion failures during uninstall with retry and safe staging behavior.
 - Fixed force-pushed pull requests failing to refresh cached PR overlay and preview refs with a non-fast-forward fetch rejection. Forced updates are restricted to disposable refs owned by ComfyUI Patcher.
 
+[0.1.11]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.9...v0.1.10
