@@ -547,17 +547,37 @@ fn stash_ref_from_list(stash_list: &str, stash_id: &str) -> Option<String> {
 }
 
 pub async fn apply_stash(path: &Path, stash_id: &str) -> AppResult<()> {
-    let stash_ref = if stash_id.starts_with("stash@{") {
-        stash_id.to_string()
-    } else {
-        let stash_list = run_git(path, &["stash", "list", "--format=%H%x09%gd"]).await?;
-        stash_ref_from_list(&stash_list, stash_id).ok_or_else(|| {
-            AppError::Git(format!(
-                "could not find saved stash entry for checkpoint stash {stash_id}"
-            ))
-        })?
-    };
+    let stash_ref = resolve_stash_ref(path, stash_id).await?;
     let _ = run_git(path, &["stash", "pop", &stash_ref]).await?;
+    Ok(())
+}
+
+async fn resolve_stash_ref(path: &Path, stash_id: &str) -> AppResult<String> {
+    if stash_id.starts_with("stash@{") {
+        return Ok(stash_id.to_string());
+    }
+
+    let stash_list = run_git(path, &["stash", "list", "--format=%H%x09%gd"]).await?;
+    stash_ref_from_list(&stash_list, stash_id).ok_or_else(|| {
+        AppError::Git(format!(
+            "could not find saved stash entry for checkpoint stash {stash_id}"
+        ))
+    })
+}
+
+/// Reapplies a saved worktree without dropping its stash entry.
+///
+/// Keeping the stash until the caller has persisted the successful repository
+/// state makes restoration transactional: a later bookkeeping failure can
+/// still reset to the checkpoint and recover the original local changes.
+pub async fn apply_stash_keep(path: &Path, stash_id: &str) -> AppResult<String> {
+    let stash_ref = resolve_stash_ref(path, stash_id).await?;
+    let _ = run_git(path, &["stash", "apply", &stash_ref]).await?;
+    Ok(stash_ref)
+}
+
+pub async fn drop_stash(path: &Path, stash_ref: &str) -> AppResult<()> {
+    let _ = run_git(path, &["stash", "drop", stash_ref]).await?;
     Ok(())
 }
 
@@ -671,6 +691,45 @@ pub fn join_custom_node_path(custom_nodes_dir: &Path, dir_name: &str) -> PathBuf
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+
+    struct TestRepo(PathBuf);
+
+    impl TestRepo {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "comfyui-patcher-git-test-{}",
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+
+        fn git(&self, args: &[&str]) -> String {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&self.0)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+    }
+
+    impl Drop for TestRepo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
     fn accepts_single_directory_name() {
@@ -730,6 +789,37 @@ mod tests {
             stash_ref_from_list("", "stash@{2}"),
             Some("stash@{2}".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn reapply_stash_keeps_recovery_entry_until_explicit_drop() {
+        let repo = TestRepo::new();
+        repo.git(&["init"]);
+        repo.git(&["config", "user.name", "ComfyUI Patcher Test"]);
+        repo.git(&["config", "user.email", "patcher-test@local.invalid"]);
+        std::fs::write(repo.path().join("config.ini"), "value=upstream\n").unwrap();
+        repo.git(&["add", "config.ini"]);
+        repo.git(&["commit", "-m", "initial"]);
+        std::fs::write(repo.path().join("config.ini"), "value=local\n").unwrap();
+
+        let stash_id = ensure_clean_or_apply_strategy(repo.path(), &DirtyRepoStrategy::Stash)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("config.ini")).unwrap(),
+            "value=upstream\n"
+        );
+
+        let stash_ref = apply_stash_keep(repo.path(), &stash_id).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("config.ini")).unwrap(),
+            "value=local\n"
+        );
+        assert!(!repo.git(&["stash", "list"]).is_empty());
+
+        drop_stash(repo.path(), &stash_ref).await.unwrap();
+        assert!(repo.git(&["stash", "list"]).is_empty());
     }
 
     #[test]

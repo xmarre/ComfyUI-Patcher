@@ -13,11 +13,11 @@ mod util;
 use crate::deps::{execute_dependency_sync, plan_dependency_sync};
 use crate::errors::{AppError, AppResult};
 use crate::git::{
-    apply_stash, canonicalize_remote, checkout_paths, clean_untracked_paths, clone_repo,
-    commits_between, diff_name_status, ensure_clean_or_apply_strategy, fetch_origin,
-    fetch_refspec, force_fetch_refspec, inspect_repo, is_git_repo, join_custom_node_path,
-    merge_abort, merge_no_ff, preview_merge_conflicts, reset_hard, rev_parse,
-    run_git_allow_fail, submodule_update, switch_branch, switch_detached,
+    apply_stash, apply_stash_keep, canonicalize_remote, checkout_paths, clean_untracked_paths,
+    clone_repo, commits_between, diff_name_status, drop_stash, ensure_clean_or_apply_strategy,
+    fetch_origin, fetch_refspec, force_fetch_refspec, inspect_repo, is_git_repo,
+    join_custom_node_path, merge_abort, merge_no_ff, preview_merge_conflicts, reset_hard,
+    rev_parse, run_git_allow_fail, submodule_update, switch_branch, switch_detached,
     validate_custom_node_dir_name, RepoStatus,
 };
 use crate::models::*;
@@ -275,7 +275,7 @@ async fn cleanup_frontend_dependency_artifacts(
 async fn discover_repositories_for_installation(
     state: &AppState,
     installation: &Installation,
-    prune_missing: bool,
+    prune_missing_custom_nodes: bool,
 ) -> AppResult<(
     Option<DiscoveredRepoState>,
     Option<DiscoveredRepoState>,
@@ -376,9 +376,12 @@ async fn discover_repositories_for_installation(
         discovered_paths.insert(repo.repo.local_path.clone());
     }
 
-    if prune_missing {
+    if prune_missing_custom_nodes {
         for repo in state.db.list_repos_by_installation(&installation.id)? {
-            if !discovered_paths.contains(&repo.local_path) {
+            if repo.kind == RepoKind::CustomNode
+                && !discovered_paths.contains(&repo.local_path)
+                && !Path::new(&repo.local_path).exists()
+            {
                 state.db.delete_repo(&repo.id)?;
             }
         }
@@ -683,13 +686,19 @@ async fn enrich_managed_repo(
 async fn hydrate_installation_detail(
     state: &AppState,
     installation_id: &str,
+    prune_missing_custom_nodes: bool,
 ) -> AppResult<InstallationDetail> {
     let installation = state
         .db
         .get_installation(installation_id)?
         .ok_or_else(|| AppError::NotFound("installation not found".to_string()))?;
     let (core_repo, frontend_repo, discovered_custom_nodes) =
-        discover_repositories_for_installation(state, &installation, false).await?;
+        discover_repositories_for_installation(
+            state,
+            &installation,
+            prune_missing_custom_nodes,
+        )
+        .await?;
     let mut discovered_statuses = HashMap::new();
     if let Some(repo) = core_repo {
         discovered_statuses.insert(repo.repo.id.clone(), repo.status);
@@ -1923,6 +1932,23 @@ async fn apply_repo_tracking_state(
         .await?;
         ensure_repo_clean_after_patcher_mutation(path, "patcher-controlled checkout materialization")
             .await?;
+
+        let reapplied_stash_ref = match checkpoint.stash_ref.as_deref() {
+            Some(stash_id) if checkpoint.stash_created => {
+                let stash_ref = apply_stash_keep(path, stash_id).await?;
+                log_operation(
+                    state,
+                    app,
+                    operation_id,
+                    "stash",
+                    "info",
+                    "reapplied pre-existing local worktree changes",
+                );
+                Some(stash_ref)
+            }
+            _ => None,
+        };
+
         refresh_repo_state(state, &repo.id).await?;
         let refreshed_repo = state.db.get_repo(&repo.id)?.ok_or_else(|| {
             AppError::NotFound("managed repo not found after stack apply".to_string())
@@ -1933,6 +1959,24 @@ async fn apply_repo_tracking_state(
                 Some(&final_state),
                 refreshed_repo.current_head_sha.as_deref(),
             )?;
+        }
+
+        if let Some(stash_ref) = reapplied_stash_ref {
+            state
+                .db
+                .update_checkpoint_stash(&checkpoint.id, false, None)?;
+            if let Err(err) = drop_stash(path, &stash_ref).await {
+                log_operation(
+                    state,
+                    app,
+                    operation_id,
+                    "stash",
+                    "warn",
+                    format!(
+                        "local changes were restored, but the redundant saved stash could not be dropped: {err}"
+                    ),
+                );
+            }
         }
 
         Ok::<(), AppError>(())
@@ -2896,7 +2940,7 @@ async fn load_installation_detail_response(
     installation_id: &str,
     mark_reconciled: bool,
 ) -> Result<InstallationDetail, String> {
-    let mut detail = hydrate_installation_detail(state, installation_id)
+    let mut detail = hydrate_installation_detail(state, installation_id, mark_reconciled)
         .await
         .map_err(|e| e.to_string())?;
     detail.last_reconciled_at = mark_reconciled.then(crate::util::now_rfc3339);
@@ -4516,7 +4560,7 @@ async fn run_adopt_tracked_custom_nodes(
                 input: source_input,
                 target_local_dir_name: Some(target_local_dir_name),
                 existing_repo_conflict_strategy: ExistingRepoConflictStrategy::InstallWithSuffix,
-                dirty_repo_strategy: DirtyRepoStrategy::Abort,
+                dirty_repo_strategy: DirtyRepoStrategy::Stash,
                 set_tracked_target: true,
                 sync_dependencies: true,
                 restart_after_success: false,
