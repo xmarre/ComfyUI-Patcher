@@ -52,7 +52,8 @@ jobs:
         shell: pwsh
         run: |
           $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $packageLockVersion = (Get-Content package-lock.json -Raw | ConvertFrom-Json).version
+          $packageLock = Get-Content package-lock.json -Raw | ConvertFrom-Json -AsHashtable
+          $packageLockVersion = $packageLock['version']
           $tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
 
           $cargoToml = Get-Content src-tauri/Cargo.toml -Raw
