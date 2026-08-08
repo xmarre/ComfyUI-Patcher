@@ -1001,10 +1001,12 @@ export default function App() {
                     onClick={() =>
                       void runAction(async () => {
                         const installationId = selectedInstallation.id;
+                        ++detailRequestSeq.current;
                         setIsReconciling(true);
                         try {
                           const next = await api.reconcileInstallation(installationId);
                           if (selectedInstallationIdRef.current === installationId) {
+                            ++detailRequestSeq.current;
                             setDetail(next);
                           }
                           await refreshInstallations();
