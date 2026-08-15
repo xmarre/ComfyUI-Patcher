@@ -716,7 +716,8 @@ export default function App() {
     (repo): repo is ManagedRepo => repo !== null
   );
   const trackedRepoCount = allManagedRepos.filter(repoHasTrackedState).length;
-  const recoverableTrackedRepoCount = allManagedRepos.filter(repoNeedsTrackedRecovery).length;
+  const recoverableTrackedRepos = allManagedRepos.filter(repoNeedsTrackedRecovery);
+  const recoverableTrackedRepoCount = recoverableTrackedRepos.length;
   const hasMatchingDetail =
     !!selectedInstallation && detail?.installation.id === selectedInstallation.id;
   const existingInstallationProfile =
@@ -739,22 +740,38 @@ export default function App() {
     }
     return customNodeRepos.filter((repo) => repoSearchText(repo).includes(normalizedQuery));
   }, [customNodeRepos, managedCustomNodeQuery]);
-  const repairTrackedRepos = async () => {
-    if (!selectedInstallation) {
-      return;
-    }
+  const repairTrackedRepo = async (repo: ManagedRepo) => {
     if (
       !window.confirm(
-        `Re-materialize ${trackedRepoCount} tracked repo${trackedRepoCount === 1 ? "" : "s"} for ${selectedInstallation.name} with hard reset? This discards tracked local worktree changes in managed repos and rebuilds their tracked checkout/overlay state.`
+        `Re-materialize tracked state for ${repo.displayName} with hard reset? This discards tracked local worktree changes in ${repo.localPath} only. Other managed repositories will not be touched.`
       )
     ) {
       return;
     }
-    await api.rematerializeTrackedRepos({
-      installationId: selectedInstallation.id,
-      syncDependencies: false,
-      restartAfterSuccess: false
+    await api.updateRepo({
+      repoId: repo.id,
+      dirtyRepoStrategy: "hard_reset",
+      syncDependencies: false
     });
+  };
+  const repairTrackedRepos = async () => {
+    if (!selectedInstallation || !recoverableTrackedRepoCount) {
+      return;
+    }
+    if (
+      !window.confirm(
+        `Re-materialize only the ${recoverableTrackedRepoCount} tracked repo${recoverableTrackedRepoCount === 1 ? "" : "s"} currently flagged for repair in ${selectedInstallation.name} with hard reset? This discards tracked local worktree changes only in those flagged repos. The other ${trackedRepoCount - recoverableTrackedRepoCount} tracked repo${trackedRepoCount - recoverableTrackedRepoCount === 1 ? "" : "s"} will not be touched.`
+      )
+    ) {
+      return;
+    }
+    for (const repo of recoverableTrackedRepos) {
+      await api.updateRepo({
+        repoId: repo.id,
+        dirtyRepoStrategy: "hard_reset",
+        syncDependencies: false
+      });
+    }
   };
 
   return (
@@ -1020,10 +1037,10 @@ export default function App() {
                   </button>
                   <button
                     className="secondary"
-                    disabled={!trackedRepoCount}
+                    disabled={!recoverableTrackedRepoCount}
                     onClick={() => void runAction(repairTrackedRepos)}
                   >
-                    Repair tracked repos
+                    Repair flagged repos
                   </button>
                   <button
                     onClick={() =>
@@ -1136,9 +1153,9 @@ export default function App() {
                     {recoverableTrackedRepoCount ? (
                       <div className="muted small">
                         {recoverableTrackedRepoCount} tracked repo
-                        {recoverableTrackedRepoCount === 1 ? "" : "s"} currently need repair. The
-                        recovery action re-materializes all {trackedRepoCount} tracked repo
-                        {trackedRepoCount === 1 ? "" : "s"} with hard reset.
+                        {recoverableTrackedRepoCount === 1 ? "" : "s"} currently need repair. Repair
+                        actions hard-reset only the selected flagged repo or repos; all other tracked
+                        repositories are left untouched.
                       </div>
                     ) : null}
                   </div>
@@ -1149,7 +1166,7 @@ export default function App() {
                         type="button"
                         onClick={() => void runAction(repairTrackedRepos)}
                       >
-                        Repair tracked repos
+                        Repair all flagged
                       </button>
                     ) : null}
                     <div className="muted small">
@@ -1159,6 +1176,25 @@ export default function App() {
                     </div>
                   </div>
                 </div>
+                {recoverableTrackedRepoCount ? (
+                  <div className="repo-warning-list">
+                    {recoverableTrackedRepos.map((repo) => (
+                      <div key={repo.id} className="row between gap">
+                        <div>
+                          <div><strong>{repo.displayName}</strong></div>
+                          <div className="mono small">{repo.localPath}</div>
+                        </div>
+                        <button
+                          className="secondary"
+                          type="button"
+                          onClick={() => void runAction(() => repairTrackedRepo(repo))}
+                        >
+                          Repair this repo
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
                 <div className="repo-warning-list">
                   {detail.warnings.map((warning) => (
                     <div key={warning} className="mono small">{warning}</div>
