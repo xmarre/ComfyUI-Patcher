@@ -1,17 +1,16 @@
 name: release-prep-v0.1.13
 
 on:
-  push:
+  pull_request:
     branches:
-      - release/v0.1.13
-    paths:
-      - ".github/workflows/release-prep-v0.1.13.yml"
+      - main
 
 permissions:
   contents: write
 
 jobs:
   prepare:
+    if: github.head_ref == 'release/v0.1.13'
     runs-on: ubuntu-latest
     steps:
       - name: Check out release branch
@@ -36,24 +35,9 @@ jobs:
                   raise SystemExit(f"{path}: expected {expected} occurrence(s) of {old!r}, found {actual}")
               p.write_bytes(data.replace(old, new))
 
-          replace_bytes(
-              "package.json",
-              b'"version": "0.1.12"',
-              b'"version": "0.1.13"',
-              1,
-          )
-          replace_bytes(
-              "package-lock.json",
-              b'"version": "0.1.12"',
-              b'"version": "0.1.13"',
-              2,
-          )
-          replace_bytes(
-              "src-tauri/Cargo.toml",
-              b'version = "0.1.12"',
-              b'version = "0.1.13"',
-              1,
-          )
+          replace_bytes("package.json", b'"version": "0.1.12"', b'"version": "0.1.13"', 1)
+          replace_bytes("package-lock.json", b'"version": "0.1.12"', b'"version": "0.1.13"', 2)
+          replace_bytes("src-tauri/Cargo.toml", b'version = "0.1.12"', b'version = "0.1.13"', 1)
 
           cargo_lock = Path("src-tauri/Cargo.lock")
           cargo_data = cargo_lock.read_bytes()
@@ -68,31 +52,19 @@ jobs:
           if not replaced:
               raise SystemExit("src-tauri/Cargo.lock: could not find the root comfyui-patcher 0.1.12 package stanza exactly once")
 
-          replace_bytes(
-              "src-tauri/tauri.conf.json",
-              b'"version": "0.1.12"',
-              b'"version": "0.1.13"',
-              1,
-          )
-          replace_bytes(
-              ".github/release-request.json",
-              b'"version": "0.1.12"',
-              b'"version": "0.1.13"',
-              1,
-          )
+          replace_bytes("src-tauri/tauri.conf.json", b'"version": "0.1.12"', b'"version": "0.1.13"', 1)
+          replace_bytes(".github/release-request.json", b'"version": "0.1.12"', b'"version": "0.1.13"', 1)
 
           changelog_path = Path("CHANGELOG.md")
           changelog = changelog_path.read_text(encoding="utf-8")
           if "## [0.1.13]" in changelog:
               raise SystemExit("CHANGELOG.md already contains a 0.1.13 section")
-
           intro = (
               "All notable changes to ComfyUI Patcher are documented here. Earlier release notes\n"
               "remain available on the [GitHub Releases](https://github.com/xmarre/ComfyUI-Patcher/releases) page.\n\n"
           )
           if changelog.count(intro) != 1:
               raise SystemExit("CHANGELOG.md introduction marker was not found exactly once")
-
           section = (
               "## [0.1.13] - 2026-08-15\n\n"
               "This patch release makes tracked-repository recovery precise so reconciliation repairs only the repositories that actually need it.\n\n"
@@ -104,7 +76,6 @@ jobs:
               "- Unrelated managed repositories no longer receive recovery operations or checkpoints during normal reconciliation repair.\n\n"
           )
           changelog = changelog.replace(intro, intro + section, 1)
-
           compare_marker = "[0.1.12]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.11...v0.1.12"
           if changelog.count(compare_marker) != 1:
               raise SystemExit("CHANGELOG.md 0.1.12 compare-link marker was not found exactly once")
@@ -124,8 +95,7 @@ jobs:
               ".github/release-request.json": 1,
           }
           for path, expected in checks.items():
-              data = Path(path).read_text(encoding="utf-8")
-              actual = data.count(new_version)
+              actual = Path(path).read_text(encoding="utf-8").count(new_version)
               if actual != expected:
                   raise SystemExit(f"{path}: expected {expected} occurrence(s) of {new_version}, found {actual}")
           PY
