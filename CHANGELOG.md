@@ -3,6 +3,20 @@
 All notable changes to ComfyUI Patcher are documented here. Earlier release notes
 remain available on the [GitHub Releases](https://github.com/xmarre/ComfyUI-Patcher/releases) page.
 
+## [0.1.13] - 2026-08-15
+
+This patch release makes tracked-repository recovery precise so reconciliation repairs only the repositories that actually need it.
+
+### Changed
+
+- Reconciliation warnings now expose a **Repair this repo** action for each tracked repository currently flagged as dirty or drifted.
+- The bulk recovery action now hard-resets only the currently flagged repair set and explicitly states how many other tracked repositories will remain untouched.
+
+### Fixed
+
+- Repairing reconciliation drift no longer hard-resets every tracked repository in an installation when only one or a few repositories need recovery.
+- Unrelated managed repositories no longer receive recovery operations or checkpoints during normal reconciliation repair.
+
 ## [0.1.12] - 2026-08-08
 
 This patch release makes UI state updates immediate after repository operations, even for large WSL installations.
@@ -69,6 +83,7 @@ This cumulative maintenance release contains every merged change since v0.1.9.
 - Fixed transient Windows directory deletion failures during uninstall with retry and safe staging behavior.
 - Fixed force-pushed pull requests failing to refresh cached PR overlay and preview refs with a non-fast-forward fetch rejection. Forced updates are restricted to disposable refs owned by ComfyUI Patcher.
 
+[0.1.13]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.12...v0.1.13
 [0.1.12]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.11...v0.1.12
 [0.1.11]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.9...v0.1.10
