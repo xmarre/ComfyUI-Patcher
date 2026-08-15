@@ -93,21 +93,16 @@ jobs:
           if changelog.count(intro) != 1:
               raise SystemExit("CHANGELOG.md introduction marker was not found exactly once")
 
-          section = """## [0.1.13] - 2026-08-15
-
-This patch release makes tracked-repository recovery precise so reconciliation repairs only the repositories that actually need it.
-
-### Changed
-
-- Reconciliation warnings now expose a **Repair this repo** action for each tracked repository currently flagged as dirty or drifted.
-- The bulk recovery action now hard-resets only the currently flagged repair set and explicitly states how many other tracked repositories will remain untouched.
-
-### Fixed
-
-- Repairing reconciliation drift no longer hard-resets every tracked repository in an installation when only one or a few repositories need recovery.
-- Unrelated managed repositories no longer receive recovery operations or checkpoints during normal reconciliation repair.
-
-"""
+          section = (
+              "## [0.1.13] - 2026-08-15\n\n"
+              "This patch release makes tracked-repository recovery precise so reconciliation repairs only the repositories that actually need it.\n\n"
+              "### Changed\n\n"
+              "- Reconciliation warnings now expose a **Repair this repo** action for each tracked repository currently flagged as dirty or drifted.\n"
+              "- The bulk recovery action now hard-resets only the currently flagged repair set and explicitly states how many other tracked repositories will remain untouched.\n\n"
+              "### Fixed\n\n"
+              "- Repairing reconciliation drift no longer hard-resets every tracked repository in an installation when only one or a few repositories need recovery.\n"
+              "- Unrelated managed repositories no longer receive recovery operations or checkpoints during normal reconciliation repair.\n\n"
+          )
           changelog = changelog.replace(intro, intro + section, 1)
 
           compare_marker = "[0.1.12]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.11...v0.1.12"
