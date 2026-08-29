@@ -59,7 +59,9 @@ Each managed repo stores:
 Tracked state supports:
 
 * **base target** — branch / tag / commit / repo default branch / PR base
-* **overlay list** — typically PR overlays, applied in order
+* **overlay list** — typically PR overlays, applied in order; an overlay may target the tracked base branch or the head branch of an earlier enabled overlay
+
+Stack dependency ordering is enforced. A dependent PR cannot be moved ahead of, enabled without, or left enabled after removal of the PR whose head branch it targets. Same-repository stacks resolve dependency branch identity from local git refs and GitHub's pull test-merge ref when that topology is unambiguous, preserving the API/rate-limit-safe path. Older or ambiguous locally-resolved overlay records are enriched from GitHub metadata only when local git cannot prove the relationship.
 
 This lets the app support flows like:
 

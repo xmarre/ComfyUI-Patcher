@@ -447,6 +447,35 @@ pub async fn force_fetch_refspec(path: &Path, remote: &str, refspec: &str) -> Ap
     Ok(())
 }
 
+pub async fn remote_branches_pointing_at(
+    path: &Path,
+    remote: &str,
+    sha: &str,
+) -> AppResult<Vec<String>> {
+    let refs_root = format!("refs/remotes/{remote}");
+    let output = run_git(
+        path,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "--points-at",
+            sha,
+            &refs_root,
+        ],
+    )
+    .await?;
+    let prefix = format!("{remote}/");
+    let mut branches = output
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix(&prefix))
+        .filter(|branch| !branch.is_empty() && *branch != "HEAD")
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    branches.sort();
+    branches.dedup();
+    Ok(branches)
+}
+
 pub async fn merge_no_ff(path: &Path, target: &str, message: &str) -> AppResult<()> {
     run_git(
         path,
@@ -821,6 +850,32 @@ mod tests {
             "value=local"
         );
         assert!(!repo.git(&["stash", "list"]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn lists_remote_branches_pointing_at_commit_without_symbolic_head() {
+        let repo = TestRepo::new();
+        repo.git(&["init"]);
+        repo.git(&["config", "user.name", "ComfyUI Patcher Test"]);
+        repo.git(&["config", "user.email", "patcher-test@local.invalid"]);
+        std::fs::write(repo.path().join("file.txt"), "value\n").unwrap();
+        repo.git(&["add", "file.txt"]);
+        repo.git(&["commit", "-m", "initial"]);
+        let sha = repo.git(&["rev-parse", "HEAD"]);
+        repo.git(&["update-ref", "refs/remotes/origin/main", &sha]);
+        repo.git(&["update-ref", "refs/remotes/origin/feature/stack", &sha]);
+        repo.git(&[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ]);
+
+        assert_eq!(
+            remote_branches_pointing_at(repo.path(), "origin", &sha)
+                .await
+                .unwrap(),
+            vec!["feature/stack".to_string(), "main".to_string()]
+        );
     }
 
     #[test]
