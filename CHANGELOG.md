@@ -3,6 +3,29 @@
 All notable changes to ComfyUI Patcher are documented here. Earlier release notes
 remain available on the [GitHub Releases](https://github.com/xmarre/ComfyUI-Patcher/releases) page.
 
+## [0.1.14] - 2026-08-29
+
+This patch release adds dependency-aware support for pull requests stacked on other pull-request branches.
+
+### Added
+
+- Added proper stacked-PR overlay support: a PR may target the tracked repository base or the head branch of an earlier enabled PR overlay.
+- Added dependency validation for stacked overlays, including parent-before-child ordering and repository-aware branch identity.
+- Added local git topology resolution for same-repository stacked PRs using GitHub pull head/test-merge refs, with GitHub API metadata as a fail-safe fallback.
+- Added focused regression coverage for multi-level stacks, disabled prerequisites, invalid ordering, ambiguous intermediate bases, repository collisions, and legacy metadata enrichment.
+
+### Changed
+
+- Dirty-worktree collision preflight now computes each stacked PR's incoming changes from its declared dependency base.
+- Conflict preview now probes each PR against its actual declared dependency instead of treating every overlay as independent from the repository base.
+- Older locally-resolved overlays are enriched from unambiguous local git refs first, preserving the existing API/rate-limit-safe resolution path.
+
+### Fixed
+
+- Fixed valid stacked PRs being rejected with errors such as `PR overlays for this repo must target base branch 'main'` when a child PR correctly targets its parent PR branch.
+- Fixed stack edit operations allowing dependency-invalid states to reach checkpoint or checkout mutation.
+- Fixed dependency matching from guessing when branch or repository identity is ambiguous; ambiguous relationships now fail closed.
+
 ## [0.1.13] - 2026-08-15
 
 This patch release makes tracked-repository recovery precise so reconciliation repairs only the repositories that actually need it.
@@ -83,6 +106,7 @@ This cumulative maintenance release contains every merged change since v0.1.9.
 - Fixed transient Windows directory deletion failures during uninstall with retry and safe staging behavior.
 - Fixed force-pushed pull requests failing to refresh cached PR overlay and preview refs with a non-fast-forward fetch rejection. Forced updates are restricted to disposable refs owned by ComfyUI Patcher.
 
+[0.1.14]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.13...v0.1.14
 [0.1.13]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.12...v0.1.13
 [0.1.12]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.11...v0.1.12
 [0.1.11]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.10...v0.1.11
