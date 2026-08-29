@@ -3,6 +3,20 @@
 All notable changes to ComfyUI Patcher are documented here. Earlier release notes
 remain available on the [GitHub Releases](https://github.com/xmarre/ComfyUI-Patcher/releases) page.
 
+## [0.1.15] - 2026-08-29
+
+This hotfix makes WSL-backed command execution argv-safe so Git arguments are no longer reinterpreted by a Linux shell.
+
+### Fixed
+
+- Internally translated WSL commands now use `wsl.exe --exec`, which executes the target Linux binary without routing the command through the default shell.
+- Git arguments containing shell metacharacters are now passed intact, including the stacked-PR branch lookup format `--format=%(refname:short)`.
+- Stacked-PR preflight on WSL-backed installations no longer fails with `/bin/bash: syntax error near unexpected token '('` while resolving remote branches.
+
+### Tests
+
+- Added a regression test using the exact failing `for-each-ref --format=%(refname:short)` argument and SHA, asserting the constructed WSL command uses `--exec` and preserves every Git argument separately.
+
 ## [0.1.14] - 2026-08-29
 
 This patch release adds dependency-aware support for pull requests stacked on other pull-request branches.
@@ -106,6 +120,7 @@ This cumulative maintenance release contains every merged change since v0.1.9.
 - Fixed transient Windows directory deletion failures during uninstall with retry and safe staging behavior.
 - Fixed force-pushed pull requests failing to refresh cached PR overlay and preview refs with a non-fast-forward fetch rejection. Forced updates are restricted to disposable refs owned by ComfyUI Patcher.
 
+[0.1.15]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.14...v0.1.15
 [0.1.14]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.13...v0.1.14
 [0.1.13]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.12...v0.1.13
 [0.1.12]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.11...v0.1.12
