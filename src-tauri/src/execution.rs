@@ -80,7 +80,7 @@ fn build_command(program: &str, args: &[String], cwd: Option<&Path>) -> std::io:
             }
             _ => program,
         };
-        command.arg("--").arg(effective_program);
+        command.arg("--exec").arg(effective_program);
         command.args(args);
         return Ok(command);
     }
@@ -174,6 +174,41 @@ mod tests {
         assert!(program_dbg.contains("wsl.exe"));
         assert!(args_dbg.contains("/home/toor/miniconda3/envs/comfy/bin/python"));
         assert!(!args_dbg.contains(r"\\wsl.localhost\Ubuntu-22.04\home\toor\miniconda3\envs\comfy\bin\python"));
+    }
+
+    #[test]
+    fn build_command_uses_wsl_exec_for_shell_sensitive_arguments() {
+        let cwd = Path::new(r"\\wsl.localhost\Ubuntu-22.04\home\toor\ComfyUI");
+        let args = vec![
+            "for-each-ref".to_string(),
+            "--format=%(refname:short)".to_string(),
+            "--points-at".to_string(),
+            "4f4856de52d9b6067d51eaa4962515bdd7f3f1a7".to_string(),
+            "refs/remotes/origin".to_string(),
+        ];
+        let command = build_command("git", &args, Some(cwd)).unwrap();
+        let actual = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            actual,
+            vec![
+                "-d",
+                "Ubuntu-22.04",
+                "--cd",
+                "/home/toor/ComfyUI",
+                "--exec",
+                "git",
+                "for-each-ref",
+                "--format=%(refname:short)",
+                "--points-at",
+                "4f4856de52d9b6067d51eaa4962515bdd7f3f1a7",
+                "refs/remotes/origin",
+            ]
+        );
     }
 
     #[test]
