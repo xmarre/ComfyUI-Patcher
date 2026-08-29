@@ -8,6 +8,7 @@ mod models;
 mod process;
 mod registry;
 mod state;
+mod stack;
 mod util;
 
 use crate::deps::{execute_dependency_sync, plan_dependency_sync};
@@ -16,11 +17,12 @@ use crate::git::{
     apply_stash, apply_stash_keep, canonicalize_remote, checkout_paths, clean_untracked_paths,
     clone_repo, commits_between, diff_name_status, ensure_clean_or_apply_strategy, fetch_origin,
     fetch_refspec, force_fetch_refspec, inspect_repo, is_git_repo,
-    join_custom_node_path, merge_abort, merge_no_ff, preview_merge_conflicts, reset_hard,
-    rev_parse, run_git_allow_fail, submodule_update, switch_branch, switch_detached,
+    join_custom_node_path, merge_abort, merge_no_ff, preview_merge_conflicts, remote_branches_pointing_at,
+    reset_hard, rev_parse, run_git_allow_fail, submodule_update, switch_branch, switch_detached,
     validate_custom_node_dir_name, RepoStatus,
 };
 use crate::models::*;
+use crate::stack::{overlay_dependency_index, validate_overlay_stack};
 use crate::state::AppState;
 use crate::util::{detect_env_kind, infer_python};
 use std::collections::{hash_map::Entry, HashMap, HashSet};
@@ -936,7 +938,13 @@ async fn incoming_write_paths_for_tracked_state(
         }
     }
 
-    for overlay in tracked_state.overlays.iter().filter(|overlay| overlay.enabled) {
+    validate_overlay_stack(tracked_state)?;
+    for (index, overlay) in tracked_state
+        .overlays
+        .iter()
+        .enumerate()
+        .filter(|(_, overlay)| overlay.enabled)
+    {
         let overlay_resolved = resolve_stored_overlay_target(overlay);
 
         if !matches!(overlay_resolved.target_kind, TargetKind::Pr) {
@@ -948,18 +956,16 @@ async fn incoming_write_paths_for_tracked_state(
 
         ensure_remote_matches(repo.canonical_remote.as_deref(), &overlay_resolved)?;
 
-        let overlay_base_ref = overlay_resolved.pr_base_ref.clone().unwrap_or_default();
-        if overlay_base_ref != base_resolved.checkout_ref {
-            return Err(AppError::Conflict(format!(
-                "PR #{} targets base branch '{}' but this stack is based on '{}'",
-                overlay_resolved.pr_number.unwrap_or_default(),
-                overlay_base_ref,
-                base_resolved.checkout_ref
-            )));
-        }
-
+        let declared_base_ref = match overlay_dependency_index(tracked_state, index)? {
+            Some(parent_index) => {
+                let parent = &tracked_state.overlays[parent_index];
+                let parent_resolved = resolve_stored_overlay_target(parent);
+                ensure_preview_target_available(path, &parent_resolved).await?
+            }
+            None => base_ref.clone(),
+        };
         let overlay_ref = ensure_preview_target_available(path, &overlay_resolved).await?;
-        for file_change in diff_name_status(path, &base_ref, &overlay_ref).await? {
+        for file_change in diff_name_status(path, &declared_base_ref, &overlay_ref).await? {
             if file_change_writes_path(&file_change.status) {
                 write_paths.insert(normalize_repo_relative_path(&file_change.path));
             }
@@ -1114,6 +1120,7 @@ async fn preview_tracked_state_application(
 
     let mut conflict_files = Vec::new();
     if !enabled_overlays.is_empty() {
+        validate_overlay_stack(tracked_state)?;
         let base_probe_head = match ensure_preview_target_available(path, &base_resolved).await {
             Ok(base_ref) => Some(base_ref),
             Err(error) => {
@@ -1125,10 +1132,32 @@ async fn preview_tracked_state_application(
             }
         };
         if let Some(base_probe_head) = base_probe_head.as_deref() {
-            for overlay in &enabled_overlays {
+            for (index, overlay) in tracked_state
+                .overlays
+                .iter()
+                .enumerate()
+                .filter(|(_, overlay)| overlay.enabled)
+            {
                 let overlay_resolved = resolve_stored_overlay_target(overlay);
+                let declared_base_ref = match overlay_dependency_index(tracked_state, index)? {
+                    Some(parent_index) => {
+                        let parent_resolved =
+                            resolve_stored_overlay_target(&tracked_state.overlays[parent_index]);
+                        match ensure_preview_target_available(path, &parent_resolved).await {
+                            Ok(parent_ref) => parent_ref,
+                            Err(error) => {
+                                warnings.push(format!(
+                                    "Unable to fetch dependency objects for {} during conflict probing: {}",
+                                    overlay.summary_label, error
+                                ));
+                                continue;
+                            }
+                        }
+                    }
+                    None => base_probe_head.to_string(),
+                };
                 match ensure_preview_target_available(path, &overlay_resolved).await {
-                    Ok(overlay_ref) => match preview_merge_conflicts(path, base_probe_head, &overlay_ref).await {
+                    Ok(overlay_ref) => match preview_merge_conflicts(path, &declared_base_ref, &overlay_ref).await {
                         Ok(next_conflict_files) => conflict_files.extend(next_conflict_files),
                         Err(error) => warnings.push(format!(
                             "Unable to probe conflicts for {}: {}",
@@ -1144,7 +1173,7 @@ async fn preview_tracked_state_application(
         }
         if enabled_overlays.len() > 1 {
             warnings.push(
-                "Conflict probing is computed per overlay against the resolved base before any stack mutation."
+                "Conflict probing follows each PR's declared base dependency; interactions between sibling overlays are still validated by the real sequential stack materialization."
                     .to_string(),
             );
         }
@@ -1307,6 +1336,98 @@ async fn try_resolve_same_repo_pr_without_github_api(
     };
 
     let overlay_ref = format!("patcher/pr-{pr_number}");
+    let has_existing_stack = repo
+        .tracked_state
+        .as_ref()
+        .is_some_and(|tracked| !tracked.overlays.is_empty());
+
+    if has_existing_stack {
+        // For a non-empty stack we must distinguish a PR based on the tracked
+        // repo branch from one based on an earlier PR branch. GitHub exposes a
+        // test-merge ref whose first parent is the PR base tip and second parent
+        // is the PR head. Use that local git topology first so the existing
+        // same-repo/rate-limit-safe path remains available; fall back to the
+        // GitHub API when the merge ref is missing/stale or branch identity is
+        // ambiguous.
+        if fetch_origin(path).await.is_err() {
+            return Ok(None);
+        }
+        let head_refspec = format!("pull/{pr_number}/head:{overlay_ref}");
+        if force_fetch_refspec(path, "origin", &head_refspec).await.is_err() {
+            return Ok(None);
+        }
+        let Some(head_sha) = rev_parse(path, &overlay_ref).await? else {
+            return Ok(None);
+        };
+        let merge_ref = preview_ref_name("pr-merge", &pr_number.to_string());
+        let merge_refspec = format!("pull/{pr_number}/merge:{merge_ref}");
+        if force_fetch_refspec(path, "origin", &merge_refspec).await.is_err() {
+            return Ok(None);
+        }
+        let Some(merge_base_sha) = rev_parse(path, &format!("{merge_ref}^1")).await? else {
+            return Ok(None);
+        };
+        let Some(merge_head_sha) = rev_parse(path, &format!("{merge_ref}^2")).await? else {
+            return Ok(None);
+        };
+        if merge_head_sha != head_sha {
+            return Ok(None);
+        }
+
+        let Some(tracked_state) = repo.tracked_state.as_ref() else {
+            return Ok(None);
+        };
+        if tracked_state.overlays.is_empty() {
+            return Ok(None);
+        }
+        let tracked_base_remote_ref = format!("origin/{}", tracked_state.base.checkout_ref);
+        let local_base_ref = if rev_parse(path, &tracked_base_remote_ref).await?.as_deref()
+            == Some(merge_base_sha.as_str())
+        {
+            tracked_state.base.checkout_ref.clone()
+        } else {
+            let candidates = remote_branches_pointing_at(path, "origin", &merge_base_sha).await?;
+            let known_overlay_candidates = tracked_state
+                .overlays
+                .iter()
+                .filter_map(|overlay| overlay.pr_head_ref.as_deref())
+                .filter(|head_ref| {
+                    candidates
+                        .iter()
+                        .any(|candidate| candidate.as_str() == *head_ref)
+                })
+                .collect::<Vec<_>>();
+            if known_overlay_candidates.len() == 1 {
+                known_overlay_candidates[0].to_string()
+            } else if candidates.len() == 1 {
+                candidates[0].clone()
+            } else {
+                return Ok(None);
+            }
+        };
+
+        let head_candidates = remote_branches_pointing_at(path, "origin", &head_sha).await?;
+        let local_head_ref = (head_candidates.len() == 1).then(|| head_candidates[0].clone());
+        return Ok(Some(ResolvedTarget {
+            source_input: input.trim().to_string(),
+            target_kind: TargetKind::Pr,
+            canonical_repo_url: current_remote.clone(),
+            fetch_url: format!("{current_remote}.git"),
+            checkout_ref: overlay_ref,
+            resolved_sha: Some(head_sha.clone()),
+            pr_number: Some(pr_number),
+            pr_base_repo_url: Some(current_remote.clone()),
+            pr_base_ref: Some(local_base_ref),
+            pr_head_repo_url: local_head_ref.as_ref().map(|_| current_remote.clone()),
+            pr_head_ref: local_head_ref,
+            summary_label: format!(
+                "PR #{pr_number} @ {}",
+                head_sha.chars().take(7).collect::<String>()
+            ),
+            suggested_local_dir_name: String::new(),
+        }));
+    }
+
     let resolved_sha = rev_parse(path, &overlay_ref).await.ok().flatten();
     let summary_label = resolved_sha
         .as_deref()
@@ -1703,6 +1824,78 @@ fn update_overlay_from_resolved(
     Ok(())
 }
 
+async fn hydrate_overlay_dependency_metadata(
+    state: &AppState,
+    repo: &ManagedRepo,
+    tracked_state: &mut TrackedRepoState,
+) -> AppResult<()> {
+    let path = Path::new(&repo.local_path);
+    let canonical_remote = repo
+        .canonical_remote
+        .as_deref()
+        .and_then(canonicalize_remote);
+    let local_refs_available = fetch_origin(path).await.is_ok();
+
+    for (position, overlay) in tracked_state.overlays.iter_mut().enumerate() {
+        if overlay.pr_head_ref.is_some() && overlay.pr_head_repo_url.is_some() {
+            continue;
+        }
+
+        if local_refs_available {
+            let overlay_ref = format!("patcher/pr-{}", overlay.pr_number);
+            let refspec = format!("pull/{}/head:{overlay_ref}", overlay.pr_number);
+            if force_fetch_refspec(path, "origin", &refspec).await.is_ok() {
+                if let Some(head_sha) = rev_parse(path, &overlay_ref).await? {
+                    let candidates = remote_branches_pointing_at(path, "origin", &head_sha).await?;
+                    if candidates.len() == 1 {
+                        if let Some(head_repo_url) = canonical_remote.clone() {
+                            overlay.pr_head_ref = Some(candidates[0].clone());
+                            overlay.pr_head_repo_url = Some(head_repo_url);
+                            overlay.resolved_sha = Some(head_sha.clone());
+                            overlay.summary_label = format!(
+                                "PR #{} @ {}",
+                                overlay.pr_number,
+                                head_sha.chars().take(7).collect::<String>()
+                            );
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        let previous_status = overlay.last_apply_status.clone().unwrap_or(if overlay.enabled {
+            OverlayApplyStatus::Pending
+        } else {
+            OverlayApplyStatus::Disabled
+        });
+        let previous_error = overlay.last_error.clone();
+        let resolved = state
+            .github
+            .resolve_target(
+                &overlay.source_input,
+                repo.canonical_remote.as_deref(),
+                Some(path),
+            )
+            .await?;
+        if !matches!(resolved.target_kind, TargetKind::Pr) {
+            return Err(AppError::Conflict(format!(
+                "stored overlay '{}' no longer resolves to a pull request",
+                overlay.source_input
+            )));
+        }
+        ensure_remote_matches(repo.canonical_remote.as_deref(), &resolved)?;
+        update_overlay_from_resolved(
+            overlay,
+            &resolved,
+            position,
+            previous_status,
+            previous_error,
+        )?;
+    }
+    Ok(())
+}
+
 async fn materialize_tracked_state(
     state: &AppState,
     app: &AppHandle,
@@ -1748,6 +1941,9 @@ async fn materialize_tracked_state(
                 "PR overlay stacks require a branch-like base target".to_string(),
             ),
         ));
+    }
+    if let Err(err) = validate_overlay_stack(&next_state) {
+        return Err((next_state, err));
     }
 
     log_operation(
@@ -1800,19 +1996,6 @@ async fn materialize_tracked_state(
 
         if let Err(err) = ensure_remote_matches(repo.canonical_remote.as_deref(), &overlay_resolved) {
             overlay.last_apply_status = Some(OverlayApplyStatus::Error);
-            overlay.last_error = Some(err.to_string());
-            return Err((next_state, err));
-        }
-
-        let overlay_base_ref = overlay_resolved.pr_base_ref.clone().unwrap_or_default();
-        if overlay_base_ref != base_resolved.checkout_ref {
-            let err = AppError::Conflict(format!(
-                "PR #{} targets base branch '{}' but this stack is based on '{}'",
-                overlay_resolved.pr_number.unwrap_or_default(),
-                overlay_base_ref,
-                base_resolved.checkout_ref
-            ));
-            overlay.last_apply_status = Some(OverlayApplyStatus::Conflict);
             overlay.last_error = Some(err.to_string());
             return Err((next_state, err));
         }
@@ -1913,6 +2096,7 @@ async fn apply_repo_tracking_state(
     sync_dependencies: bool,
     write_tracked_target: bool,
 ) -> AppResult<RepoCheckpoint> {
+    validate_overlay_stack(tracked_state)?;
     let checkpoint = create_checkpoint_if_needed(
         state,
         installation,
@@ -2069,10 +2253,7 @@ async fn build_requested_tracked_state_for_input(
                     ));
                 }
                 if existing.base.checkout_ref != base_ref {
-                    return Err(AppError::Conflict(format!(
-                        "PR overlays for this repo must target base branch '{}', but this PR targets '{}'",
-                        existing.base.checkout_ref, base_ref
-                    )));
+                    hydrate_overlay_dependency_metadata(state, repo, &mut existing).await?;
                 }
                 existing
             }
@@ -2100,6 +2281,7 @@ async fn build_requested_tracked_state_for_input(
         }
         tracked_state.overlays.push(overlay);
         normalize_overlay_positions(&mut tracked_state);
+        validate_overlay_stack(&tracked_state)?;
         tracked_state.materialized_branch = Some(STACK_BRANCH_NAME.to_string());
         return Ok(tracked_state);
     }
