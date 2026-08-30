@@ -339,6 +339,111 @@ pub async fn preview_merge_conflicts(
     Ok(conflicts)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SequentialMergePreview {
+    Clean { synthetic_commit: String },
+    Conflicts { files: Vec<String> },
+}
+
+fn parse_merge_tree_write_result(stdout: &str) -> AppResult<(String, Vec<String>)> {
+    let mut lines = stdout.lines();
+    let tree = lines
+        .next()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .ok_or_else(|| AppError::Git("git merge-tree returned no result tree".to_string()))?
+        .to_string();
+
+    let mut files = Vec::new();
+    for line in lines.by_ref() {
+        let line = line.trim();
+        if line.is_empty() {
+            break;
+        }
+        files.push(line.to_string());
+    }
+
+    if files.is_empty() {
+        for line in lines {
+            if let Some((_, path)) = line.split_once("Merge conflict in ") {
+                let path = path.trim();
+                if !path.is_empty() {
+                    files.push(path.to_string());
+                }
+            }
+        }
+    }
+
+    files.sort();
+    files.dedup();
+    Ok((tree, files))
+}
+
+pub async fn preview_sequential_merge(
+    path: &Path,
+    current_head: &str,
+    incoming_head: &str,
+) -> AppResult<SequentialMergePreview> {
+    let output = output_command(
+        "git",
+        &[
+            "merge-tree".to_string(),
+            "--write-tree".to_string(),
+            "--name-only".to_string(),
+            "--messages".to_string(),
+            current_head.to_string(),
+            incoming_head.to_string(),
+        ],
+        Some(path),
+    )
+    .await?;
+
+    if output.stdout.is_empty() {
+        return Err(AppError::Git(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let (tree, files) = parse_merge_tree_write_result(&stdout)?;
+    if !output.status.success() {
+        return Ok(SequentialMergePreview::Conflicts { files });
+    }
+
+    let synthetic_commit = run_git(
+        path,
+        &[
+            "-c",
+            "user.name=ComfyUI Patcher",
+            "-c",
+            "user.email=patcher@local.invalid",
+            "commit-tree",
+            &tree,
+            "-p",
+            current_head,
+            "-p",
+            incoming_head,
+            "-m",
+            "comfyui-patcher sequential merge preview",
+        ],
+    )
+    .await?;
+    Ok(SequentialMergePreview::Clean { synthetic_commit })
+}
+
+pub async fn unmerged_paths(path: &Path) -> AppResult<Vec<String>> {
+    let output = run_git(path, &["diff", "--name-only", "--diff-filter=U"]).await?;
+    let mut files = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
 pub fn canonicalize_remote(input: &str) -> Option<String> {
     let input = input.trim();
     if input.is_empty() {
@@ -876,6 +981,28 @@ mod tests {
                 .unwrap(),
             vec!["feature/stack".to_string(), "main".to_string()]
         );
+    }
+
+    #[test]
+    fn parses_merge_tree_write_conflicts() {
+        let stdout = "4f7a22f136fb79aea4bc03d8e9a3e586e374c883\ncomfyui_spectrum_h3/sampling.py\ntests/test_sampling.py\n\nAuto-merging comfyui_spectrum_h3/sampling.py\nCONFLICT (content): Merge conflict in comfyui_spectrum_h3/sampling.py\n";
+        let (tree, files) = parse_merge_tree_write_result(stdout).unwrap();
+        assert_eq!(tree, "4f7a22f136fb79aea4bc03d8e9a3e586e374c883");
+        assert_eq!(
+            files,
+            vec![
+                "comfyui_spectrum_h3/sampling.py".to_string(),
+                "tests/test_sampling.py".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_clean_merge_tree_write_result() {
+        let stdout = "5853cd60ba0690f01fea0897f189f6c3fab8090f\n\n";
+        let (tree, files) = parse_merge_tree_write_result(stdout).unwrap();
+        assert_eq!(tree, "5853cd60ba0690f01fea0897f189f6c3fab8090f");
+        assert!(files.is_empty());
     }
 
     #[test]
