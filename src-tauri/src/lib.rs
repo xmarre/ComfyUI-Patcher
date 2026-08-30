@@ -17,8 +17,9 @@ use crate::git::{
     apply_stash, apply_stash_keep, canonicalize_remote, checkout_paths, clean_untracked_paths,
     clone_repo, commits_between, diff_name_status, ensure_clean_or_apply_strategy, fetch_origin,
     fetch_refspec, force_fetch_refspec, inspect_repo, is_git_repo,
-    join_custom_node_path, merge_abort, merge_no_ff, preview_merge_conflicts, remote_branches_pointing_at,
-    reset_hard, rev_parse, run_git_allow_fail, submodule_update, switch_branch, switch_detached,
+    join_custom_node_path, merge_abort, merge_no_ff, preview_sequential_merge,
+    remote_branches_pointing_at, reset_hard, rev_parse, run_git_allow_fail, submodule_update,
+    switch_branch, switch_detached, unmerged_paths, SequentialMergePreview,
     validate_custom_node_dir_name, RepoStatus,
 };
 use crate::models::*;
@@ -1028,6 +1029,77 @@ async fn preflight_abort_strategy_for_tracked_state(
     )))
 }
 
+#[derive(Debug, Clone)]
+struct SequentialStackConflict {
+    pr_number: u64,
+    prior_prs: Vec<u64>,
+    files: Vec<String>,
+}
+
+fn sequential_stack_conflict_message(conflict: &SequentialStackConflict) -> String {
+    let prior = if conflict.prior_prs.is_empty() {
+        "the tracked base".to_string()
+    } else {
+        format!(
+            "earlier overlay{} {}",
+            if conflict.prior_prs.len() == 1 { "" } else { "s" },
+            conflict
+                .prior_prs
+                .iter()
+                .map(|pr| format!("#{pr}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    if conflict.files.is_empty() {
+        format!(
+            "PR #{} cannot be applied after {} because git reported a sequential stack merge conflict",
+            conflict.pr_number, prior
+        )
+    } else {
+        format!(
+            "PR #{} cannot be applied after {} because the sequential stack merge conflicts in: {}",
+            conflict.pr_number,
+            prior,
+            conflict.files.join(", ")
+        )
+    }
+}
+
+async fn probe_sequential_stack_conflicts(
+    state: &AppState,
+    installation: &Installation,
+    repo: &ManagedRepo,
+    tracked_state: &TrackedRepoState,
+) -> AppResult<Option<SequentialStackConflict>> {
+    validate_overlay_stack(tracked_state)?;
+    let path = Path::new(&repo.local_path);
+    let base_resolved =
+        resolve_existing_base_target(state, installation, repo, tracked_state).await?;
+    let mut accumulated_head = ensure_preview_target_available(path, &base_resolved).await?;
+    let mut prior_prs = Vec::new();
+
+    for overlay in tracked_state.overlays.iter().filter(|overlay| overlay.enabled) {
+        let overlay_resolved = resolve_stored_overlay_target(overlay);
+        let incoming_head = ensure_preview_target_available(path, &overlay_resolved).await?;
+        match preview_sequential_merge(path, &accumulated_head, &incoming_head).await? {
+            SequentialMergePreview::Clean { synthetic_commit } => {
+                accumulated_head = synthetic_commit;
+                prior_prs.push(overlay.pr_number);
+            }
+            SequentialMergePreview::Conflicts { files } => {
+                return Ok(Some(SequentialStackConflict {
+                    pr_number: overlay.pr_number,
+                    prior_prs,
+                    files,
+                }));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
 async fn preview_tracked_state_application(
     state: &AppState,
     installation: &Installation,
@@ -1120,62 +1192,23 @@ async fn preview_tracked_state_application(
 
     let mut conflict_files = Vec::new();
     if !enabled_overlays.is_empty() {
-        validate_overlay_stack(tracked_state)?;
-        let base_probe_head = match ensure_preview_target_available(path, &base_resolved).await {
-            Ok(base_ref) => Some(base_ref),
-            Err(error) => {
-                warnings.push(format!(
-                    "Unable to fetch the preview base for conflict probing: {}",
-                    error
-                ));
-                None
+        match probe_sequential_stack_conflicts(state, installation, repo, tracked_state).await {
+            Ok(Some(conflict)) => {
+                conflict_files.extend(conflict.files.clone());
+                warnings.push(sequential_stack_conflict_message(&conflict));
             }
-        };
-        if let Some(base_probe_head) = base_probe_head.as_deref() {
-            for (index, overlay) in tracked_state
-                .overlays
-                .iter()
-                .enumerate()
-                .filter(|(_, overlay)| overlay.enabled)
-            {
-                let overlay_resolved = resolve_stored_overlay_target(overlay);
-                let declared_base_ref = match overlay_dependency_index(tracked_state, index)? {
-                    Some(parent_index) => {
-                        let parent_resolved =
-                            resolve_stored_overlay_target(&tracked_state.overlays[parent_index]);
-                        match ensure_preview_target_available(path, &parent_resolved).await {
-                            Ok(parent_ref) => parent_ref,
-                            Err(error) => {
-                                warnings.push(format!(
-                                    "Unable to fetch dependency objects for {} during conflict probing: {}",
-                                    overlay.summary_label, error
-                                ));
-                                continue;
-                            }
-                        }
-                    }
-                    None => base_probe_head.to_string(),
-                };
-                match ensure_preview_target_available(path, &overlay_resolved).await {
-                    Ok(overlay_ref) => match preview_merge_conflicts(path, &declared_base_ref, &overlay_ref).await {
-                        Ok(next_conflict_files) => conflict_files.extend(next_conflict_files),
-                        Err(error) => warnings.push(format!(
-                            "Unable to probe conflicts for {}: {}",
-                            overlay.summary_label, error
-                        )),
-                    },
-                    Err(error) => warnings.push(format!(
-                        "Unable to fetch preview objects for {} during conflict probing: {}",
-                        overlay.summary_label, error
-                    )),
+            Ok(None) => {
+                if enabled_overlays.len() > 1 {
+                    warnings.push(
+                        "Sequential conflict probing synthesized the same overlay order used by materialization and found no merge conflicts."
+                            .to_string(),
+                    );
                 }
             }
-        }
-        if enabled_overlays.len() > 1 {
-            warnings.push(
-                "Conflict probing follows each PR's declared base dependency; interactions between sibling overlays are still validated by the real sequential stack materialization."
-                    .to_string(),
-            );
+            Err(error) => warnings.push(format!(
+                "Unable to complete exact sequential stack conflict probing: {}",
+                error
+            )),
         }
     }
     conflict_files.sort();
@@ -2147,6 +2180,15 @@ async fn materialize_tracked_state(
         )
         .await
         {
+            let conflict_files = unmerged_paths(path).await.unwrap_or_default();
+            let primary_error = if conflict_files.is_empty() {
+                err
+            } else {
+                AppError::Conflict(format!(
+                    "PR #{pr_number} produced merge conflicts during stack materialization in: {}",
+                    conflict_files.join(", ")
+                ))
+            };
             let merge_in_progress = match run_git_allow_fail(
                 path,
                 &["rev-parse", "-q", "--verify", "MERGE_HEAD"],
@@ -2155,7 +2197,7 @@ async fn materialize_tracked_state(
             {
                 Ok(result) => result.is_some(),
                 Err(probe_err) => {
-                    let merge_error = restore_checkpoint_error(err, probe_err);
+                    let merge_error = restore_checkpoint_error(primary_error, probe_err);
                     overlay.last_apply_status = Some(OverlayApplyStatus::Conflict);
                     overlay.last_error = Some(merge_error.to_string());
                     return Err((next_state, merge_error));
@@ -2163,11 +2205,11 @@ async fn materialize_tracked_state(
             };
             let merge_error = if merge_in_progress {
                 match merge_abort(path).await {
-                    Ok(()) => err,
-                    Err(abort_err) => restore_checkpoint_error(err, abort_err),
+                    Ok(()) => primary_error,
+                    Err(abort_err) => restore_checkpoint_error(primary_error, abort_err),
                 }
             } else {
-                err
+                primary_error
             };
             overlay.last_apply_status = Some(OverlayApplyStatus::Conflict);
             overlay.last_error = Some(merge_error.to_string());
@@ -2201,6 +2243,11 @@ async fn apply_repo_tracking_state(
     write_tracked_target: bool,
 ) -> AppResult<RepoCheckpoint> {
     validate_overlay_stack(tracked_state)?;
+    if let Some(conflict) =
+        probe_sequential_stack_conflicts(state, installation, repo, tracked_state).await?
+    {
+        return Err(AppError::Conflict(sequential_stack_conflict_message(&conflict)));
+    }
     let checkpoint = create_checkpoint_if_needed(
         state,
         installation,
