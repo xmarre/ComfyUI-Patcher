@@ -3,6 +3,27 @@
 All notable changes to ComfyUI Patcher are documented here. Earlier release notes
 remain available on the [GitHub Releases](https://github.com/xmarre/ComfyUI-Patcher/releases) page.
 
+## [0.1.18] - 2026-08-30
+
+This hotfix restores exact sequential PR-stack preflight on Git versions that only provide the legacy three-argument `git merge-tree` interface.
+
+### Fixed
+
+- Removed the v0.1.17 dependency on `git merge-tree --write-tree`, which fails on older Git with `usage: git merge-tree <base-tree> <branch1> <branch2>`.
+- Sequential preflight now uses short-lived linked worktrees and the same real `git merge --no-ff` operation used by stack materialization.
+- Clean preview merges advance through their actual merge-commit HEAD, preserving exact accumulated ancestry for the next overlay.
+- Conflicting preview merges report Git's actual unmerged paths.
+- Temporary preflight worktrees are removed and pruned on clean merge, conflict, merge failure, and synthetic-HEAD lookup failure; cleanup failures are surfaced explicitly.
+
+### Safety
+
+- Preflight does not modify the managed checkout or the `patcher/stack` branch.
+- No automatic `ours`/`theirs` conflict resolution is introduced.
+
+### Tests
+
+- Added an integration-style Git regression test that performs two sequential sibling-PR merges, confirms the second conflict is detected against the accumulated first merge, checks the conflicting file path, and verifies the managed worktree HEAD/status/worktree list remain unchanged.
+
 ## [0.1.17] - 2026-08-30
 
 This hotfix makes PR-stack conflict preflight model the exact sequential merge that materialization will perform.
@@ -159,6 +180,7 @@ This cumulative maintenance release contains every merged change since v0.1.9.
 - Fixed transient Windows directory deletion failures during uninstall with retry and safe staging behavior.
 - Fixed force-pushed pull requests failing to refresh cached PR overlay and preview refs with a non-fast-forward fetch rejection. Forced updates are restricted to disposable refs owned by ComfyUI Patcher.
 
+[0.1.18]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.17...v0.1.18
 [0.1.17]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.16...v0.1.17
 [0.1.16]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.15...v0.1.16
 [0.1.15]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.14...v0.1.15
