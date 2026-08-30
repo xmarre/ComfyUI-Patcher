@@ -3,6 +3,28 @@
 All notable changes to ComfyUI Patcher are documented here. Earlier release notes
 remain available on the [GitHub Releases](https://github.com/xmarre/ComfyUI-Patcher/releases) page.
 
+## [0.1.17] - 2026-08-30
+
+This hotfix makes PR-stack conflict preflight model the exact sequential merge that materialization will perform.
+
+### Changed
+
+- Stack conflict probing now uses `git merge-tree --write-tree` to virtually merge enabled overlays in their real materialization order.
+- Every clean virtual merge is represented by a synthetic merge commit, so the next overlay is checked against the accumulated tree and ancestry rather than only against its declared base.
+- The same exact sequential probe is used by both action preview and apply preflight.
+
+### Fixed
+
+- Fixed sibling overlays that each merge cleanly into the tracked base passing preflight even when they conflict with each other when applied sequentially.
+- Sequential stack conflicts are now detected before checkpoint creation or checkout mutation.
+- Conflict errors identify the offending PR and the actual conflicting file paths instead of exposing only the raw failing `git merge` command.
+- If refs change after preflight and a real materialization merge still conflicts, Patcher now collects unmerged paths before aborting and reports those files.
+
+### Safety
+
+- Patcher does not auto-resolve overlapping PR content with `ours`, `theirs`, or another lossy merge strategy.
+- The sequential probe does not modify the checked-out worktree; it only uses preview refs and temporary dangling Git objects.
+
 ## [0.1.16] - 2026-08-30
 
 This hotfix makes pull-request resolution resilient to transient GitHub/network failures while keeping same-repository overlays on the local git topology path whenever possible.
@@ -137,6 +159,7 @@ This cumulative maintenance release contains every merged change since v0.1.9.
 - Fixed transient Windows directory deletion failures during uninstall with retry and safe staging behavior.
 - Fixed force-pushed pull requests failing to refresh cached PR overlay and preview refs with a non-fast-forward fetch rejection. Forced updates are restricted to disposable refs owned by ComfyUI Patcher.
 
+[0.1.17]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.16...v0.1.17
 [0.1.16]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.15...v0.1.16
 [0.1.15]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.14...v0.1.15
 [0.1.14]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.13...v0.1.14
