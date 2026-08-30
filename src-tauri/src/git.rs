@@ -345,38 +345,33 @@ pub enum SequentialMergePreview {
     Conflicts { files: Vec<String> },
 }
 
-fn parse_merge_tree_write_result(stdout: &str) -> AppResult<(String, Vec<String>)> {
-    let mut lines = stdout.lines();
-    let tree = lines
-        .next()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .ok_or_else(|| AppError::Git("git merge-tree returned no result tree".to_string()))?
-        .to_string();
-
-    let mut files = Vec::new();
-    for line in lines.by_ref() {
-        let line = line.trim();
-        if line.is_empty() {
-            break;
-        }
-        files.push(line.to_string());
+async fn remove_temporary_worktree(
+    repo_path: &Path,
+    relative_worktree: &str,
+    absolute_worktree: &Path,
+) -> AppResult<()> {
+    let removed = run_git_allow_fail(
+        repo_path,
+        &["worktree", "remove", "--force", relative_worktree],
+    )
+    .await?;
+    if removed.is_none() {
+        let _ = std::fs::remove_dir_all(absolute_worktree);
     }
-
-    if files.is_empty() {
-        for line in lines {
-            if let Some((_, path)) = line.split_once("Merge conflict in ") {
-                let path = path.trim();
-                if !path.is_empty() {
-                    files.push(path.to_string());
-                }
-            }
-        }
+    let pruned = run_git_allow_fail(repo_path, &["worktree", "prune"]).await?;
+    if absolute_worktree.exists() || pruned.is_none() {
+        return Err(AppError::Git(format!(
+            "failed to clean temporary preflight worktree {relative_worktree}"
+        )));
     }
+    Ok(())
+}
 
-    files.sort();
-    files.dedup();
-    Ok((tree, files))
+fn combine_preview_cleanup_error(
+    primary: AppError,
+    cleanup: AppError,
+) -> AppError {
+    AppError::Git(format!("{primary}; temporary preflight cleanup also failed: {cleanup}"))
 }
 
 pub async fn preview_sequential_merge(
@@ -384,51 +379,64 @@ pub async fn preview_sequential_merge(
     current_head: &str,
     incoming_head: &str,
 ) -> AppResult<SequentialMergePreview> {
-    let output = output_command(
-        "git",
-        &[
-            "merge-tree".to_string(),
-            "--write-tree".to_string(),
-            "--name-only".to_string(),
-            "--messages".to_string(),
-            current_head.to_string(),
-            incoming_head.to_string(),
-        ],
-        Some(path),
-    )
-    .await?;
+    let parent = path.parent().ok_or_else(|| {
+        AppError::Git("repository path has no parent for temporary preflight worktree".to_string())
+    })?;
+    let worktree_name = format!(
+        ".comfyui-patcher-preflight-{}",
+        uuid::Uuid::new_v4().simple()
+    );
+    let relative_worktree = format!("../{worktree_name}");
+    let absolute_worktree = parent.join(&worktree_name);
 
-    if output.stdout.is_empty() {
-        return Err(AppError::Git(
-            String::from_utf8_lossy(&output.stderr).to_string(),
-        ));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let (tree, files) = parse_merge_tree_write_result(&stdout)?;
-    if !output.status.success() {
-        return Ok(SequentialMergePreview::Conflicts { files });
-    }
-
-    let synthetic_commit = run_git(
+    if let Err(error) = run_git(
         path,
         &[
-            "-c",
-            "user.name=ComfyUI Patcher",
-            "-c",
-            "user.email=patcher@local.invalid",
-            "commit-tree",
-            &tree,
-            "-p",
+            "worktree",
+            "add",
+            "--detach",
+            "--force",
+            &relative_worktree,
             current_head,
-            "-p",
-            incoming_head,
-            "-m",
-            "comfyui-patcher sequential merge preview",
         ],
     )
-    .await?;
-    Ok(SequentialMergePreview::Clean { synthetic_commit })
+    .await
+    {
+        let _ = std::fs::remove_dir_all(&absolute_worktree);
+        let _ = run_git_allow_fail(path, &["worktree", "prune"]).await;
+        return Err(error);
+    }
+
+    let merge_result = merge_no_ff(
+        &absolute_worktree,
+        incoming_head,
+        "comfyui-patcher sequential merge preview",
+    )
+    .await;
+
+    let result = match merge_result {
+        Ok(()) => run_git(&absolute_worktree, &["rev-parse", "HEAD"])
+            .await
+            .map(|synthetic_commit| SequentialMergePreview::Clean { synthetic_commit }),
+        Err(merge_error) => match unmerged_paths(&absolute_worktree).await {
+            Ok(files) if !files.is_empty() => Ok(SequentialMergePreview::Conflicts { files }),
+            Ok(_) => Err(merge_error),
+            Err(paths_error) => Err(AppError::Git(format!(
+                "{merge_error}; additionally failed to inspect unmerged paths: {paths_error}"
+            ))),
+        },
+    };
+
+    let cleanup =
+        remove_temporary_worktree(path, &relative_worktree, &absolute_worktree).await;
+    match (result, cleanup) {
+        (Ok(result), Ok(())) => Ok(result),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
+        (Err(error), Err(cleanup_error)) => {
+            Err(combine_preview_cleanup_error(error, cleanup_error))
+        }
+    }
 }
 
 pub async fn unmerged_paths(path: &Path) -> AppResult<Vec<String>> {
@@ -983,26 +991,64 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parses_merge_tree_write_conflicts() {
-        let stdout = "4f7a22f136fb79aea4bc03d8e9a3e586e374c883\ncomfyui_spectrum_h3/sampling.py\ntests/test_sampling.py\n\nAuto-merging comfyui_spectrum_h3/sampling.py\nCONFLICT (content): Merge conflict in comfyui_spectrum_h3/sampling.py\n";
-        let (tree, files) = parse_merge_tree_write_result(stdout).unwrap();
-        assert_eq!(tree, "4f7a22f136fb79aea4bc03d8e9a3e586e374c883");
-        assert_eq!(
-            files,
-            vec![
-                "comfyui_spectrum_h3/sampling.py".to_string(),
-                "tests/test_sampling.py".to_string(),
-            ]
-        );
-    }
+    #[tokio::test]
+    async fn sequential_preview_uses_real_merge_and_preserves_managed_worktree() {
+        let repo = TestRepo::new();
+        repo.git(&["init"]);
+        repo.git(&["config", "user.name", "ComfyUI Patcher Test"]);
+        repo.git(&["config", "user.email", "patcher-test@local.invalid"]);
 
-    #[test]
-    fn parses_clean_merge_tree_write_result() {
-        let stdout = "5853cd60ba0690f01fea0897f189f6c3fab8090f\n\n";
-        let (tree, files) = parse_merge_tree_write_result(stdout).unwrap();
-        assert_eq!(tree, "5853cd60ba0690f01fea0897f189f6c3fab8090f");
-        assert!(files.is_empty());
+        std::fs::write(repo.path().join("file.txt"), "base\n").unwrap();
+        repo.git(&["add", "file.txt"]);
+        repo.git(&["commit", "-m", "base"]);
+        let base = repo.git(&["rev-parse", "HEAD"]);
+
+        repo.git(&["switch", "-c", "feature/a"]);
+        std::fs::write(repo.path().join("file.txt"), "from-a\n").unwrap();
+        repo.git(&["add", "file.txt"]);
+        repo.git(&["commit", "-m", "feature a"]);
+        let feature_a = repo.git(&["rev-parse", "HEAD"]);
+
+        repo.git(&["switch", "--detach", &base]);
+        repo.git(&["switch", "-c", "feature/b"]);
+        std::fs::write(repo.path().join("file.txt"), "from-b\n").unwrap();
+        repo.git(&["add", "file.txt"]);
+        repo.git(&["commit", "-m", "feature b"]);
+        let feature_b = repo.git(&["rev-parse", "HEAD"]);
+
+        repo.git(&["switch", "--detach", &base]);
+        let original_head = repo.git(&["rev-parse", "HEAD"]);
+
+        let first = preview_sequential_merge(repo.path(), &base, &feature_a)
+            .await
+            .unwrap();
+        let accumulated = match first {
+            SequentialMergePreview::Clean { synthetic_commit } => synthetic_commit,
+            SequentialMergePreview::Conflicts { files } => {
+                panic!("first merge unexpectedly conflicted: {files:?}")
+            }
+        };
+
+        let second = preview_sequential_merge(repo.path(), &accumulated, &feature_b)
+            .await
+            .unwrap();
+        assert_eq!(
+            second,
+            SequentialMergePreview::Conflicts {
+                files: vec!["file.txt".to_string()]
+            }
+        );
+
+        assert_eq!(repo.git(&["rev-parse", "HEAD"]), original_head);
+        assert!(repo.git(&["status", "--porcelain"]).is_empty());
+        let worktree_list = repo.git(&["worktree", "list", "--porcelain"]);
+        assert_eq!(
+            worktree_list
+                .lines()
+                .filter(|line| line.starts_with("worktree "))
+                .count(),
+            1
+        );
     }
 
     #[test]
