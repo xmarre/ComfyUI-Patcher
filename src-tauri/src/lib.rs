@@ -1305,6 +1305,44 @@ async fn infer_overlay_base_ref(repo: &ManagedRepo) -> Option<String> {
     Some(upstream_branch.to_string())
 }
 
+const SAME_REPO_GIT_ATTEMPTS: usize = 3;
+
+async fn fetch_origin_with_retry(path: &Path) -> AppResult<()> {
+    let mut last_error = None;
+    for attempt in 1..=SAME_REPO_GIT_ATTEMPTS {
+        match fetch_origin(path).await {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < SAME_REPO_GIT_ATTEMPTS {
+                    tokio::time::sleep(std::time::Duration::from_millis(250 * attempt as u64)).await;
+                }
+            }
+        }
+    }
+    Err(last_error.expect("same-repo git retry loop must capture an error"))
+}
+
+async fn force_fetch_refspec_with_retry(
+    path: &Path,
+    remote: &str,
+    refspec: &str,
+) -> AppResult<()> {
+    let mut last_error = None;
+    for attempt in 1..=SAME_REPO_GIT_ATTEMPTS {
+        match force_fetch_refspec(path, remote, refspec).await {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < SAME_REPO_GIT_ATTEMPTS {
+                    tokio::time::sleep(std::time::Duration::from_millis(250 * attempt as u64)).await;
+                }
+            }
+        }
+    }
+    Err(last_error.expect("same-repo git retry loop must capture an error"))
+}
+
 async fn try_resolve_same_repo_pr_without_github_api(
     repo: Option<&ManagedRepo>,
     input: &str,
@@ -1343,27 +1381,45 @@ async fn try_resolve_same_repo_pr_without_github_api(
 
     if has_existing_stack {
         // For a non-empty stack we must distinguish a PR based on the tracked
-        // repo branch from one based on an earlier PR branch. GitHub exposes a
-        // test-merge ref whose first parent is the PR base tip and second parent
-        // is the PR head. Use that local git topology first so the existing
-        // same-repo/rate-limit-safe path remains available; fall back to the
-        // GitHub API when the merge ref is missing/stale or branch identity is
-        // ambiguous.
-        if fetch_origin(path).await.is_err() {
+        // repo branch from one based on an earlier PR branch. The pull head and
+        // test-merge refs provide the required commit topology without requiring
+        // GitHub REST metadata. Refresh only the refs needed for that topology;
+        // a broad origin fetch is best-effort branch-name enrichment and must not
+        // make otherwise resolvable same-repo PRs depend on a second network path.
+        let Some(tracked_state) = repo.tracked_state.as_ref() else {
+            return Ok(None);
+        };
+        if tracked_state.overlays.is_empty() {
             return Ok(None);
         }
+
+        let tracked_base_refspec = format!(
+            "refs/heads/{0}:refs/remotes/origin/{0}",
+            tracked_state.base.checkout_ref
+        );
+        let _ = force_fetch_refspec_with_retry(path, "origin", &tracked_base_refspec).await;
+
         let head_refspec = format!("pull/{pr_number}/head:{overlay_ref}");
-        if force_fetch_refspec(path, "origin", &head_refspec).await.is_err() {
-            return Ok(None);
-        }
+        force_fetch_refspec_with_retry(path, "origin", &head_refspec)
+            .await
+            .map_err(|error| {
+                AppError::Git(format!(
+                    "same-repo PR #{pr_number} head fetch failed after retries: {error}"
+                ))
+            })?;
         let Some(head_sha) = rev_parse(path, &overlay_ref).await? else {
             return Ok(None);
         };
+
         let merge_ref = preview_ref_name("pr-merge", &pr_number.to_string());
         let merge_refspec = format!("pull/{pr_number}/merge:{merge_ref}");
-        if force_fetch_refspec(path, "origin", &merge_refspec).await.is_err() {
-            return Ok(None);
-        }
+        force_fetch_refspec_with_retry(path, "origin", &merge_refspec)
+            .await
+            .map_err(|error| {
+                AppError::Git(format!(
+                    "same-repo PR #{pr_number} merge-ref fetch failed after retries: {error}"
+                ))
+            })?;
         let Some(merge_base_sha) = rev_parse(path, &format!("{merge_ref}^1")).await? else {
             return Ok(None);
         };
@@ -1374,38 +1430,62 @@ async fn try_resolve_same_repo_pr_without_github_api(
             return Ok(None);
         }
 
-        let Some(tracked_state) = repo.tracked_state.as_ref() else {
-            return Ok(None);
-        };
-        if tracked_state.overlays.is_empty() {
-            return Ok(None);
-        }
         let tracked_base_remote_ref = format!("origin/{}", tracked_state.base.checkout_ref);
         let local_base_ref = if rev_parse(path, &tracked_base_remote_ref).await?.as_deref()
             == Some(merge_base_sha.as_str())
         {
             tracked_state.base.checkout_ref.clone()
         } else {
-            let candidates = remote_branches_pointing_at(path, "origin", &merge_base_sha).await?;
-            let known_overlay_candidates = tracked_state
+            // A stacked child can be identified directly from the immutable PR
+            // head SHA already stored for an earlier overlay. This avoids needing
+            // a complete origin branch refresh just to recover its branch name.
+            let mut overlay_sha_candidates = tracked_state
                 .overlays
                 .iter()
-                .filter_map(|overlay| overlay.pr_head_ref.as_deref())
-                .filter(|head_ref| {
-                    candidates
-                        .iter()
-                        .any(|candidate| candidate.as_str() == *head_ref)
+                .filter(|overlay| overlay.resolved_sha.as_deref() == Some(merge_base_sha.as_str()))
+                .filter_map(|overlay| {
+                    let head_repo = overlay
+                        .pr_head_repo_url
+                        .as_deref()
+                        .and_then(canonicalize_remote)?;
+                    if head_repo != current_remote {
+                        return None;
+                    }
+                    overlay.pr_head_ref.clone()
                 })
                 .collect::<Vec<_>>();
-            if known_overlay_candidates.len() == 1 {
-                known_overlay_candidates[0].to_string()
-            } else if candidates.len() == 1 {
-                candidates[0].clone()
+            overlay_sha_candidates.sort();
+            overlay_sha_candidates.dedup();
+            if overlay_sha_candidates.len() == 1 {
+                overlay_sha_candidates[0].clone()
             } else {
-                return Ok(None);
+                let _ = fetch_origin_with_retry(path).await;
+                let candidates = remote_branches_pointing_at(path, "origin", &merge_base_sha).await?;
+                let known_overlay_candidates = tracked_state
+                    .overlays
+                    .iter()
+                    .filter_map(|overlay| overlay.pr_head_ref.as_deref())
+                    .filter(|head_ref| {
+                        candidates
+                            .iter()
+                            .any(|candidate| candidate.as_str() == *head_ref)
+                    })
+                    .collect::<Vec<_>>();
+                if known_overlay_candidates.len() == 1 {
+                    known_overlay_candidates[0].to_string()
+                } else if candidates.len() == 1 {
+                    candidates[0].clone()
+                } else {
+                    return Ok(None);
+                }
             }
         };
 
+        // Branch-name enrichment is useful for making this PR a dependency
+        // provider for a later child, but it is not required to add an
+        // independent/base-targeting PR. Keep it best-effort and fail closed
+        // later if a child actually needs unavailable identity metadata.
+        let _ = fetch_origin_with_retry(path).await;
         let head_candidates = remote_branches_pointing_at(path, "origin", &head_sha).await?;
         let local_head_ref = (head_candidates.len() == 1).then(|| head_candidates[0].clone());
         return Ok(Some(ResolvedTarget {
@@ -1476,16 +1556,26 @@ async fn resolve_target_for_context(
             RepoKind::CustomNode => None,
         },
     };
-    if let Some(resolved) = try_resolve_same_repo_pr_without_github_api(repo.as_ref(), input).await?
-    {
-        return Ok(resolved);
+    let local_resolution = try_resolve_same_repo_pr_without_github_api(repo.as_ref(), input).await;
+    if let Ok(Some(resolved)) = local_resolution.as_ref() {
+        return Ok(resolved.clone());
     }
+
     let current_remote = repo.as_ref().and_then(|r| r.canonical_remote.as_deref());
     let current_repo_path = repo.as_ref().map(|r| Path::new(&r.local_path));
-    state
+    match state
         .github
         .resolve_target(input, current_remote, current_repo_path)
         .await
+    {
+        Ok(resolved) => Ok(resolved),
+        Err(api_error) => match local_resolution {
+            Err(local_error) => Err(AppError::Github(format!(
+                "same-repo git resolution failed ({local_error}); GitHub API fallback also failed ({api_error})"
+            ))),
+            _ => Err(api_error),
+        },
+    }
 }
 
 fn ensure_remote_matches(current: Option<&str>, target: &ResolvedTarget) -> AppResult<()> {
@@ -1834,17 +1924,18 @@ async fn hydrate_overlay_dependency_metadata(
         .canonical_remote
         .as_deref()
         .and_then(canonicalize_remote);
-    let local_refs_available = fetch_origin(path).await.is_ok();
+    let _ = fetch_origin_with_retry(path).await;
 
     for (position, overlay) in tracked_state.overlays.iter_mut().enumerate() {
         if overlay.pr_head_ref.is_some() && overlay.pr_head_repo_url.is_some() {
             continue;
         }
 
-        if local_refs_available {
-            let overlay_ref = format!("patcher/pr-{}", overlay.pr_number);
-            let refspec = format!("pull/{}/head:{overlay_ref}", overlay.pr_number);
-            if force_fetch_refspec(path, "origin", &refspec).await.is_ok() {
+        let overlay_ref = format!("patcher/pr-{}", overlay.pr_number);
+        let refspec = format!("pull/{}/head:{overlay_ref}", overlay.pr_number);
+        let mut local_error = None;
+        match force_fetch_refspec_with_retry(path, "origin", &refspec).await {
+            Ok(()) => {
                 if let Some(head_sha) = rev_parse(path, &overlay_ref).await? {
                     let candidates = remote_branches_pointing_at(path, "origin", &head_sha).await?;
                     if candidates.len() == 1 {
@@ -1862,6 +1953,7 @@ async fn hydrate_overlay_dependency_metadata(
                     }
                 }
             }
+            Err(error) => local_error = Some(error),
         }
 
         let previous_status = overlay.last_apply_status.clone().unwrap_or(if overlay.enabled {
@@ -1870,14 +1962,26 @@ async fn hydrate_overlay_dependency_metadata(
             OverlayApplyStatus::Disabled
         });
         let previous_error = overlay.last_error.clone();
-        let resolved = state
+        let resolved = match state
             .github
             .resolve_target(
                 &overlay.source_input,
                 repo.canonical_remote.as_deref(),
                 Some(path),
             )
-            .await?;
+            .await
+        {
+            Ok(resolved) => resolved,
+            Err(api_error) => {
+                if let Some(local_error) = local_error {
+                    return Err(AppError::Github(format!(
+                        "could not hydrate stored PR #{} via local git ({local_error}) or GitHub API ({api_error})",
+                        overlay.pr_number
+                    )));
+                }
+                return Err(api_error);
+            }
+        };
         if !matches!(resolved.target_kind, TargetKind::Pr) {
             return Err(AppError::Conflict(format!(
                 "stored overlay '{}' no longer resolves to a pull request",

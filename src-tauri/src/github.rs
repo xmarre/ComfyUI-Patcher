@@ -7,6 +7,8 @@ use crate::models::{ResolvedTarget, TargetKind};
 use crate::util::slugify;
 use regex::Regex;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT};
+use reqwest::StatusCode;
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use std::path::Path;
 use std::time::Duration;
@@ -57,6 +59,17 @@ struct RepoResponse {
     clone_url: String,
 }
 
+const GITHUB_REQUEST_ATTEMPTS: usize = 3;
+const GITHUB_RETRY_BASE_DELAY_MS: u64 = 250;
+
+fn retryable_github_status(status: StatusCode) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+fn github_retry_delay(attempt: usize) -> Duration {
+    Duration::from_millis(GITHUB_RETRY_BASE_DELAY_MS * attempt as u64)
+}
+
 impl GithubClient {
     pub fn new(token: Option<String>) -> AppResult<Self> {
         let mut headers = HeaderMap::new();
@@ -101,28 +114,42 @@ impl GithubClient {
         canonicalize_remote(response.url().as_str())
     }
 
+    async fn get_json_with_retry<T>(&self, url: &str) -> AppResult<T>
+    where
+        T: DeserializeOwned,
+    {
+        for attempt in 1..=GITHUB_REQUEST_ATTEMPTS {
+            match self.client.get(url).send().await {
+                Ok(response) => {
+                    let status = response.status();
+                    if retryable_github_status(status) && attempt < GITHUB_REQUEST_ATTEMPTS {
+                        tokio::time::sleep(github_retry_delay(attempt)).await;
+                        continue;
+                    }
+                    return Ok(response.error_for_status()?.json::<T>().await?);
+                }
+                Err(error) => {
+                    let retryable = error.is_connect() || error.is_timeout() || error.is_request();
+                    if !retryable || attempt == GITHUB_REQUEST_ATTEMPTS {
+                        return Err(AppError::Github(format!(
+                            "request to {url} failed after {attempt} attempt(s): {error}"
+                        )));
+                    }
+                    tokio::time::sleep(github_retry_delay(attempt)).await;
+                }
+            }
+        }
+        unreachable!("GitHub request retry loop must return")
+    }
+
     async fn get_repo(&self, owner: &str, repo: &str) -> AppResult<RepoResponse> {
         let url = format!("https://api.github.com/repos/{owner}/{repo}");
-        Ok(self
-            .client
-            .get(url)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?)
+        self.get_json_with_retry(&url).await
     }
 
     async fn get_pr(&self, owner: &str, repo: &str, number: u64) -> AppResult<PullResponse> {
         let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{number}");
-        Ok(self
-            .client
-            .get(url)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?)
+        self.get_json_with_retry(&url).await
     }
 
     pub async fn resolve_target(
@@ -561,5 +588,14 @@ mod tests {
     fn detects_sha() {
         assert!(is_probable_sha("abcdef1234567890"));
         assert!(!is_probable_sha("feature/something"));
+    }
+
+    #[test]
+    fn retries_transient_github_statuses_only() {
+        assert!(retryable_github_status(StatusCode::TOO_MANY_REQUESTS));
+        assert!(retryable_github_status(StatusCode::BAD_GATEWAY));
+        assert!(retryable_github_status(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(!retryable_github_status(StatusCode::NOT_FOUND));
+        assert!(!retryable_github_status(StatusCode::UNAUTHORIZED));
     }
 }
