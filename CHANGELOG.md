@@ -3,6 +3,23 @@
 All notable changes to ComfyUI Patcher are documented here. Earlier release notes
 remain available on the [GitHub Releases](https://github.com/xmarre/ComfyUI-Patcher/releases) page.
 
+## [0.1.16] - 2026-08-30
+
+This hotfix makes pull-request resolution resilient to transient GitHub/network failures while keeping same-repository overlays on the local git topology path whenever possible.
+
+### Changed
+
+- Same-repository PR resolution now refreshes only the exact base, pull-head, and pull-merge refs required for topology; a broad `git fetch origin` is now best-effort branch-name enrichment rather than a prerequisite.
+- Stacked child PR bases can now be identified directly from earlier tracked-overlay head SHAs before remote branch-name lookup.
+- GitHub REST metadata requests retry bounded transient connection/request/timeout failures, HTTP 429, and 5xx responses.
+
+### Fixed
+
+- Fixed valid PR overlays, including Spectrum PR #91, failing immediately when a transient local git refresh pushed resolution onto a one-shot GitHub API request.
+- Same-repo pull/base ref fetches now retry before falling back to REST.
+- If both local git resolution and the GitHub API fallback fail, the operation now reports both causes instead of hiding the local failure behind a generic API transport error.
+- Legacy overlay dependency-metadata hydration now uses the same resilient local-first resolution behavior.
+
 ## [0.1.15] - 2026-08-29
 
 This hotfix makes WSL-backed command execution argv-safe so Git arguments are no longer reinterpreted by a Linux shell.
@@ -120,6 +137,7 @@ This cumulative maintenance release contains every merged change since v0.1.9.
 - Fixed transient Windows directory deletion failures during uninstall with retry and safe staging behavior.
 - Fixed force-pushed pull requests failing to refresh cached PR overlay and preview refs with a non-fast-forward fetch rejection. Forced updates are restricted to disposable refs owned by ComfyUI Patcher.
 
+[0.1.16]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.15...v0.1.16
 [0.1.15]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.14...v0.1.15
 [0.1.14]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.13...v0.1.14
 [0.1.13]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.12...v0.1.13
