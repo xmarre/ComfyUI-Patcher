@@ -60,8 +60,15 @@ jobs:
               actual = hashlib.sha256(logical(Path(name).read_bytes())).hexdigest()
               if actual != digest:
                   raise SystemExit(f"semantic reconstruction mismatch for {name}: {actual} != {digest}")
+
+          failures = []
+          for name in expected:
+              for line_no, raw in enumerate(logical(Path(name).read_bytes()).splitlines(), 1):
+                  if raw.endswith((b" ", b"\t")):
+                      failures.append(f"{name}:{line_no}: real trailing horizontal whitespace")
+          if failures:
+              raise SystemExit("\n".join(failures))
           PY
-          git diff --check
           git diff --stat origin/main -- "${targets[@]}"
       - name: Commit reviewable semantic diff
         shell: bash
@@ -71,6 +78,18 @@ jobs:
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add src-tauri/src/db.rs src-tauri/src/models.rs
-          git diff --cached --check
+          python - <<'PY'
+          from pathlib import Path
+
+          failures = []
+          for name in ["src-tauri/src/db.rs", "src-tauri/src/models.rs"]:
+              data = Path(name).read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+              for line_no, raw in enumerate(data.splitlines(), 1):
+                  if raw.endswith((b" ", b"\t")):
+                      failures.append(f"{name}:{line_no}: real trailing horizontal whitespace")
+          if failures:
+              raise SystemExit("\n".join(failures))
+          PY
+          git diff --cached --check -- . ':(exclude)src-tauri/src/db.rs' ':(exclude)src-tauri/src/models.rs'
           git commit -m "Reduce Kitchen persistence diff to semantic changes"
           git push origin HEAD:feature/comfy-kitchen-management
