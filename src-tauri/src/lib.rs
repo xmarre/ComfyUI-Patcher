@@ -4755,6 +4755,10 @@ async fn run_install_or_patch_kitchen(
     state.db.set_operation_running(&operation_id)?;
     let installation_lock = state.installation_lock(&installation.id).await;
     let _installation_guard = installation_lock.lock().await;
+    let mut replaced_backup_path: Option<PathBuf> = None;
+    let mut created_repo_id: Option<String> = None;
+    let mut created_target_path = false;
+    let mut source_apply_completed = false;
     let result = async {
         let target_path = kitchen::default_kitchen_path(&installation);
         let detail = state.db.get_installation_detail(&installation.id)?;
@@ -4775,8 +4779,6 @@ async fn run_install_or_patch_kitchen(
                 expected_remote, resolved_remote
             )));
         }
-
-        let mut replaced_backup_path: Option<PathBuf> = None;
 
         let apply_existing = async {
             if !target_path.exists() || !is_git_repo(&target_path).await {
@@ -4871,6 +4873,10 @@ async fn run_install_or_patch_kitchen(
                 "info",
                 format!("cloning {}", resolved.canonical_repo_url),
             );
+            // The target did not exist when this operation reached clone (or was
+            // moved to the retained backup above), so cleanup may safely remove
+            // anything clone creates here if source application fails.
+            created_target_path = true;
             clone_repo(&resolved.fetch_url, &target_path).await?;
             let status = inspect_repo(&target_path).await?;
             state
@@ -4887,6 +4893,7 @@ async fn run_install_or_patch_kitchen(
                 status.is_detached,
                 repo_has_tracked_local_changes(&status),
             )?;
+            created_repo_id = Some(repo.id.clone());
             let repo_lock = state.repo_lock(&repo.id).await;
             let _guard = repo_lock.lock().await;
             let tracked_state = build_requested_tracked_state_for_input(
@@ -4897,7 +4904,7 @@ async fn run_install_or_patch_kitchen(
                 false,
             )
             .await?;
-            apply_repo_tracking_state(
+            let checkpoint = apply_repo_tracking_state(
                 &state,
                 &app,
                 &operation_id,
@@ -4908,7 +4915,9 @@ async fn run_install_or_patch_kitchen(
                 false,
                 input.set_tracked_target,
             )
-            .await?
+            .await?;
+            source_apply_completed = true;
+            checkpoint
         };
 
         maybe_restart_installation(
@@ -4951,10 +4960,82 @@ async fn run_install_or_patch_kitchen(
     .await;
 
     if let Err(err) = result {
+        let mut cleanup_errors = Vec::new();
+        if created_target_path && !source_apply_completed {
+            if let Some(repo_id) = created_repo_id.as_deref() {
+                match state.db.list_checkpoints(repo_id) {
+                    Ok(checkpoints) => {
+                        for checkpoint in checkpoints
+                            .into_iter()
+                            .filter(|checkpoint| checkpoint.operation_id == operation_id)
+                        {
+                            if let Err(cleanup_error) = state.db.delete_checkpoint(&checkpoint.id) {
+                                cleanup_errors.push(format!(
+                                    "failed to delete failed Kitchen checkpoint {}: {}",
+                                    checkpoint.id, cleanup_error
+                                ));
+                            }
+                        }
+                    }
+                    Err(cleanup_error) => cleanup_errors.push(format!(
+                        "failed to enumerate failed Kitchen checkpoints: {}",
+                        cleanup_error
+                    )),
+                }
+                if let Err(cleanup_error) = state.db.delete_repo(repo_id) {
+                    cleanup_errors.push(format!(
+                        "failed to delete failed Kitchen repo state {}: {}",
+                        repo_id, cleanup_error
+                    ));
+                }
+            }
+            let target_path = kitchen::default_kitchen_path(&installation);
+            if target_path.exists() {
+                if let Err(cleanup_error) = remove_path_with_retries(&target_path).await {
+                    cleanup_errors.push(format!(
+                        "failed to remove Kitchen checkout created by the failed operation: {}",
+                        cleanup_error
+                    ));
+                }
+            }
+            if let Some(backup_path) = replaced_backup_path.as_ref() {
+                if !target_path.exists() {
+                    if let Err(cleanup_error) = std::fs::rename(backup_path, &target_path) {
+                        cleanup_errors.push(format!(
+                            "failed to restore retained Kitchen path {}: {}",
+                            backup_path.to_string_lossy(),
+                            cleanup_error
+                        ));
+                    } else {
+                        log_operation(
+                            &state,
+                            &app,
+                            &operation_id,
+                            "rollback",
+                            "warn",
+                            format!(
+                                "restored retained Kitchen path {} after failed source installation",
+                                backup_path.to_string_lossy()
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+
+        let final_error = if cleanup_errors.is_empty() {
+            err
+        } else {
+            AppError::Io(format!(
+                "{}; additionally failed to clean up the failed Kitchen installation: {}",
+                err,
+                cleanup_errors.join("; ")
+            ))
+        };
         state.db.finish_operation(
             &operation_id,
             OperationStatus::Failed,
-            Some(&err.to_string()),
+            Some(&final_error.to_string()),
             None,
         )?;
         log_operation(
@@ -4963,9 +5044,9 @@ async fn run_install_or_patch_kitchen(
             &operation_id,
             "error",
             "error",
-            err.to_string(),
+            final_error.to_string(),
         );
-        return Err(err);
+        return Err(final_error);
     }
     Ok(())
 }
