@@ -1,0 +1,65 @@
+name: Apply and validate Kitchen UI
+
+on:
+  push:
+    branches:
+      - feature/comfy-kitchen-management
+    paths:
+      - tools/apply-kitchen-types-api.py
+      - tools/apply-kitchen-repo-card.py
+      - tools/apply-kitchen-app.py
+      - tools/apply-kitchen-docs-backend.py
+      - .github/workflows/apply-kitchen-ui.yml
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/comfy-kitchen-management
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply checked Kitchen UI and recovery transformations
+        shell: pwsh
+        run: |
+          python tools/apply-kitchen-types-api.py
+          python tools/apply-kitchen-repo-card.py
+          python tools/apply-kitchen-app.py
+          python tools/apply-kitchen-docs-backend.py
+          git diff --check
+      - name: Validate frontend
+        run: |
+          npm ci
+          npm run build
+      - name: Validate Rust without lockfile mutation
+        shell: pwsh
+        run: |
+          cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+          git diff --exit-code -- src-tauri/Cargo.lock
+          git diff --check
+      - name: Commit validated Kitchen UI checkpoint
+        shell: pwsh
+        run: |
+          Remove-Item tools/apply-kitchen-types-api.py
+          Remove-Item tools/apply-kitchen-repo-card.py
+          Remove-Item tools/apply-kitchen-app.py
+          Remove-Item tools/apply-kitchen-docs-backend.py
+          Remove-Item .github/workflows/apply-kitchen-ui.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git diff --cached --check
+          git commit -m "Add Comfy Kitchen management UI and documentation"
+          git push origin HEAD:feature/comfy-kitchen-management
