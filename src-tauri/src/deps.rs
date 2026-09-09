@@ -223,6 +223,15 @@ fn frontend_dependency_plan(installation: &Installation, repo_path: &Path) -> Ap
     })
 }
 
+fn kitchen_project_plan() -> DependencyPlan {
+    DependencyPlan {
+        strategy: "project_materialization".to_string(),
+        reason: "Comfy Kitchen is built and installed as a source project; generic dependency sync does not install the project itself"
+            .to_string(),
+        steps: Vec::new(),
+    }
+}
+
 pub fn plan_dependency_sync(
     installation: &Installation,
     repo: &ManagedRepo,
@@ -231,6 +240,7 @@ pub fn plan_dependency_sync(
     match repo.kind {
         RepoKind::Core | RepoKind::CustomNode => python_dependency_plan(installation, repo_path),
         RepoKind::Frontend => frontend_dependency_plan(installation, repo_path),
+        RepoKind::Kitchen => Ok(kitchen_project_plan()),
     }
 }
 
@@ -284,4 +294,55 @@ fn should_retry_pnpm_without_frozen_lockfile(step: &DependencyStep, output: &Out
             && (combined.contains("not up to date")
                 || combined.contains("pnpm-lock.yaml is absent")
                 || combined.contains("headless installation requires a pnpm-lock.yaml file"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{RepoLiveStatus, TargetKind};
+
+    #[test]
+    fn kitchen_is_not_routed_through_generic_pyproject_dependency_sync() {
+        let installation = Installation {
+            id: "i".to_string(),
+            name: "test".to_string(),
+            comfy_root: "/comfy".to_string(),
+            python_exe: "/venv/bin/python".to_string(),
+            custom_nodes_dir: "/comfy/custom_nodes".to_string(),
+            launch_profile: None,
+            frontend_settings: None,
+            detected_env_kind: "venv".to_string(),
+            is_git_repo: true,
+            last_reconciled_at: None,
+            created_at: "now".to_string(),
+            updated_at: "now".to_string(),
+        };
+        let repo = ManagedRepo {
+            id: "r".to_string(),
+            installation_id: "i".to_string(),
+            kind: RepoKind::Kitchen,
+            display_name: "Comfy Kitchen".to_string(),
+            local_path: "/comfy-kitchen".to_string(),
+            canonical_remote: None,
+            current_head_sha: Some("abc".to_string()),
+            current_branch: Some("main".to_string()),
+            is_detached: false,
+            is_dirty: false,
+            tracked_target_kind: Some(TargetKind::DefaultBranch),
+            tracked_target_input: None,
+            tracked_target_resolved_sha: Some("abc".to_string()),
+            tracked_state: None,
+            live_status: RepoLiveStatus::Clean,
+            live_warnings: vec![],
+            changed_files: vec![],
+            dependency_state: None,
+            materialization_state: None,
+            last_scanned_at: None,
+            created_at: "now".to_string(),
+            updated_at: "now".to_string(),
+        };
+        let plan = plan_dependency_sync(&installation, &repo, Path::new(&repo.local_path)).unwrap();
+        assert_eq!(plan.strategy, "project_materialization");
+        assert!(plan.steps.is_empty());
+    }
 }
