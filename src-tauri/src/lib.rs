@@ -4,6 +4,7 @@ mod errors;
 mod execution;
 mod git;
 mod github;
+mod kitchen;
 mod models;
 mod process;
 mod registry;
@@ -139,10 +140,16 @@ fn checkpoint_label_and_reason(operation: &OperationRecord, repo: &ManagedRepo) 
     let label = match operation.kind {
         OperationKind::PatchCore
         | OperationKind::PatchFrontend
+        | OperationKind::PatchKitchen
         | OperationKind::PatchCustomNode
         | OperationKind::ManageRepoStack => format!("Before applying {}", reason),
-        OperationKind::InstallFrontend | OperationKind::InstallCustomNode => {
+        OperationKind::InstallFrontend
+        | OperationKind::InstallKitchen
+        | OperationKind::InstallCustomNode => {
             format!("Before installing {}", reason)
+        }
+        OperationKind::RestoreComfyManagedKitchen => {
+            format!("Before restoring {} to the ComfyUI requirement", repo.display_name)
         }
         OperationKind::UpdateRepo
         | OperationKind::UpdateAll
@@ -181,6 +188,9 @@ fn collect_installation_repos(detail: InstallationDetail) -> Vec<ManagedRepo> {
         repos.push(frontend);
     }
     repos.extend(detail.custom_node_repos);
+    if let Some(kitchen) = detail.kitchen_repo {
+        repos.push(kitchen);
+    }
     repos
 }
 
@@ -286,11 +296,13 @@ async fn discover_repositories_for_installation(
 ) -> AppResult<(
     Option<DiscoveredRepoState>,
     Option<DiscoveredRepoState>,
+    Option<DiscoveredRepoState>,
     Vec<DiscoveredRepoState>,
 )> {
     let root = PathBuf::from(&installation.comfy_root);
     let mut core_repo = None;
     let mut frontend_repo = None;
+    let mut kitchen_repo = None;
     let mut custom_node_repos = Vec::new();
     let ignored_paths: HashSet<String> = state
         .db
@@ -335,6 +347,31 @@ async fn discover_repositories_for_installation(
                 repo_has_tracked_local_changes(&status),
             )?;
             frontend_repo = Some(DiscoveredRepoState { repo, status });
+        }
+    }
+
+    let kitchen_root = kitchen::default_kitchen_path(installation);
+    let kitchen_root_string = kitchen_root.to_string_lossy().to_string();
+    if !ignored_paths.contains(&kitchen_root_string)
+        && has_git_marker(&kitchen_root)
+        && is_git_repo(&kitchen_root).await
+    {
+        let status = inspect_repo(&kitchen_root).await?;
+        let expected_remote = canonicalize_remote(kitchen::DEFAULT_KITCHEN_REPO_URL)
+            .ok_or_else(|| AppError::InvalidInput("invalid built-in Comfy Kitchen repository URL".to_string()))?;
+        if status.origin_url.as_deref() == Some(expected_remote.as_str()) {
+            let repo = state.db.upsert_repo(
+                &installation.id,
+                RepoKind::Kitchen,
+                "Comfy Kitchen",
+                &kitchen_root_string,
+                status.origin_url.as_deref(),
+                status.head_sha.as_deref(),
+                status.branch.as_deref(),
+                status.is_detached,
+                repo_has_tracked_local_changes(&status),
+            )?;
+            kitchen_repo = Some(DiscoveredRepoState { repo, status });
         }
     }
 
@@ -409,6 +446,9 @@ async fn discover_repositories_for_installation(
     if let Some(repo) = frontend_repo.as_ref() {
         discovered_paths.insert(repo.repo.local_path.clone());
     }
+    if let Some(repo) = kitchen_repo.as_ref() {
+        discovered_paths.insert(repo.repo.local_path.clone());
+    }
     for repo in &custom_node_repos {
         discovered_paths.insert(repo.repo.local_path.clone());
     }
@@ -424,7 +464,7 @@ async fn discover_repositories_for_installation(
         }
     }
 
-    Ok((core_repo, frontend_repo, custom_node_repos))
+    Ok((core_repo, frontend_repo, kitchen_repo, custom_node_repos))
 }
 
 async fn discover_custom_node_repos_best_effort(
@@ -524,6 +564,7 @@ fn dependency_manifest_files(repo: &ManagedRepo, repo_path: &Path) -> Vec<String
 fn dependency_manifest_candidates(repo_kind: &RepoKind) -> &'static [&'static str] {
     match repo_kind {
         RepoKind::Core | RepoKind::CustomNode => &["requirements.txt", "pyproject.toml"],
+        RepoKind::Kitchen => &["pyproject.toml", "setup.py", ".gitmodules"],
         RepoKind::Frontend => &[
             "package.json",
             "package-lock.json",
@@ -728,7 +769,7 @@ async fn hydrate_installation_detail(
         .db
         .get_installation(installation_id)?
         .ok_or_else(|| AppError::NotFound("installation not found".to_string()))?;
-    let (core_repo, frontend_repo, discovered_custom_nodes) =
+    let (core_repo, frontend_repo, kitchen_repo, discovered_custom_nodes) =
         discover_repositories_for_installation(
             state,
             &installation,
@@ -742,6 +783,9 @@ async fn hydrate_installation_detail(
     if let Some(repo) = frontend_repo {
         discovered_statuses.insert(repo.repo.id.clone(), repo.status);
     }
+    if let Some(repo) = kitchen_repo {
+        discovered_statuses.insert(repo.repo.id.clone(), repo.status);
+    }
     for repo in discovered_custom_nodes {
         discovered_statuses.insert(repo.repo.id.clone(), repo.status);
     }
@@ -749,6 +793,9 @@ async fn hydrate_installation_detail(
     // Cached warnings belong to the fast detail-read path. A full hydration
     // rebuilds them from the freshly inspected repository state below.
     detail.warnings.clear();
+    let kitchen_runtime = kitchen::probe_kitchen_runtime(&installation).await?;
+    state.db.set_kitchen_runtime(installation_id, &kitchen_runtime)?;
+    detail.kitchen_runtime = Some(kitchen_runtime.clone());
 
     if let Some(repo) = detail.core_repo.take() {
         let repo = enrich_managed_repo(
@@ -780,6 +827,30 @@ async fn hydrate_installation_detail(
                 .push(format!("{}: {}", repo.display_name, warning));
         }
         detail.frontend_repo = Some(repo);
+    }
+
+    if let Some(repo) = detail.kitchen_repo.take() {
+        let mut repo = enrich_managed_repo(
+            state,
+            &installation,
+            &repo,
+            discovered_statuses.get(&repo.id).cloned(),
+        )
+        .await?;
+        if repo.materialization_state.is_some() || repo.tracked_state.is_some() {
+            let materialization = kitchen::evaluate_materialization(&repo, &kitchen_runtime);
+            if let Some(warning) = kitchen::materialization_warning(&materialization) {
+                repo.live_warnings.push(warning);
+            }
+            repo.materialization_state = Some(materialization);
+            state.db.update_repo_reconciliation_state(&mut repo)?;
+        }
+        for warning in &repo.live_warnings {
+            detail
+                .warnings
+                .push(format!("{}: {}", repo.display_name, warning));
+        }
+        detail.kitchen_repo = Some(repo);
     }
 
     let mut enriched_custom_nodes = Vec::with_capacity(detail.custom_node_repos.len());
@@ -3281,12 +3352,16 @@ async fn register_installation_impl(
     } else {
         Vec::new()
     };
-    let (core_repo, frontend_repo, discovered_custom_nodes) =
+    let (core_repo, frontend_repo, kitchen_repo, discovered_custom_nodes) =
         discover_repositories_for_installation(state, &installation, true).await?;
+    let kitchen_runtime = kitchen::probe_kitchen_runtime(&installation).await?;
+    state.db.set_kitchen_runtime(&installation.id, &kitchen_runtime)?;
     Ok(RegisterInstallationResult {
         installation,
         core_repo: core_repo.map(|repo| repo.repo),
         frontend_repo: frontend_repo.map(|repo| repo.repo),
+        kitchen_repo: kitchen_repo.map(|repo| repo.repo),
+        kitchen_runtime: Some(kitchen_runtime),
         discovered_custom_nodes: discovered_custom_nodes
             .into_iter()
             .map(|repo| repo.repo)
