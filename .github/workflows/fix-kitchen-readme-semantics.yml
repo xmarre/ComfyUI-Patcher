@@ -1,0 +1,69 @@
+name: Fix Kitchen README semantics
+
+on:
+  push:
+    branches:
+      - feature/comfy-kitchen-management
+    paths:
+      - .github/workflows/fix-kitchen-readme-semantics.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/comfy-kitchen-management
+          fetch-depth: 0
+      - name: Correct lifecycle and first-install documentation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('README.md')
+          text = path.read_text(encoding='utf-8')
+          replacements = [
+              (
+                  'Before an active source-managed Kitchen checkout is disabled, untracked, or uninstalled, Patcher restores the ComfyUI-declared runtime requirement first. Start/Restart also refuse to launch when an active managed source override is no longer coherent with its recorded source revision/runtime provenance.',
+                  '**Untrack** leaves the currently installed Kitchen runtime unchanged and only stops Patcher source reassertion. **Disable** and **Uninstall** restore the ComfyUI-declared runtime requirement before moving/removing the source checkout. Start/Restart also refuse to launch when an active managed source override is no longer coherent with its recorded source revision/runtime provenance.'
+              ),
+              (
+                  '2. **Raw branch / tag / SHA inputs only make sense for existing managed repos.**\n   A brand-new install flow generally needs a repository URL or PR URL so the app knows what to clone.',
+                  '2. **Raw branch / tag / SHA inputs normally require an existing managed repo.**\n   A brand-new install flow generally needs a repository URL or PR URL so the app knows what to clone. Comfy Kitchen is the explicit exception: before its checkout exists, bare refs resolve against the fixed official upstream.'
+              ),
+              (
+                  '* use **Restore ComfyUI Kitchen** and verify the current ComfyUI requirement is installed, source tracking is cleared, the checkout remains on disk, and **Update all** does not reactivate it\n* rollback/restore a Kitchen checkpoint',
+                  '* use **Restore ComfyUI Kitchen** and verify the current ComfyUI requirement is installed, source tracking is cleared, the checkout remains on disk, and **Update all** does not reactivate it\n* use **Untrack** and verify the currently installed Kitchen runtime is left unchanged while future Patcher source reassertion stops\n* rollback/restore a Kitchen checkpoint'
+              ),
+          ]
+          for old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected exactly one README anchor, found {count}: {old[:80]}')
+              text = text.replace(old, new, 1)
+          path.write_text(text, encoding='utf-8', newline='\n')
+          PY
+          grep -Fq '**Untrack** leaves the currently installed Kitchen runtime unchanged' README.md
+          grep -Fq 'Comfy Kitchen is the explicit exception' README.md
+          grep -Fq 'use **Untrack** and verify the currently installed Kitchen runtime is left unchanged' README.md
+          if grep -Fq 'disabled, untracked, or uninstalled, Patcher restores' README.md; then
+            echo 'stale Untrack lifecycle wording remains' >&2
+            exit 1
+          fi
+          git diff --check -- README.md
+      - name: Commit docs-only correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/fix-kitchen-readme-semantics.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add README.md
+          git diff --cached --check
+          git commit -m "Correct Kitchen lifecycle documentation"
+          git push origin HEAD:feature/comfy-kitchen-management
