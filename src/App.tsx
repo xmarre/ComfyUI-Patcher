@@ -118,6 +118,7 @@ function formatBytes(value: number | null): string {
 
 const defaultFrontendPackageManager: FrontendPackageManager = "auto";
 const defaultDirtyRepoStrategy: DirtyRepoStrategy = "stash";
+const DEFAULT_KITCHEN_SOURCE = "https://github.com/Comfy-Org/comfy-kitchen";
 
 type MainTab = "overview" | "patching" | "custom_nodes" | "activity";
 
@@ -173,9 +174,14 @@ function repoHasTrackedState(repo: ManagedRepo): boolean {
 }
 
 function repoNeedsTrackedRecovery(repo: ManagedRepo): boolean {
+  const materializationNeedsRecovery =
+    repo.kind === "kitchen" &&
+    repo.materializationState !== null &&
+    repo.materializationState.status !== "current";
   return (
-    repoHasTrackedState(repo) &&
-    (repo.liveStatus === "dirty" || repo.liveStatus === "drifted")
+    materializationNeedsRecovery ||
+    (repoHasTrackedState(repo) &&
+      (repo.liveStatus === "dirty" || repo.liveStatus === "drifted"))
   );
 }
 
@@ -259,15 +265,18 @@ export default function App() {
   const [detail, setDetail] = useState<InstallationDetail | null>(null);
   const [coreInput, setCoreInput] = useState("");
   const [frontendInput, setFrontendInput] = useState("");
+  const [kitchenInput, setKitchenInput] = useState(DEFAULT_KITCHEN_SOURCE);
   const [nodeInput, setNodeInput] = useState("");
   const [corePreview, setCorePreview] = useState<ResolvedTarget | null>(null);
   const [frontendPreview, setFrontendPreview] = useState<ResolvedTarget | null>(null);
   const [nodePreview, setNodePreview] = useState<ResolvedTarget | null>(null);
   const [coreActionPreview, setCoreActionPreview] = useState<RepoActionPreview | null>(null);
   const [frontendActionPreview, setFrontendActionPreview] = useState<RepoActionPreview | null>(null);
+  const [kitchenActionPreview, setKitchenActionPreview] = useState<RepoActionPreview | null>(null);
   const [nodeActionPreview, setNodeActionPreview] = useState<RepoActionPreview | null>(null);
   const [corePreviewError, setCorePreviewError] = useState<string | null>(null);
   const [frontendPreviewError, setFrontendPreviewError] = useState<string | null>(null);
+  const [kitchenPreviewError, setKitchenPreviewError] = useState<string | null>(null);
   const [nodePreviewError, setNodePreviewError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
@@ -312,10 +321,12 @@ export default function App() {
   const detailRequestSeq = useRef(0);
   const corePreviewRequestSeq = useRef(0);
   const frontendPreviewRequestSeq = useRef(0);
+  const kitchenPreviewRequestSeq = useRef(0);
   const nodePreviewRequestSeq = useRef(0);
   const selectedInstallationIdRef = useRef<string | null>(null);
   const coreInputRef = useRef("");
   const frontendInputRef = useRef("");
+  const kitchenInputRef = useRef(DEFAULT_KITCHEN_SOURCE);
   const nodeInputRef = useRef("");
   const updateCheckInFlightRef = useRef(false);
   const updateInstallInFlightRef = useRef(false);
@@ -331,6 +342,10 @@ export default function App() {
   useEffect(() => {
     frontendInputRef.current = frontendInput;
   }, [frontendInput]);
+
+  useEffect(() => {
+    kitchenInputRef.current = kitchenInput;
+  }, [kitchenInput]);
 
   useEffect(() => {
     nodeInputRef.current = nodeInput;
@@ -501,9 +516,11 @@ export default function App() {
     setNodePreview(null);
     setCoreActionPreview(null);
     setFrontendActionPreview(null);
+    setKitchenActionPreview(null);
     setNodeActionPreview(null);
     setCorePreviewError(null);
     setFrontendPreviewError(null);
+    setKitchenPreviewError(null);
     setNodePreviewError(null);
     setManagedCustomNodeQuery("");
     setActiveTab("overview");
@@ -585,6 +602,12 @@ export default function App() {
     setFrontendPreviewError(null);
     frontendPreviewRequestSeq.current += 1;
   }, [frontendInput]);
+
+  useEffect(() => {
+    setKitchenActionPreview(null);
+    setKitchenPreviewError(null);
+    kitchenPreviewRequestSeq.current += 1;
+  }, [kitchenInput]);
 
   useEffect(() => {
     setNodePreview(null);
@@ -709,10 +732,43 @@ export default function App() {
     }
   }
 
+
+  async function previewKitchen() {
+    const installationId = selectedInstallationIdRef.current;
+    const input = kitchenInput.trim();
+    const requestSeq = ++kitchenPreviewRequestSeq.current;
+    if (!installationId || !input) {
+      setKitchenActionPreview(null);
+      setKitchenPreviewError(null);
+      return;
+    }
+    try {
+      const next = await api.previewRepoTarget({
+        installationId,
+        kind: "kitchen",
+        input,
+        repoId: kitchenRepo?.id ?? null
+      });
+      if (selectedInstallationIdRef.current !== installationId) return;
+      if (kitchenPreviewRequestSeq.current !== requestSeq) return;
+      if (kitchenInputRef.current.trim() !== input) return;
+      setKitchenActionPreview(next);
+      setKitchenPreviewError(null);
+    } catch (error) {
+      if (selectedInstallationIdRef.current !== installationId) return;
+      if (kitchenPreviewRequestSeq.current !== requestSeq) return;
+      if (kitchenInputRef.current.trim() !== input) return;
+      setKitchenActionPreview(null);
+      setKitchenPreviewError(toErrorMessage(error));
+    }
+  }
+
   const coreRepo = detail?.coreRepo ?? null;
   const frontendRepo = detail?.frontendRepo ?? null;
+  const kitchenRepo = detail?.kitchenRepo ?? null;
+  const kitchenRuntime = detail?.kitchenRuntime ?? null;
   const customNodeRepos = detail?.customNodeRepos ?? [];
-  const allManagedRepos = [coreRepo, frontendRepo, ...customNodeRepos].filter(
+  const allManagedRepos = [coreRepo, frontendRepo, ...customNodeRepos, kitchenRepo].filter(
     (repo): repo is ManagedRepo => repo !== null
   );
   const trackedRepoCount = allManagedRepos.filter(repoHasTrackedState).length;
@@ -956,9 +1012,11 @@ export default function App() {
                 });
                 setCorePreview(null);
                 setFrontendPreview(null);
+                setKitchenActionPreview(null);
                 setNodePreview(null);
                 setCorePreviewError(null);
                 setFrontendPreviewError(null);
+                setKitchenPreviewError(null);
                 setNodePreviewError(null);
                 await refreshInstallations();
                 setSelectedInstallationId(result.installation.id);
@@ -1739,6 +1797,170 @@ export default function App() {
                 />
               ) : (
                 <div className="muted">No managed frontend repo is registered for this installation.</div>
+              )}
+            </section>
+
+
+            <section className="card tab-panel" hidden={activeTab !== "patching"}>
+              <h3>Install or patch Comfy Kitchen from source</h3>
+              <div className="muted small">
+                Kitchen source management uses the official <code>Comfy-Org/comfy-kitchen</code> repository in a dedicated sibling checkout. Recursive submodules are mandatory, and Patcher builds a wheel from the selected source revision before installing it with this installation&apos;s exact Python environment. This project-materialization step is separate from generic Python dependency sync.
+              </div>
+              <div className="row gap">
+                <input
+                  className="grow"
+                  placeholder="Official repository URL, branch/tree URL, commit, or PR URL"
+                  value={kitchenInput}
+                  onChange={(e) => setKitchenInput(e.target.value)}
+                />
+                <button
+                  className="secondary"
+                  disabled={!kitchenInput.trim()}
+                  onClick={() => void previewKitchen()}
+                >
+                  Preview
+                </button>
+                <button
+                  disabled={!kitchenInput.trim()}
+                  onClick={() =>
+                    void runAction(async () => {
+                      await api.installOrPatchKitchen({
+                        installationId: selectedInstallation.id,
+                        input: kitchenInput,
+                        existingRepoConflictStrategy: "abort",
+                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
+                        setTrackedTarget: true,
+                        restartAfterSuccess: false
+                      });
+                      setKitchenActionPreview(null);
+                      setKitchenPreviewError(null);
+                    })
+                  }
+                >
+                  Install / Patch source
+                </button>
+              </div>
+              {renderRepoActionPreview(kitchenActionPreview)}
+              {kitchenPreviewError ? <div className="muted">{kitchenPreviewError}</div> : null}
+
+              <div className="preview">
+                <div className="row between repo-preview-header">
+                  <div>
+                    <strong>Installed comfy-kitchen runtime</strong>
+                    <div className="muted small">Probed through the configured installation Python, independently of source checkout discovery.</div>
+                  </div>
+                  <span className={`badge ${kitchenRuntime?.importOk ? "ok" : kitchenRuntime?.distributionPresent ? "danger" : ""}`}>
+                    {kitchenRuntime?.importOk
+                      ? "import ok"
+                      : kitchenRuntime?.distributionPresent
+                        ? "import failed"
+                        : "not installed"}
+                  </span>
+                </div>
+                <div className="grid two compact-grid">
+                  <div>
+                    <div className="label">Installed version</div>
+                    <div className="mono small">{kitchenRuntime?.installedVersion ?? "none"}</div>
+                  </div>
+                  <div>
+                    <div className="label">Distribution location</div>
+                    <div className="mono small">{kitchenRuntime?.distributionLocation ?? "unknown"}</div>
+                  </div>
+                  <div>
+                    <div className="label">Imported module</div>
+                    <div className="mono small">{kitchenRuntime?.moduleLocation ?? "not imported"}</div>
+                  </div>
+                  <div>
+                    <div className="label">Installed RECORD SHA-256</div>
+                    <div className="mono small">{kitchenRuntime?.recordSha256 ?? "unknown"}</div>
+                  </div>
+                </div>
+                {kitchenRuntime?.importError ? (
+                  <div className="muted small">{kitchenRuntime.importError}</div>
+                ) : null}
+              </div>
+
+              {kitchenRepo ? (
+                <RepoCard
+                  key={kitchenRepo.id}
+                  repo={kitchenRepo}
+                  onUpdate={() =>
+                    runAction(async () => {
+                      await api.updateRepo({
+                        repoId: kitchenRepo.id,
+                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
+                        syncDependencies: false
+                      });
+                    })
+                  }
+                  onSetBaseTarget={(input, clearOverlays) =>
+                    runActionOk(async () => {
+                      await api.setRepoBaseTarget({
+                        repoId: kitchenRepo.id,
+                        input,
+                        clearOverlays,
+                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
+                        syncDependencies: false
+                      });
+                    })
+                  }
+                  onAddOverlay={(input) =>
+                    runActionOk(async () => {
+                      await api.addRepoOverlay({
+                        repoId: kitchenRepo.id,
+                        input,
+                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
+                        syncDependencies: false
+                      });
+                    })
+                  }
+                  onSetOverlayEnabled={(overlayId, enabled) =>
+                    runActionOk(async () => {
+                      await api.setRepoOverlayEnabled({
+                        repoId: kitchenRepo.id,
+                        overlayId,
+                        enabled,
+                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
+                        syncDependencies: false
+                      });
+                    })
+                  }
+                  onRemoveOverlay={(overlayId) =>
+                    runActionOk(async () => {
+                      await api.removeRepoOverlay({
+                        repoId: kitchenRepo.id,
+                        overlayId,
+                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
+                        syncDependencies: false
+                      });
+                    })
+                  }
+                  onMoveOverlay={(overlayId, direction) =>
+                    runActionOk(async () => {
+                      await api.moveRepoOverlay({
+                        repoId: kitchenRepo.id,
+                        overlayId,
+                        direction,
+                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
+                        syncDependencies: false
+                      });
+                    })
+                  }
+                  onRollback={() =>
+                    runAction(async () => {
+                      await api.rollbackRepo({
+                        repoId: kitchenRepo.id,
+                        restoreStash: true,
+                        syncDependencies: false,
+                        restartAfterSuccess: false
+                      });
+                    })
+                  }
+                />
+              ) : (
+                <div className="muted">
+                  No Kitchen source checkout is managed. An installed comfy-kitchen package remains ordinary ComfyUI/environment runtime state until source management is explicitly enabled here.
+                </div>
               )}
             </section>
 

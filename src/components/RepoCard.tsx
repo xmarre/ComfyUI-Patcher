@@ -59,6 +59,22 @@ function repoStatusClass(repo: ManagedRepo): string {
   }
 }
 
+function materializationStatusClass(status: string): string {
+  switch (status) {
+    case "current":
+      return "ok";
+    case "stale":
+      return "warn";
+    case "missing":
+    case "import_failed":
+    case "replaced":
+    case "failed":
+      return "danger";
+    default:
+      return "";
+  }
+}
+
 function formatTimestamp(value: string | null): string {
   if (!value) {
     return "unknown";
@@ -343,6 +359,56 @@ export default function RepoCard({
         </div>
       ) : null}
 
+      {repo.kind === "kitchen" ? (
+        <div className="preview">
+          <div className="row between repo-preview-header">
+            <div>
+              <strong>Runtime materialization</strong>
+              <div className="muted small">Source checkout state and installed Python artifact are tracked separately.</div>
+            </div>
+            {repo.materializationState ? (
+              <span className={`badge ${materializationStatusClass(repo.materializationState.status)}`}>
+                {repo.materializationState.status.replace("_", " ")}
+              </span>
+            ) : (
+              <span className="badge">ComfyUI-managed runtime</span>
+            )}
+          </div>
+          {repo.materializationState ? (
+            <>
+              <div className="grid two compact-grid">
+                <div>
+                  <div className="label">Materialized source HEAD</div>
+                  <div className="mono small">{repo.materializationState.materializedHeadSha ?? "unknown"}</div>
+                </div>
+                <div>
+                  <div className="label">Installed version</div>
+                  <div className="mono small">{repo.materializationState.installedVersion ?? "unknown"}</div>
+                </div>
+                <div>
+                  <div className="label">Built artifact SHA-256</div>
+                  <div className="mono small">{repo.materializationState.artifactSha256 ?? "unknown"}</div>
+                </div>
+                <div>
+                  <div className="label">Installed RECORD SHA-256</div>
+                  <div className="mono small">{repo.materializationState.installedRecordSha256 ?? "unknown"}</div>
+                </div>
+              </div>
+              <div className="muted small">
+                Last materialized {formatTimestamp(repo.materializationState.lastMaterializedAt)}
+              </div>
+              {repo.materializationState.lastError ? (
+                <div className="muted small">{repo.materializationState.lastError}</div>
+              ) : null}
+            </>
+          ) : (
+            <div className="muted small">
+              This checkout is not overriding the Python environment. The current ComfyUI requirement owns the installed comfy-kitchen distribution.
+            </div>
+          )}
+        </div>
+      ) : null}
+
       <div className="repo-stack-panel">
         <div className="row between repo-stack-header">
           <div>
@@ -541,6 +607,29 @@ export default function RepoCard({
             Rollback latest
           </button>
         ) : null}
+        {repo.kind === "kitchen" && repo.materializationState ? (
+          <button
+            className="secondary"
+            disabled={isSubmitting}
+            onClick={() =>
+              void runLocalAction(async () => {
+                if (
+                  !window.confirm(
+                    "Restore the comfy-kitchen requirement declared by the current ComfyUI checkout? The source checkout stays on disk, but its tracked source target and built runtime override are deactivated. Use Install / Patch source to enable source management again."
+                  )
+                ) {
+                  return;
+                }
+                await api.restoreComfyManagedKitchen({
+                  repoId: repo.id,
+                  restartAfterSuccess: false
+                });
+              })
+            }
+          >
+            Restore ComfyUI Kitchen
+          </button>
+        ) : null}
         <button className="secondary" disabled={isSubmitting} onClick={() => void toggleHistory()}>
           {historyOpen ? "Hide history" : "History"}
         </button>
@@ -596,6 +685,16 @@ export default function RepoCard({
                         ? `${checkpoint.dependencyState.plan.strategy} (${checkpoint.dependencyState.plan.reason})`
                         : checkpoint.dependencyState.error ?? "No dependency metadata"}
                     </div>
+                  ) : null}
+                  {checkpoint.materializationState ? (
+                    <div className="muted small">
+                      Runtime snapshot: {checkpoint.materializationState.status.replace("_", " ")} at{" "}
+                      <span className="mono">
+                        {checkpoint.materializationState.materializedHeadSha ?? "unknown source HEAD"}
+                      </span>
+                    </div>
+                  ) : repo.kind === "kitchen" ? (
+                    <div className="muted small">Runtime snapshot: ComfyUI-managed comfy-kitchen requirement</div>
                   ) : null}
                   <div className="row gap repo-action-wrap">
                     <button
@@ -696,7 +795,9 @@ export default function RepoCard({
       {lifecycleSupported ? (
         <div className="stack">
           <div className="muted small">
-            Lifecycle actions do not create new checkpoints. They remove or hide the repo directly, and untrack also suppresses future reconcile rediscovery for this path.
+            {repo.kind === "kitchen" && repo.materializationState
+              ? "Uninstall and Disable first restore the comfy-kitchen requirement declared by the current ComfyUI checkout. Untrack instead leaves the currently installed runtime unchanged and only stops future Patcher source reassertion. Lifecycle actions do not create new checkpoints."
+              : "Lifecycle actions do not create new checkpoints. They remove or hide the repo directly, and untrack also suppresses future reconcile rediscovery for this path."}
           </div>
           <div className="row gap repo-action-wrap">
             <button
