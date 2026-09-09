@@ -1,8 +1,9 @@
 use crate::errors::{AppError, AppResult};
 use crate::models::{
-    FrontendSettings, Installation, InstallationDetail, LaunchProfile, ManagedRepo, OperationKind,
-    OperationRecord, OperationStatus, RepoCheckpoint, RepoDependencyState, RepoKind,
-    RepoLiveStatus, TargetKind, TrackedBaseTarget, TrackedRepoState,
+    FrontendSettings, Installation, InstallationDetail, KitchenRuntimeProbe, LaunchProfile,
+    ManagedRepo, OperationKind, OperationRecord, OperationStatus, RepoCheckpoint,
+    RepoDependencyState, RepoKind, RepoLiveStatus, RepoMaterializationState, TargetKind,
+    TrackedBaseTarget, TrackedRepoState,
 };
 use crate::util::{new_id, now_rfc3339};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -67,6 +68,7 @@ impl Database {
                 live_warnings_json TEXT NOT NULL DEFAULT '[]',
                 changed_files_json TEXT NOT NULL DEFAULT '[]',
                 dependency_state_json TEXT,
+                materialization_state_json TEXT,
                 last_scanned_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -100,6 +102,10 @@ impl Database {
                 old_tracked_target_resolved_sha TEXT,
                 stash_created INTEGER NOT NULL,
                 stash_ref TEXT,
+                label TEXT,
+                reason TEXT,
+                dependency_state_json TEXT,
+                materialization_state_json TEXT,
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS ignored_repo_paths (
@@ -108,6 +114,11 @@ impl Database {
                 local_path TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 PRIMARY KEY (installation_id, local_path)
+            );
+            CREATE TABLE IF NOT EXISTS installation_kitchen_runtime (
+                installation_id TEXT PRIMARY KEY,
+                runtime_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
             "#,
         )?;
@@ -335,6 +346,10 @@ impl Database {
             "DELETE FROM ignored_repo_paths WHERE installation_id = ?1",
             params![installation_id],
         )?;
+        tx.execute(
+            "DELETE FROM installation_kitchen_runtime WHERE installation_id = ?1",
+            params![installation_id],
+        )?;
         tx.execute("DELETE FROM managed_repos WHERE installation_id = ?1", params![installation_id])?;
         tx.execute("DELETE FROM installations WHERE id = ?1", params![installation_id])?;
         tx.commit()?;
@@ -352,6 +367,7 @@ impl Database {
         let repos = self.list_repos_by_installation(installation_id)?;
         let mut core_repo = None;
         let mut frontend_repo = None;
+        let mut kitchen_repo = None;
         let mut custom_node_repos = Vec::new();
         let mut warnings = Vec::new();
         for repo in repos {
@@ -361,14 +377,18 @@ impl Database {
             match repo.kind {
                 RepoKind::Core => core_repo = Some(repo),
                 RepoKind::Frontend => frontend_repo = Some(repo),
+                RepoKind::Kitchen => kitchen_repo = Some(repo),
                 RepoKind::CustomNode => custom_node_repos.push(repo),
             }
         }
+        let kitchen_runtime = self.get_kitchen_runtime(installation_id)?;
         let last_reconciled_at = installation.last_reconciled_at.clone();
         Ok(InstallationDetail {
             installation,
             core_repo,
             frontend_repo,
+            kitchen_repo,
+            kitchen_runtime,
             custom_node_repos,
             warnings,
             last_reconciled_at,
@@ -511,12 +531,18 @@ impl Database {
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
+        let materialization_state_json = repo
+            .materialization_state
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         conn.execute(
             "UPDATE managed_repos
              SET canonical_remote = ?2, current_head_sha = ?3, current_branch = ?4,
                  is_detached = ?5, is_dirty = ?6, live_status = ?7,
                  live_warnings_json = ?8, changed_files_json = ?9,
-                 dependency_state_json = ?10, last_scanned_at = ?11, updated_at = ?12
+                 dependency_state_json = ?10, materialization_state_json = ?11,
+                 last_scanned_at = ?12, updated_at = ?13
              WHERE id = ?1",
             params![
                 repo.id,
@@ -529,12 +555,67 @@ impl Database {
                 live_warnings_json,
                 changed_files_json,
                 dependency_state_json,
+                materialization_state_json,
                 repo.last_scanned_at,
                 updated_at,
             ],
         )?;
         repo.updated_at = updated_at;
         Ok(())
+    }
+
+    pub fn set_repo_materialization_state(
+        &self,
+        repo_id: &str,
+        materialization_state: Option<&RepoMaterializationState>,
+    ) -> AppResult<()> {
+        let conn = self.connect()?;
+        let materialization_state_json = materialization_state
+            .map(serde_json::to_string)
+            .transpose()?;
+        conn.execute(
+            "UPDATE managed_repos
+             SET materialization_state_json = ?2, updated_at = ?3
+             WHERE id = ?1",
+            params![repo_id, materialization_state_json, now_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_kitchen_runtime(
+        &self,
+        installation_id: &str,
+        runtime: &KitchenRuntimeProbe,
+    ) -> AppResult<()> {
+        let conn = self.connect()?;
+        let runtime_json = serde_json::to_string(runtime)?;
+        conn.execute(
+            "INSERT INTO installation_kitchen_runtime (installation_id, runtime_json, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(installation_id) DO UPDATE SET
+                 runtime_json = excluded.runtime_json,
+                 updated_at = excluded.updated_at",
+            params![installation_id, runtime_json, now_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_kitchen_runtime(
+        &self,
+        installation_id: &str,
+    ) -> AppResult<Option<KitchenRuntimeProbe>> {
+        let conn = self.connect()?;
+        let runtime_json: Option<String> = conn
+            .query_row(
+                "SELECT runtime_json FROM installation_kitchen_runtime WHERE installation_id = ?1",
+                params![installation_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        runtime_json
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(Into::into)
     }
 
     pub fn set_repo_tracked_state(
@@ -596,7 +677,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT id, installation_id, kind, display_name, local_path, canonical_remote, current_head_sha, current_branch,
                     is_detached, is_dirty, tracked_target_kind, tracked_target_input, tracked_target_resolved_sha, created_at, updated_at,
-                    live_status, live_warnings_json, changed_files_json, dependency_state_json, last_scanned_at
+                    live_status, live_warnings_json, changed_files_json, dependency_state_json, materialization_state_json, last_scanned_at
              FROM managed_repos WHERE id = ?1",
         )?;
         stmt.query_row(params![repo_id], map_repo)
@@ -609,7 +690,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT id, installation_id, kind, display_name, local_path, canonical_remote, current_head_sha, current_branch,
                     is_detached, is_dirty, tracked_target_kind, tracked_target_input, tracked_target_resolved_sha, created_at, updated_at,
-                    live_status, live_warnings_json, changed_files_json, dependency_state_json, last_scanned_at
+                    live_status, live_warnings_json, changed_files_json, dependency_state_json, materialization_state_json, last_scanned_at
              FROM managed_repos WHERE installation_id = ?1 ORDER BY kind, display_name",
         )?;
         let rows = stmt.query_map(params![installation_id], map_repo)?;
@@ -814,13 +895,21 @@ impl Database {
             .map(serde_json::to_string)
             .transpose()?;
         let dependency_state_json = dependency_state.map(serde_json::to_string).transpose()?;
+        let materialization_state_json: Option<String> = conn
+            .query_row(
+                "SELECT materialization_state_json FROM managed_repos WHERE id = ?1",
+                params![repo_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
         conn.execute(
             "INSERT INTO repo_checkpoints
              (id, repo_id, operation_id, old_head_sha, old_branch, old_is_detached,
               has_tracked_target_snapshot, old_tracked_target_kind, old_tracked_target_input,
               old_tracked_target_resolved_sha, stash_created, stash_ref, label, reason,
-              dependency_state_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+              dependency_state_json, materialization_state_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 id,
                 repo_id,
@@ -837,6 +926,7 @@ impl Database {
                 label,
                 reason,
                 dependency_state_json,
+                materialization_state_json,
                 now
             ],
         )?;
@@ -864,7 +954,7 @@ impl Database {
             "SELECT id, repo_id, operation_id, old_head_sha, old_branch, old_is_detached,
                     has_tracked_target_snapshot, old_tracked_target_kind, old_tracked_target_input,
                     old_tracked_target_resolved_sha, stash_created, stash_ref, label, reason,
-                    dependency_state_json, created_at
+                    dependency_state_json, materialization_state_json, created_at
              FROM repo_checkpoints WHERE id = ?1",
         )?;
         stmt.query_row(params![checkpoint_id], map_checkpoint)
@@ -878,7 +968,7 @@ impl Database {
             "SELECT id, repo_id, operation_id, old_head_sha, old_branch, old_is_detached,
                     has_tracked_target_snapshot, old_tracked_target_kind, old_tracked_target_input,
                     old_tracked_target_resolved_sha, stash_created, stash_ref, label, reason,
-                    dependency_state_json, created_at
+                    dependency_state_json, materialization_state_json, created_at
              FROM repo_checkpoints WHERE repo_id = ?1 ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map(params![repo_id], map_checkpoint)?;
@@ -895,7 +985,7 @@ impl Database {
             "SELECT id, repo_id, operation_id, old_head_sha, old_branch, old_is_detached,
                     has_tracked_target_snapshot, old_tracked_target_kind, old_tracked_target_input,
                     old_tracked_target_resolved_sha, stash_created, stash_ref, label, reason,
-                    dependency_state_json, created_at
+                    dependency_state_json, materialization_state_json, created_at
              FROM repo_checkpoints WHERE repo_id = ?1 ORDER BY created_at DESC LIMIT 1",
         )?;
         stmt.query_row(params![repo_id], map_checkpoint)
@@ -939,6 +1029,7 @@ fn map_repo(row: &rusqlite::Row<'_>) -> rusqlite::Result<ManagedRepo> {
     let live_warnings_json: Option<String> = row.get(16)?;
     let changed_files_json: Option<String> = row.get(17)?;
     let dependency_state_json: Option<String> = row.get(18)?;
+    let materialization_state_json: Option<String> = row.get(19)?;
     let is_dirty = row.get::<_, i64>(9)? != 0;
     let tracked_target_kind = tracked_kind_json
         .map(|json| serde_json::from_str(&json))
@@ -989,7 +1080,11 @@ fn map_repo(row: &rusqlite::Row<'_>) -> rusqlite::Result<ManagedRepo> {
             .map(|json| serde_json::from_str(&json))
             .transpose()
             .map_err(to_sql_err)?,
-        last_scanned_at: row.get(19)?,
+        materialization_state: materialization_state_json
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(to_sql_err)?,
+        last_scanned_at: row.get(20)?,
         created_at: row.get(13)?,
         updated_at: row.get(14)?,
     })
@@ -1068,6 +1163,7 @@ fn map_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationRecord> {
 fn map_checkpoint(row: &rusqlite::Row<'_>) -> rusqlite::Result<RepoCheckpoint> {
     let old_tracked_target_kind_json: Option<String> = row.get(7)?;
     let dependency_state_json: Option<String> = row.get(14)?;
+    let materialization_state_json: Option<String> = row.get(15)?;
     Ok(RepoCheckpoint {
         id: row.get(0)?,
         repo_id: row.get(1)?,
@@ -1090,7 +1186,11 @@ fn map_checkpoint(row: &rusqlite::Row<'_>) -> rusqlite::Result<RepoCheckpoint> {
             .map(|json| serde_json::from_str(&json))
             .transpose()
             .map_err(to_sql_err)?,
-        created_at: row.get(15)?,
+        materialization_state: materialization_state_json
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(to_sql_err)?,
+        created_at: row.get(16)?,
     })
 }
 
@@ -1132,6 +1232,7 @@ fn ensure_repo_checkpoint_tracking_columns(conn: &Connection) -> AppResult<()> {
         ("label", "TEXT"),
         ("reason", "TEXT"),
         ("dependency_state_json", "TEXT"),
+        ("materialization_state_json", "TEXT"),
     ] {
         if !columns.iter().any(|existing| existing == column_name) {
             conn.execute(
@@ -1178,6 +1279,7 @@ fn ensure_managed_repo_reconciliation_columns(conn: &Connection) -> AppResult<()
         ("live_warnings_json", "TEXT NOT NULL DEFAULT '[]'"),
         ("changed_files_json", "TEXT NOT NULL DEFAULT '[]'"),
         ("dependency_state_json", "TEXT"),
+        ("materialization_state_json", "TEXT"),
         ("last_scanned_at", "TEXT"),
     ] {
         if !columns.iter().any(|existing| existing == column_name) {
@@ -1212,6 +1314,7 @@ fn to_sql_err(err: serde_json::Error) -> rusqlite::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{MaterializationStatus, RepoMaterializationState};
 
     struct TestDataDir(PathBuf);
 
@@ -1232,22 +1335,25 @@ mod tests {
         }
     }
 
+    fn add_installation(db: &Database) -> Installation {
+        db.upsert_installation_by_root(
+            "Test",
+            "/comfy",
+            Some("/comfy/python"),
+            "/comfy/custom_nodes",
+            None,
+            None,
+            Some("venv"),
+            true,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn persists_reconciliation_state_for_fast_detail_reads() {
         let data_dir = TestDataDir::new();
         let db = Database::new(&data_dir.0).unwrap();
-        let installation = db
-            .upsert_installation_by_root(
-                "Test",
-                "/comfy",
-                Some("/comfy/python"),
-                "/comfy/custom_nodes",
-                None,
-                None,
-                Some("venv"),
-                true,
-            )
-            .unwrap();
+        let installation = add_installation(&db);
         let mut repo = db
             .upsert_repo(
                 &installation.id,
@@ -1284,5 +1390,151 @@ mod tests {
             Some("2026-08-08T05:00:01Z")
         );
         assert_eq!(detail.warnings, vec!["test-node: tracked state changed"]);
+    }
+
+    #[test]
+    fn kitchen_is_grouped_separately_and_materialization_state_persists() {
+        let data_dir = TestDataDir::new();
+        let db = Database::new(&data_dir.0).unwrap();
+        let installation = add_installation(&db);
+        let kitchen = db
+            .upsert_repo(
+                &installation.id,
+                RepoKind::Kitchen,
+                "Comfy Kitchen",
+                "/comfy-kitchen",
+                Some("https://github.com/Comfy-Org/comfy-kitchen"),
+                Some("abc123"),
+                Some("main"),
+                false,
+                false,
+            )
+            .unwrap();
+        let materialization = RepoMaterializationState {
+            materialized_head_sha: Some("abc123".to_string()),
+            installed_version: Some("0.2.33".to_string()),
+            installed_origin: Some("file:///tmp/kitchen.whl".to_string()),
+            artifact_sha256: Some("a".repeat(64)),
+            installed_record_sha256: Some("b".repeat(64)),
+            status: MaterializationStatus::Current,
+            last_materialized_at: Some("2026-09-09T20:00:00Z".to_string()),
+            last_error: None,
+        };
+        db.set_repo_materialization_state(&kitchen.id, Some(&materialization))
+            .unwrap();
+        let runtime = KitchenRuntimeProbe {
+            distribution_present: true,
+            installed_version: Some("0.2.33".to_string()),
+            import_ok: true,
+            probed_at: Some("2026-09-09T20:00:01Z".to_string()),
+            ..Default::default()
+        };
+        db.set_kitchen_runtime(&installation.id, &runtime).unwrap();
+
+        let detail = db.get_installation_detail(&installation.id).unwrap();
+        assert!(detail.kitchen_repo.is_some());
+        assert!(detail.custom_node_repos.is_empty());
+        let persisted = detail.kitchen_repo.unwrap().materialization_state.unwrap();
+        assert_eq!(persisted.materialized_head_sha.as_deref(), Some("abc123"));
+        assert_eq!(persisted.status, MaterializationStatus::Current);
+        assert_eq!(detail.kitchen_runtime.unwrap().installed_version.as_deref(), Some("0.2.33"));
+    }
+
+    #[test]
+    fn runtime_probe_does_not_create_a_fake_kitchen_repository() {
+        let data_dir = TestDataDir::new();
+        let db = Database::new(&data_dir.0).unwrap();
+        let installation = add_installation(&db);
+        db.set_kitchen_runtime(
+            &installation.id,
+            &KitchenRuntimeProbe {
+                distribution_present: true,
+                installed_version: Some("0.2.33".to_string()),
+                import_ok: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let detail = db.get_installation_detail(&installation.id).unwrap();
+        assert!(detail.kitchen_repo.is_none());
+        assert!(detail.kitchen_runtime.is_some());
+    }
+
+    #[test]
+    fn additive_migration_preserves_old_repo_rows_and_adds_kitchen_columns() {
+        let data_dir = TestDataDir::new();
+        let state_dir = data_dir.0.join("state");
+        let logs_dir = data_dir.0.join("logs");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        let path = state_dir.join("comfyui-patcher.sqlite3");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE installations (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, comfy_root TEXT NOT NULL,
+                python_exe TEXT NOT NULL, custom_nodes_dir TEXT NOT NULL,
+                launch_profile_json TEXT, detected_env_kind TEXT NOT NULL,
+                is_git_repo INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE managed_repos (
+                id TEXT PRIMARY KEY, installation_id TEXT NOT NULL, kind TEXT NOT NULL,
+                display_name TEXT NOT NULL, local_path TEXT NOT NULL, canonical_remote TEXT,
+                current_head_sha TEXT, current_branch TEXT, is_detached INTEGER NOT NULL,
+                is_dirty INTEGER NOT NULL, tracked_target_kind TEXT, tracked_target_input TEXT,
+                tracked_target_resolved_sha TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX idx_managed_repos_installation_local_path
+            ON managed_repos (installation_id, local_path);
+            CREATE TABLE operations (
+                id TEXT PRIMARY KEY, installation_id TEXT NOT NULL, repo_id TEXT, kind TEXT NOT NULL,
+                status TEXT NOT NULL, requested_input TEXT, log_file TEXT NOT NULL,
+                error_message TEXT, checkpoint_id TEXT, created_at TEXT NOT NULL,
+                started_at TEXT, finished_at TEXT
+            );
+            CREATE TABLE repo_checkpoints (
+                id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, operation_id TEXT NOT NULL,
+                old_head_sha TEXT NOT NULL, old_branch TEXT, old_is_detached INTEGER NOT NULL,
+                stash_created INTEGER NOT NULL, stash_ref TEXT, created_at TEXT NOT NULL
+            );
+            CREATE TABLE ignored_repo_paths (
+                installation_id TEXT NOT NULL, kind TEXT NOT NULL, local_path TEXT NOT NULL,
+                created_at TEXT NOT NULL, PRIMARY KEY (installation_id, local_path)
+            );
+            INSERT INTO installations
+                (id,name,comfy_root,python_exe,custom_nodes_dir,launch_profile_json,detected_env_kind,is_git_repo,created_at,updated_at)
+            VALUES ('i','Old','/old','python','/old/custom_nodes',NULL,'venv',1,'t','t');
+            INSERT INTO managed_repos
+                (id,installation_id,kind,display_name,local_path,canonical_remote,current_head_sha,current_branch,is_detached,is_dirty,tracked_target_kind,tracked_target_input,tracked_target_resolved_sha,created_at,updated_at)
+            VALUES ('r','i','\"custom_node\"','old-node','/old/custom_nodes/old-node',NULL,'abc','main',0,0,NULL,NULL,NULL,'t','t');
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let db = Database::new(&data_dir.0).unwrap();
+        let detail = db.get_installation_detail("i").unwrap();
+        assert_eq!(detail.custom_node_repos.len(), 1);
+        assert_eq!(detail.custom_node_repos[0].display_name, "old-node");
+        assert!(detail.custom_node_repos[0].materialization_state.is_none());
+        let conn = db.connect().unwrap();
+        let columns = conn
+            .prepare("PRAGMA table_info(managed_repos)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(columns.iter().any(|column| column == "materialization_state_json"));
+        let checkpoint_columns = conn
+            .prepare("PRAGMA table_info(repo_checkpoints)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(checkpoint_columns
+            .iter()
+            .any(|column| column == "materialization_state_json"));
     }
 }
