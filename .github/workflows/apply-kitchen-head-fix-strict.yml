@@ -36,21 +36,20 @@ jobs:
           path = Path('tools/apply_kitchen_hostile_review_fixes.py')
           text = path.read_text(encoding='utf-8')
 
-          # Narrow the checkpoint signature transformation to the Kitchen-aware helper.
-          old = '''replace_block(
-              "src-tauri/src/lib.rs",
-              ''' + "'''" + '''    checkpoint: &RepoCheckpoint,
+          old_checkpoint = """replace_block(
+              \"src-tauri/src/lib.rs\",
+              '''    checkpoint: &RepoCheckpoint,
               restore_stash: bool,
-          ) -> AppResult<()> {''' + "'''" + ''',
-              ''' + "'''" + '''    checkpoint: &RepoCheckpoint,
+          ) -> AppResult<()> {''',
+              '''    checkpoint: &RepoCheckpoint,
               restore_stash: bool,
               force_kitchen_runtime_rebuild: bool,
-          ) -> AppResult<()> {''' + "'''" + ''',
-              "Kitchen checkpoint recovery signature",
-          )'''
-          new = '''replace_block(
-              "src-tauri/src/lib.rs",
-              ''' + "'''" + '''async fn restore_checkpoint_with_kitchen_runtime(
+          ) -> AppResult<()> {''',
+              \"Kitchen checkpoint recovery signature\",
+          )"""
+          new_checkpoint = """replace_block(
+              \"src-tauri/src/lib.rs\",
+              '''async fn restore_checkpoint_with_kitchen_runtime(
               state: &AppState,
               app: &AppHandle,
               operation_id: &str,
@@ -58,8 +57,8 @@ jobs:
               repo: &ManagedRepo,
               checkpoint: &RepoCheckpoint,
               restore_stash: bool,
-          ) -> AppResult<()> {''' + "'''" + ''',
-              ''' + "'''" + '''async fn restore_checkpoint_with_kitchen_runtime(
+          ) -> AppResult<()> {''',
+              '''async fn restore_checkpoint_with_kitchen_runtime(
               state: &AppState,
               app: &AppHandle,
               operation_id: &str,
@@ -68,63 +67,60 @@ jobs:
               checkpoint: &RepoCheckpoint,
               restore_stash: bool,
               force_kitchen_runtime_rebuild: bool,
-          ) -> AppResult<()> {''' + "'''" + ''',
-              "Kitchen checkpoint recovery signature",
-          )'''
-          if text.count(old) != 1:
-              raise SystemExit(f'expected one broad checkpoint transform, found {text.count(old)}')
-          text = text.replace(old, new, 1)
+          ) -> AppResult<()> {''',
+              \"Kitchen checkpoint recovery signature\",
+          )"""
+          if text.count(old_checkpoint) != 1:
+              raise SystemExit(f'expected one broad checkpoint transform, found {text.count(old_checkpoint)}')
+          text = text.replace(old_checkpoint, new_checkpoint, 1)
 
-          # Replace the lifecycle part of the transformation script with function-specific anchors.
-          start_marker = '# 10. Kitchen lifecycle policy: untrack leaves the currently installed runtime untouched.'
-          end_marker = '# 11. Pure regression tests pin the orchestration/lifecycle invariants.'
-          start = text.index(start_marker)
-          end = text.index(end_marker)
-          lifecycle = r'''# 10. Kitchen lifecycle policy: untrack leaves the currently installed runtime untouched.
-          insert_lifecycle = ''' + "'''" + '''fn kitchen_lifecycle_requires_comfy_restore(
-              kind: &RepoKind,
-              has_materialization: bool,
-              operation_kind: &OperationKind,
-          ) -> bool {
-              *kind == RepoKind::Kitchen
-                  && has_materialization
-                  && matches!(
-                      operation_kind,
-                      OperationKind::UninstallRepo | OperationKind::DisableRepo
-                  )
-          }
-
-          #[tauri::command]
-          async fn uninstall_repo(''' + "'''" + '''
-          replace_block(
-              "src-tauri/src/lib.rs",
-              ''' + "'''" + '''#[tauri::command]
-          async fn uninstall_repo(''' + "'''" + ''',
-              insert_lifecycle,
-              "Kitchen lifecycle policy helper",
-          )
-          replace_block(
-              "src-tauri/src/lib.rs",
-              ''' + "'''" + '''            format!("uninstalling {}", repo.display_name),
+          old_uninstall = """replace_block(
+              \"src-tauri/src/lib.rs\",
+              '''        if repo.kind == RepoKind::Kitchen && repo.materialization_state.is_some() {''',
+              '''        if kitchen_lifecycle_requires_comfy_restore(
+                      &repo.kind,
+                      repo.materialization_state.is_some(),
+                      &OperationKind::UninstallRepo,
+                  ) {''',
+              \"Kitchen uninstall restore policy\",
+          )"""
+          new_uninstall = """replace_block(
+              \"src-tauri/src/lib.rs\",
+              '''            format!(\"uninstalling {}\", repo.display_name),
                   );
-                  if repo.kind == RepoKind::Kitchen && repo.materialization_state.is_some() {''' + "'''" + ''',
-              ''' + "'''" + '''            format!("uninstalling {}", repo.display_name),
+                  if repo.kind == RepoKind::Kitchen && repo.materialization_state.is_some() {''',
+              '''            format!(\"uninstalling {}\", repo.display_name),
                   );
                   if kitchen_lifecycle_requires_comfy_restore(
                       &repo.kind,
                       repo.materialization_state.is_some(),
                       &OperationKind::UninstallRepo,
-                  ) {''' + "'''" + ''',
-              "Kitchen uninstall restore policy",
-          )
+                  ) {''',
+              \"Kitchen uninstall restore policy\",
+          )"""
+          if text.count(old_uninstall) != 1:
+              raise SystemExit(f'expected one generic uninstall transform, found {text.count(old_uninstall)}')
+          text = text.replace(old_uninstall, new_uninstall, 1)
+
+          old_disable = """# The second identical old condition is Disable; after replacing first only one remains.
           replace_block(
-              "src-tauri/src/lib.rs",
-              ''' + "'''" + '''                repo.display_name,
+              \"src-tauri/src/lib.rs\",
+              '''        if repo.kind == RepoKind::Kitchen && repo.materialization_state.is_some() {''',
+              '''        if kitchen_lifecycle_requires_comfy_restore(
+                      &repo.kind,
+                      repo.materialization_state.is_some(),
+                      &OperationKind::DisableRepo,
+                  ) {''',
+              \"Kitchen disable restore policy\",
+          )"""
+          new_disable = """replace_block(
+              \"src-tauri/src/lib.rs\",
+              '''                repo.display_name,
                           disabled_path.to_string_lossy()
                       ),
                   );
-                  if repo.kind == RepoKind::Kitchen && repo.materialization_state.is_some() {''' + "'''" + ''',
-              ''' + "'''" + '''                repo.display_name,
+                  if repo.kind == RepoKind::Kitchen && repo.materialization_state.is_some() {''',
+              '''                repo.display_name,
                           disabled_path.to_string_lossy()
                       ),
                   );
@@ -132,56 +128,12 @@ jobs:
                       &repo.kind,
                       repo.materialization_state.is_some(),
                       &OperationKind::DisableRepo,
-                  ) {''' + "'''" + ''',
-              "Kitchen disable restore policy",
-          )
-          replace_block(
-              "src-tauri/src/lib.rs",
-              ''' + "'''" + '''        let _ = run_untrack_repo(app, state_handle, installation, repo, op_id).await;''' + "'''" + ''',
-              ''' + "'''" + '''        let _ = run_untrack_repo(app, state_handle, repo, op_id).await;''' + "'''" + ''',
-              "Kitchen untrack spawn",
-          )
-          replace_block(
-              "src-tauri/src/lib.rs",
-              ''' + "'''" + '''async fn run_untrack_repo(
-              app: AppHandle,
-              state: AppState,
-              installation: Installation,
-              repo: ManagedRepo,
-              operation_id: String,
-          ) -> AppResult<()> {''' + "'''" + ''',
-              ''' + "'''" + '''async fn run_untrack_repo(
-              app: AppHandle,
-              state: AppState,
-              repo: ManagedRepo,
-              operation_id: String,
-          ) -> AppResult<()> {''' + "'''" + ''',
-              "Kitchen untrack signature",
-          )
-          old_untrack_restore = ''' + "'''" + '''        if repo.kind == RepoKind::Kitchen && repo.materialization_state.is_some() {
-              restore_comfy_requirement_for_repo(
-                  &state,
-                  &app,
-                  &operation_id,
-                  &installation,
-                  &repo,
-              )
-              .await?;
-          }''' + "'''" + '''
-          new_untrack_restore = ''' + "'''" + '''        if repo.kind == RepoKind::Kitchen && repo.materialization_state.is_some() {
-              log_operation(
-                  &state,
-                  &app,
-                  &operation_id,
-                  "materialization",
-                  "warn",
-                  "stopping Kitchen source management without changing the currently installed comfy-kitchen runtime; Patcher will no longer reassert this source build",
-              );
-          }''' + "'''" + '''
-          replace_block("src-tauri/src/lib.rs", old_untrack_restore, new_untrack_restore, "Kitchen untrack runtime preservation")
-
-          '''
-          text = text[:start] + lifecycle + text[end:]
+                  ) {''',
+              \"Kitchen disable restore policy\",
+          )"""
+          if text.count(old_disable) != 1:
+              raise SystemExit(f'expected one generic disable transform, found {text.count(old_disable)}')
+          text = text.replace(old_disable, new_disable, 1)
           path.write_text(text, encoding='utf-8', newline='\n')
           PY
           python tools/apply_kitchen_hostile_review_fixes.py
