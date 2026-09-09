@@ -3,6 +3,19 @@
 All notable changes to ComfyUI Patcher are documented here. Earlier release notes
 remain available on the [GitHub Releases](https://github.com/xmarre/ComfyUI-Patcher/releases) page.
 
+## Unreleased
+
+### Added
+
+- Added first-class Comfy Kitchen management as a separate repository/runtime layer, including official-source target resolution, stacked PR support, recursive submodule initialization, source-wheel materialization, and runtime provenance tracking.
+- Added an installation-level Kitchen runtime probe and UI that reports installed/import state independently of whether a source checkout is managed.
+- Added durable **Restore ComfyUI Kitchen** behavior that returns runtime ownership to the requirement declared by the current ComfyUI checkout without deleting the source checkout.
+
+### Safety
+
+- Patcher reasserts an active managed Kitchen source build after Patcher-controlled Python dependency installs replace it, and blocks Start/Restart when active Kitchen runtime provenance is incoherent.
+- Kitchen rollback/checkpoint restore includes runtime materialization state; failed fresh source installs clean up only operation-owned state and preserve/restore retained pre-existing paths.
+
 ## [0.1.18] - 2026-08-30
 
 This hotfix restores exact sequential PR-stack preflight on Git versions that only provide the legacy three-argument `git merge-tree` interface.
