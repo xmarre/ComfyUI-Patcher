@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub enum RepoKind {
     Core,
     Frontend,
+    Kitchen,
     CustomNode,
 }
 
@@ -23,6 +24,9 @@ pub enum OperationKind {
     PatchCore,
     InstallFrontend,
     PatchFrontend,
+    InstallKitchen,
+    PatchKitchen,
+    RestoreComfyManagedKitchen,
     InstallCustomNode,
     PatchCustomNode,
     ManageRepoStack,
@@ -131,7 +135,6 @@ pub enum OverlayMoveDirection {
     Down,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FrontendPackageManager {
@@ -173,7 +176,7 @@ pub struct DependencyPlan {
     pub steps: Vec<DependencyStep>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RepoLiveStatus {
     Clean,
@@ -190,6 +193,55 @@ pub struct RepoDependencyState {
     pub error: Option<String>,
     pub manifest_files: Vec<String>,
     pub relevant_changed_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterializationStatus {
+    Current,
+    Stale,
+    Missing,
+    ImportFailed,
+    Replaced,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct KitchenRuntimeProbe {
+    #[serde(default)]
+    pub distribution_present: bool,
+    #[serde(default)]
+    pub installed_version: Option<String>,
+    #[serde(default)]
+    pub distribution_location: Option<String>,
+    #[serde(default)]
+    pub direct_url: Option<String>,
+    #[serde(default)]
+    pub direct_url_sha256: Option<String>,
+    #[serde(default)]
+    pub record_sha256: Option<String>,
+    #[serde(default)]
+    pub import_ok: bool,
+    #[serde(default)]
+    pub import_error: Option<String>,
+    #[serde(default)]
+    pub module_location: Option<String>,
+    #[serde(default)]
+    pub probed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoMaterializationState {
+    pub materialized_head_sha: Option<String>,
+    pub installed_version: Option<String>,
+    pub installed_origin: Option<String>,
+    pub artifact_sha256: Option<String>,
+    pub installed_record_sha256: Option<String>,
+    pub status: MaterializationStatus,
+    pub last_materialized_at: Option<String>,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -252,6 +304,8 @@ pub struct ManagedRepo {
     #[serde(default)]
     pub dependency_state: Option<RepoDependencyState>,
     #[serde(default)]
+    pub materialization_state: Option<RepoMaterializationState>,
+    #[serde(default)]
     pub last_scanned_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -267,6 +321,9 @@ pub struct InstallationDetail {
     pub installation: Installation,
     pub core_repo: Option<ManagedRepo>,
     pub frontend_repo: Option<ManagedRepo>,
+    pub kitchen_repo: Option<ManagedRepo>,
+    #[serde(default)]
+    pub kitchen_runtime: Option<KitchenRuntimeProbe>,
     pub custom_node_repos: Vec<ManagedRepo>,
     #[serde(default)]
     pub warnings: Vec<String>,
@@ -331,6 +388,8 @@ pub struct RepoCheckpoint {
     pub reason: Option<String>,
     #[serde(default)]
     pub dependency_state: Option<RepoDependencyState>,
+    #[serde(default)]
+    pub materialization_state: Option<RepoMaterializationState>,
     pub created_at: String,
 }
 
@@ -402,6 +461,9 @@ pub struct RegisterInstallationResult {
     pub installation: Installation,
     pub core_repo: Option<ManagedRepo>,
     pub frontend_repo: Option<ManagedRepo>,
+    pub kitchen_repo: Option<ManagedRepo>,
+    #[serde(default)]
+    pub kitchen_runtime: Option<KitchenRuntimeProbe>,
     pub discovered_custom_nodes: Vec<ManagedRepo>,
     pub warnings: Vec<String>,
 }
@@ -430,7 +492,6 @@ pub struct ResolveTargetInput {
     pub input: String,
     pub repo_id: Option<String>,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -482,6 +543,24 @@ pub struct PatchFrontendInput {
     pub dirty_repo_strategy: DirtyRepoStrategy,
     pub set_tracked_target: bool,
     pub sync_dependencies: bool,
+    pub restart_after_success: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatchKitchenInput {
+    pub installation_id: String,
+    pub input: String,
+    pub existing_repo_conflict_strategy: ExistingRepoConflictStrategy,
+    pub dirty_repo_strategy: DirtyRepoStrategy,
+    pub set_tracked_target: bool,
+    pub restart_after_success: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreComfyManagedKitchenInput {
+    pub repo_id: String,
     pub restart_after_success: bool,
 }
 
