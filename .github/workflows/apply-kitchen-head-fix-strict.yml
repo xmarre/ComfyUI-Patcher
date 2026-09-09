@@ -191,7 +191,7 @@ jobs:
         run: |
           set -euo pipefail
           git rm .github/workflows/apply-kitchen-head-fix-strict.yml
-          git rm tools/apply_kitchen_hostile_review_fixes.py
+          git rm -f tools/apply_kitchen_hostile_review_fixes.py
           if [ -f .github/workflows/fix-kitchen-head-provenance.yml ]; then
             git rm .github/workflows/fix-kitchen-head-provenance.yml
           fi
