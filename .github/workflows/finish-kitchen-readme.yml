@@ -1,0 +1,92 @@
+name: Finish Comfy Kitchen README coverage
+
+on:
+  push:
+    branches:
+      - feature/comfy-kitchen-management
+    paths:
+      - .github/workflows/finish-kitchen-readme.yml
+
+permissions:
+  contents: write
+
+jobs:
+  docs:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/comfy-kitchen-management
+          fetch-depth: 0
+      - name: Correct remaining stale README statements
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected exactly one anchor, found {count}")
+              return text.replace(old, new, 1)
+
+          path = Path("README.md")
+          text = path.read_text(encoding="utf-8")
+          text = replace_once(
+              text,
+              "* `src/App.tsx` — primary shell with installation registration, installation settings, core/frontend/custom-node panels, repo cards, registry browser, event stream, and operation panel",
+              "* `src/App.tsx` — primary shell with installation registration, installation settings, core/frontend/Kitchen/custom-node panels, repo cards, registry browser, event stream, and operation panel",
+              "frontend module summary",
+          )
+          text = replace_once(
+              text,
+              "│     ├─ github.rs\n│     ├─ lib.rs",
+              "│     ├─ github.rs\n│     ├─ kitchen.rs\n│     ├─ lib.rs",
+              "file tree",
+          )
+          text = replace_once(
+              text,
+              "  * frontend repo at the configured managed frontend path\n  * git-backed custom nodes under `custom_nodes/`",
+              "  * frontend repo at the configured managed frontend path\n  * official Comfy Kitchen source checkout at the managed sibling path when present\n  * git-backed custom nodes under `custom_nodes/`",
+              "repository discovery",
+          )
+          text = replace_once(
+              text,
+              "* target resolution is repo-kind aware: `core`, `frontend`, or `custom_node`",
+              "* target resolution is repo-kind aware: `core`, `frontend`, `kitchen`, or `custom_node`",
+              "target resolution kinds",
+          )
+          insertion_anchor = "Frontend runtime integration:\n\n* when managed frontend settings are configured, **Start / Restart** strip any existing `--front-end-root` from stored launch args, restart args, and appended args\n* then they inject the managed frontend dist path at runtime\n* for WSL-backed launch commands, the injected frontend path is rewritten to the Linux path form expected inside WSL\n\n### Custom node install / patch"
+          insertion = "Frontend runtime integration:\n\n* when managed frontend settings are configured, **Start / Restart** strip any existing `--front-end-root` from stored launch args, restart args, and appended args\n* then they inject the managed frontend dist path at runtime\n* for WSL-backed launch commands, the injected frontend path is rewritten to the Linux path form expected inside WSL\n\n### Managed Comfy Kitchen support\n\n* probe the installed `comfy-kitchen` distribution/import state independently of source-checkout management\n* manage the official Comfy Kitchen checkout as a first-class repository with tracked base targets and PR overlays\n* initialize required submodules and build/install a source wheel through the configured ComfyUI Python environment\n* persist source HEAD plus installed artifact/RECORD provenance so source and runtime drift can be distinguished\n* reassert an active source override after Patcher-controlled Python dependency installs replace it\n* restore runtime ownership to the exact `comfy-kitchen` requirement declared by the current ComfyUI checkout without deleting the source checkout\n* restore Kitchen runtime state together with repository checkpoints and refuse Start/Restart when an active override is incoherent\n\n### Custom node install / patch"
+          text = replace_once(text, insertion_anchor, insertion, "implemented Kitchen feature section")
+          text = replace_once(
+              text,
+              "* include frontend repos in **Update all**",
+              "* include frontend and actively tracked Kitchen repos in **Update all**",
+              "update all coverage",
+          )
+          text = replace_once(
+              text,
+              "  * `dependency_sync`\n  * `restart`",
+              "  * `dependency_sync`\n  * `submodules` / `materialization` for Comfy Kitchen source builds\n  * `restart`",
+              "operation phases",
+          )
+          path.write_text(text, encoding="utf-8", newline="\n")
+          PY
+          git diff --check -- README.md
+          grep -Fq '├─ kitchen.rs' README.md
+          grep -Fq 'target resolution is repo-kind aware: `core`, `frontend`, `kitchen`, or `custom_node`' README.md
+          grep -Fq 'include frontend and actively tracked Kitchen repos in **Update all**' README.md
+      - name: Commit README correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/finish-kitchen-readme.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add README.md
+          git diff --cached --check
+          git commit -m "Complete Comfy Kitchen README coverage"
+          git push origin HEAD:feature/comfy-kitchen-management
