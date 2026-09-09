@@ -1,0 +1,76 @@
+name: Reconstruct Kitchen semantic diff
+
+on:
+  push:
+    branches:
+      - feature/comfy-kitchen-management
+    paths:
+      - .github/workflows/reconstruct-kitchen-semantic-diff.yml
+
+permissions:
+  contents: write
+
+jobs:
+  reconstruct:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/comfy-kitchen-management
+          fetch-depth: 0
+      - name: Fetch main
+        run: git fetch origin main
+      - name: Reconstruct from main plus semantic patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          targets=(src-tauri/src/db.rs src-tauri/src/models.rs)
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import json
+
+          def logical(data: bytes) -> bytes:
+              return data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+          hashes = {}
+          for name in ["src-tauri/src/db.rs", "src-tauri/src/models.rs"]:
+              hashes[name] = hashlib.sha256(logical(Path(name).read_bytes())).hexdigest()
+          Path("/tmp/kitchen-logical-hashes.json").write_text(json.dumps(hashes), encoding="utf-8")
+          PY
+          for path in "${targets[@]}"; do
+            safe="${path//\//_}"
+            git diff --ignore-space-at-eol --binary origin/main -- "$path" > "/tmp/${safe}.patch"
+            git checkout origin/main -- "$path"
+            if [ -s "/tmp/${safe}.patch" ]; then
+              git apply --whitespace=nowarn "/tmp/${safe}.patch"
+            fi
+          done
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import json
+
+          def logical(data: bytes) -> bytes:
+              return data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+          expected = json.loads(Path("/tmp/kitchen-logical-hashes.json").read_text(encoding="utf-8"))
+          for name, digest in expected.items():
+              actual = hashlib.sha256(logical(Path(name).read_bytes())).hexdigest()
+              if actual != digest:
+                  raise SystemExit(f"semantic reconstruction mismatch for {name}: {actual} != {digest}")
+          PY
+          git diff --check
+          git diff --stat origin/main -- "${targets[@]}"
+      - name: Commit reviewable semantic diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/reconstruct-kitchen-semantic-diff.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src-tauri/src/db.rs src-tauri/src/models.rs
+          git diff --cached --check
+          git commit -m "Reduce Kitchen persistence diff to semantic changes"
+          git push origin HEAD:feature/comfy-kitchen-management
