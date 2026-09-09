@@ -137,7 +137,18 @@ jobs:
           path.write_text(text, encoding='utf-8', newline='\n')
           PY
           python tools/apply_kitchen_hostile_review_fixes.py
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('src-tauri/src/kitchen.rs')
+          raw = path.read_bytes()
+          old = b'        let mut fallback_repo = repo();'
+          new = b'        let mut fallback_repo = repo.clone();'
+          if raw.count(old) != 1:
+              raise SystemExit(f'expected one fallback repo fixture, found {raw.count(old)}')
+          path.write_bytes(raw.replace(old, new, 1))
+          PY
           grep -Fq 'cannot materialize Comfy Kitchen source: repository HEAD could not be resolved' src-tauri/src/kitchen.rs
+          grep -Fq 'let mut fallback_repo = repo.clone();' src-tauri/src/kitchen.rs
           grep -Fq 'ManagedPythonOverrideMode::Deferred' src-tauri/src/lib.rs
           grep -Fq 'stopping Kitchen source management without changing the currently installed comfy-kitchen runtime' src-tauri/src/lib.rs
           grep -Fq 'default_remote_for_repo_kind' src-tauri/src/lib.rs
