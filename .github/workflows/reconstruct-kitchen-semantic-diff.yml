@@ -44,7 +44,7 @@ jobs:
             git diff --ignore-space-at-eol --binary origin/main -- "$path" > "/tmp/${safe}.patch"
             git checkout origin/main -- "$path"
             if [ -s "/tmp/${safe}.patch" ]; then
-              git apply --whitespace=nowarn "/tmp/${safe}.patch"
+              git apply --ignore-space-change --ignore-whitespace --whitespace=nowarn "/tmp/${safe}.patch"
             fi
           done
           python - <<'PY'
