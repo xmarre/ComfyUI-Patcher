@@ -2,10 +2,11 @@
 
 ComfyUI Patcher is a desktop app for managing a local ComfyUI installation plus git-backed extensions around it. It can register an existing ComfyUI root, discover managed repositories, resolve GitHub URLs and raw git targets, apply them safely with checkpoints, sync dependencies, and control a saved launch profile for **Start / Stop / Restart**.
 
-It currently manages three repository kinds:
+It currently manages four repository kinds:
 
 * **core** — the main ComfyUI repository at the installation root
 * **frontend** — a dedicated managed `ComfyUI_frontend` checkout outside `custom_nodes`
+* **kitchen** — an opt-in managed `Comfy-Org/comfy-kitchen` source checkout, materialized into the installation's Python environment
 * **custom_node** — repositories under `custom_nodes/`
 
 The app supports both direct revision tracking and **stacked PR overlays** on managed repositories.
@@ -30,13 +31,14 @@ The app supports both direct revision tracking and **stacked PR overlays** on ma
 * `github.rs` — parses GitHub URLs and resolves repo / branch / commit / PR targets
 * `git.rs` — thin system-git wrapper for inspection, fetch, checkout, reset, stash, clone, merge, and submodule update
 * `deps.rs` — dependency detection / planning / execution for Python and frontend package managers
+* `kitchen.rs` — Comfy Kitchen runtime probing, source-wheel materialization, provenance checks, and restoration of the requirement declared by ComfyUI
 * `process.rs` — starts / stops / restarts a managed child process from a launch profile
 * `state.rs` — application state, GitHub client, database, process registry, and per-installation / per-repo locks
 * `lib.rs` — Tauri command boundary and orchestration for registration, mutation, rollback, update, and logging
 
 ### Frontend modules
 
-* `src/App.tsx` — primary shell with installation registration, installation settings, core/frontend/custom-node panels, repo cards, registry browser, event stream, and operation panel
+* `src/App.tsx` — primary shell with installation registration, installation settings, core/frontend/Kitchen/custom-node panels, repo cards, registry browser, event stream, and operation panel
 * `src/components/RepoCard.tsx` — repo summary with tracked-base / overlay controls, update, and rollback
 * `src/components/OperationPanel.tsx` — operation list and persisted log viewer
 * `src/components/ManagerRegistryBrowser.tsx` — ComfyUI-Manager registry browsing and install entrypoint
@@ -106,6 +108,7 @@ comfyui-patcher/
 │     ├─ execution.rs
 │     ├─ git.rs
 │     ├─ github.rs
+│     ├─ kitchen.rs
 │     ├─ lib.rs
 │     ├─ main.rs
 │     ├─ models.rs
@@ -140,6 +143,7 @@ comfyui-patcher/
 
   * core repo at the ComfyUI root
   * frontend repo at the configured managed frontend path
+  * official Comfy Kitchen source checkout at the managed sibling path when present
   * git-backed custom nodes under `custom_nodes/`
 
 ### Target resolution
@@ -160,7 +164,7 @@ Resolution rules:
 * repo URLs resolve to the repository default branch
 * raw names are resolved against `origin` for existing managed repos
 * branch names containing slashes are supported
-* target resolution is repo-kind aware: `core`, `frontend`, or `custom_node`
+* target resolution is repo-kind aware: `core`, `frontend`, `kitchen`, or `custom_node`
 
 ### Core ComfyUI patching
 
@@ -206,6 +210,16 @@ Frontend runtime integration:
 * then they inject the managed frontend dist path at runtime
 * for WSL-backed launch commands, the injected frontend path is rewritten to the Linux path form expected inside WSL
 
+### Managed Comfy Kitchen support
+
+* probe the installed `comfy-kitchen` distribution/import state independently of source-checkout management
+* manage the official Comfy Kitchen checkout as a first-class repository with tracked base targets and PR overlays
+* initialize required submodules and build/install a source wheel through the configured ComfyUI Python environment
+* persist source HEAD plus installed artifact/RECORD provenance so source and runtime drift can be distinguished
+* reassert an active source override after Patcher-controlled Python dependency installs replace it
+* restore runtime ownership to the exact `comfy-kitchen` requirement declared by the current ComfyUI checkout without deleting the source checkout
+* restore Kitchen runtime state together with repository checkpoints and refuse Start/Restart when an active override is incoherent
+
 ### Custom node install / patch
 
 * install a new git-backed custom node into `custom_nodes/<name>`
@@ -229,7 +243,7 @@ Frontend runtime integration:
 
 * update a managed repo to its tracked target
 * update all tracked repos of an installation
-* include frontend repos in **Update all**
+* include frontend and actively tracked Kitchen repos in **Update all**
 * reuse the same tracked-state materialization logic for branch, tag, commit, and PR tracking
 
 ### Rollback
@@ -267,6 +281,7 @@ Each mutation creates an operation record and persisted logs. The UI shows:
   * `checkout`
   * `dependency_plan`
   * `dependency_sync`
+  * `submodules` / `materialization` for Comfy Kitchen source builds
   * `restart`
   * `rollback`
   * `done` / `error`
@@ -291,6 +306,12 @@ Supported manifests / conventions:
 * build script under `scripts.build`
 
 The app does **not** execute arbitrary install scripts beyond the supported manifest-driven flows.
+
+### Comfy Kitchen source overrides
+
+Comfy Kitchen is handled as a project materialization rather than generic Python dependency sync. When source management is enabled, Patcher initializes the checkout's required submodules, asks the checkout's normal PEP 517/setuptools build to produce a wheel, installs that wheel into the configured installation Python, and records source/runtime provenance separately. Upstream Comfy Kitchen remains responsible for CUDA/HIP compiler discovery and architecture policy.
+
+A Patcher-managed Kitchen source override is reasserted after Patcher-controlled core/custom-node dependency installs if those installs replace the active `comfy-kitchen` distribution.
 
 ---
 
@@ -424,7 +445,17 @@ Behavior:
 
 The managed frontend is intended for a **single canonical remote per checkout**. Stacking overlays works within that managed frontend repo model, but switching between unrelated remotes at the same fixed repo root is treated as a repo replacement problem rather than as a same-stack overlay.
 
-### 4. Install or patch a custom node manually
+### 4. Manage Comfy Kitchen source
+
+The **Kitchen** panel probes the `comfy-kitchen` distribution through the installation's configured Python even when no source checkout is managed. Source management is opt-in.
+
+When enabled, Patcher accepts targets from the official `https://github.com/Comfy-Org/comfy-kitchen` repository, uses a fixed sibling checkout named `comfy-kitchen` beside the ComfyUI root, materializes the selected base/PR stack into a wheel, and installs that wheel into the managed Python environment. Checkout state and installed-runtime provenance are tracked independently so stale, missing, replaced, or import-failing runtimes can be detected.
+
+**Restore ComfyUI Kitchen** reinstalls the exact `comfy-kitchen` requirement declared by the current ComfyUI checkout, clears the tracked Kitchen source target, and leaves the source checkout on disk. A later **Update all** therefore does not silently reactivate the source override. Rollback/checkpoint restore can return to the prior source-managed runtime.
+
+Before an active source-managed Kitchen checkout is disabled, untracked, or uninstalled, Patcher restores the ComfyUI-declared runtime requirement first. Start/Restart also refuse to launch when an active managed source override is no longer coherent with its recorded source revision/runtime provenance.
+
+### 5. Install or patch a custom node manually
 
 Paste one of:
 
@@ -434,20 +465,20 @@ Paste one of:
 
 The app clones into `custom_nodes/` if the repo is new, or patches the existing repo if it already exists at the target path.
 
-### 5. Use the ComfyUI-Manager registry browser
+### 6. Use the ComfyUI-Manager registry browser
 
 * search registry entries
 * inspect installable items
 * install through the app
 * manage installed repos through the same tracked repo UI afterward
 
-### 6. Update and rollback
+### 7. Update and rollback
 
 * **Update** on a repo card re-applies its tracked state
 * **Update all** runs update for every tracked repo in the installation
 * **Rollback** restores the most recent checkpoint for that repo
 
-### 7. Start / Stop / Restart
+### 8. Start / Stop / Restart
 
 Use the saved launch profile to control the managed ComfyUI process.
 
@@ -499,6 +530,8 @@ When a managed frontend is configured, **Start / Restart** inject the frontend d
 * stacked PR overlays rely on Git merge commits; the environment used for git execution must allow synthetic commits
 * a WSL-managed frontend repo must be built with a Linux Node toolchain inside WSL, not with Windows `pnpm` / `npm` shims
 * if a managed frontend repo and ComfyUI install live on different filesystems, replacement / backup handling is designed to avoid cross-device rename failures by backing up beside the target path
+* Comfy Kitchen source builds require the native compiler/toolchain expected by the selected upstream Kitchen backend; Patcher does not replace upstream CUDA/HIP architecture selection
+* managed Kitchen source targets are restricted to the official Comfy-Org/comfy-kitchen remote; unrelated remotes are rejected rather than being treated as interchangeable runtime providers
 
 ---
 
@@ -518,6 +551,17 @@ When a managed frontend is configured, **Start / Restart** inject the frontend d
 * patch to a commit URL
 * patch to a PR URL
 * verify `currentBranch`, `currentHeadSha`, and tracked state update correctly
+
+### Comfy Kitchen
+
+* register/reconcile an installation with and without an installed `comfy-kitchen` distribution and verify the runtime probe remains independent of source-checkout discovery
+* install an official Kitchen branch/commit/PR target and verify required submodules initialize before the source wheel is built and installed
+* verify the recorded materialized source HEAD and installed-runtime provenance match the active source build
+* run a Patcher-controlled core/custom-node dependency sync that replaces `comfy-kitchen` and verify the active Kitchen source override is reasserted
+* use **Restore ComfyUI Kitchen** and verify the current ComfyUI requirement is installed, source tracking is cleared, the checkout remains on disk, and **Update all** does not reactivate it
+* rollback/restore a Kitchen checkpoint and verify both checkout/tracked state and runtime ownership are restored coherently
+* replace or remove the installed source runtime out of band and verify Start/Restart refuses an incoherent active override
+* force a fresh Kitchen source install/materialization failure and verify only operation-owned checkout/DB state is cleaned up while any retained pre-existing path is restored
 
 ### Frontend patch
 

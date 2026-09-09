@@ -12,6 +12,8 @@ import type {
   OperationStart,
   PatchCoreInput,
   PatchFrontendInput,
+  PatchKitchenInput,
+  RestoreComfyManagedKitchenInput,
   PatchCustomNodeInput,
   PreviewRepoTargetInput,
   RepoActionPreview,
@@ -62,6 +64,10 @@ export const api = {
     invoke<OperationStart>("patch_core", { input }),
   installOrPatchFrontend: (input: PatchFrontendInput) =>
     invoke<OperationStart>("install_or_patch_frontend", { input }),
+  installOrPatchKitchen: (input: PatchKitchenInput) =>
+    invoke<OperationStart>("install_or_patch_kitchen", { input }),
+  restoreComfyManagedKitchen: (input: RestoreComfyManagedKitchenInput) =>
+    invoke<OperationStart>("restore_comfy_managed_kitchen", { input }),
   installOrPatchCustomNode: (input: PatchCustomNodeInput) =>
     invoke<OperationStart>("install_or_patch_custom_node", { input }),
   setRepoBaseTarget: (input: SetRepoBaseTargetInput) =>
