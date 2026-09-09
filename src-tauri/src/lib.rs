@@ -179,6 +179,15 @@ fn repo_has_tracked_local_changes(status: &RepoStatus) -> bool {
     !status.tracked_changed_files.is_empty()
 }
 
+fn installation_repo_priority(kind: &RepoKind) -> u8 {
+    match kind {
+        RepoKind::Core => 0,
+        RepoKind::Frontend => 1,
+        RepoKind::CustomNode => 2,
+        RepoKind::Kitchen => 3,
+    }
+}
+
 fn collect_installation_repos(detail: InstallationDetail) -> Vec<ManagedRepo> {
     let mut repos = Vec::new();
     if let Some(core) = detail.core_repo {
@@ -191,6 +200,7 @@ fn collect_installation_repos(detail: InstallationDetail) -> Vec<ManagedRepo> {
     if let Some(kitchen) = detail.kitchen_repo {
         repos.push(kitchen);
     }
+    repos.sort_by_key(|repo| installation_repo_priority(&repo.kind));
     repos
 }
 
@@ -1636,6 +1646,13 @@ async fn try_resolve_same_repo_pr_without_github_api(
     }))
 }
 
+fn default_remote_for_repo_kind(kind: &RepoKind) -> Option<&'static str> {
+    match kind {
+        RepoKind::Kitchen => Some(kitchen::DEFAULT_KITCHEN_REPO_URL),
+        _ => None,
+    }
+}
+
 async fn resolve_target_for_context(
     state: &AppState,
     installation: &Installation,
@@ -1672,7 +1689,16 @@ async fn resolve_target_for_context(
         return Ok(resolved.clone());
     }
 
-    let current_remote = repo.as_ref().and_then(|r| r.canonical_remote.as_deref());
+    let current_remote = repo
+        .as_ref()
+        .and_then(|r| r.canonical_remote.as_deref())
+        .or_else(|| {
+            if repo.is_none() {
+                default_remote_for_repo_kind(kind)
+            } else {
+                None
+            }
+        });
     let current_repo_path = repo.as_ref().map(|r| Path::new(&r.local_path));
     match state
         .github
@@ -2327,6 +2353,33 @@ async fn apply_repo_tracking_state(
     sync_dependencies: bool,
     write_tracked_target: bool,
 ) -> AppResult<RepoCheckpoint> {
+    apply_repo_tracking_state_with_override_mode(
+        state,
+        app,
+        operation_id,
+        installation,
+        repo,
+        tracked_state,
+        dirty_repo_strategy,
+        sync_dependencies,
+        write_tracked_target,
+        ManagedPythonOverrideMode::Immediate,
+    )
+    .await
+}
+
+async fn apply_repo_tracking_state_with_override_mode(
+    state: &AppState,
+    app: &AppHandle,
+    operation_id: &str,
+    installation: &Installation,
+    repo: &ManagedRepo,
+    tracked_state: &TrackedRepoState,
+    dirty_repo_strategy: &DirtyRepoStrategy,
+    sync_dependencies: bool,
+    write_tracked_target: bool,
+    override_mode: ManagedPythonOverrideMode,
+) -> AppResult<RepoCheckpoint> {
     validate_overlay_stack(tracked_state)?;
     if let Some(conflict) =
         probe_sequential_stack_conflicts(state, installation, repo, tracked_state).await?
@@ -2374,7 +2427,7 @@ async fn apply_repo_tracking_state(
             )
             .await?;
         } else {
-            maybe_sync_dependencies(
+            maybe_sync_dependencies_with_override_mode(
                 state,
                 app,
                 operation_id,
@@ -2382,6 +2435,7 @@ async fn apply_repo_tracking_state(
                 repo,
                 path,
                 sync_dependencies,
+                override_mode,
             )
             .await?;
             cleanup_frontend_dependency_artifacts(
@@ -2457,6 +2511,7 @@ async fn apply_repo_tracking_state(
                 repo,
                 &checkpoint,
                 true,
+                false,
             )
             .await;
             if let Err(refresh_err) = refresh_repo_state(state, &repo.id).await {
@@ -3372,6 +3427,7 @@ async fn restore_checkpoint_with_kitchen_runtime(
     repo: &ManagedRepo,
     checkpoint: &RepoCheckpoint,
     restore_stash: bool,
+    force_kitchen_runtime_rebuild: bool,
 ) -> AppResult<()> {
     let path = Path::new(&repo.local_path);
     if repo.kind != RepoKind::Kitchen {
@@ -3412,14 +3468,49 @@ async fn restore_checkpoint_with_kitchen_runtime(
         restored_repo.is_detached = status.is_detached;
         restored_repo.is_dirty = false;
         restored_repo.materialization_state = Some(saved_materialization.clone());
-        materialize_kitchen_override(
-            state,
-            app,
-            operation_id,
-            installation,
-            &restored_repo,
-        )
-        .await?;
+        let runtime_is_current = if force_kitchen_runtime_rebuild {
+            false
+        } else {
+            match kitchen::probe_kitchen_runtime(installation).await {
+                Ok(runtime) => {
+                    state.db.set_kitchen_runtime(&installation.id, &runtime)?;
+                    kitchen::evaluate_materialization(&restored_repo, &runtime).status
+                        == MaterializationStatus::Current
+                }
+                Err(error) => {
+                    log_operation(
+                        state,
+                        app,
+                        operation_id,
+                        "rollback",
+                        "warn",
+                        format!(
+                            "failed to verify whether the previous Kitchen runtime survived unchanged; rebuilding checkpointed source: {error}"
+                        ),
+                    );
+                    false
+                }
+            }
+        };
+        if runtime_is_current {
+            log_operation(
+                state,
+                app,
+                operation_id,
+                "rollback",
+                "info",
+                "previous Comfy Kitchen runtime still matches the restored checkpoint; skipping an unnecessary rebuild",
+            );
+        } else {
+            materialize_kitchen_override(
+                state,
+                app,
+                operation_id,
+                installation,
+                &restored_repo,
+            )
+            .await?;
+        }
     } else {
         restore_comfy_requirement_for_repo(
             state,
@@ -3443,7 +3534,30 @@ async fn restore_checkpoint_with_kitchen_runtime(
     Ok(())
 }
 
-async fn maybe_sync_dependencies(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManagedPythonOverrideMode {
+    Immediate,
+    Deferred,
+}
+
+fn should_reassert_managed_kitchen_override(
+    repo_kind: &RepoKind,
+    mode: ManagedPythonOverrideMode,
+) -> bool {
+    mode == ManagedPythonOverrideMode::Immediate
+        && matches!(repo_kind, RepoKind::Core | RepoKind::CustomNode)
+}
+
+fn combine_dependency_and_override_errors(
+    dependency_error: AppError,
+    override_error: AppError,
+) -> AppError {
+    AppError::Dependency(format!(
+        "{dependency_error}; additionally failed to reassert the managed Comfy Kitchen source override: {override_error}"
+    ))
+}
+
+async fn maybe_sync_dependencies_with_override_mode(
     state: &AppState,
     app: &AppHandle,
     operation_id: &str,
@@ -3451,6 +3565,7 @@ async fn maybe_sync_dependencies(
     repo: &ManagedRepo,
     repo_path: &Path,
     enabled: bool,
+    override_mode: ManagedPythonOverrideMode,
 ) -> AppResult<()> {
     if !enabled {
         return Ok(());
@@ -3464,29 +3579,58 @@ async fn maybe_sync_dependencies(
         "info",
         format!("dependency plan: {} ({})", plan.strategy, plan.reason),
     );
-    if !plan.steps.is_empty() {
-        for step in &plan.steps {
-            log_operation(
-                state,
-                app,
-                operation_id,
-                "dependency_sync",
-                "info",
-                format!("{} step: {} ({})", step.phase, step.strategy, step.reason),
-            );
-        }
-        execute_dependency_sync(&plan).await?;
-    }
-    if matches!(repo.kind, RepoKind::Core | RepoKind::CustomNode) {
-        reassert_managed_kitchen_override_if_needed(
+    for step in &plan.steps {
+        log_operation(
             state,
             app,
             operation_id,
-            installation,
-        )
-        .await?;
+            "dependency_sync",
+            "info",
+            format!("{} step: {} ({})", step.phase, step.strategy, step.reason),
+        );
     }
-    Ok(())
+
+    let dependency_result = if plan.steps.is_empty() {
+        Ok(())
+    } else {
+        execute_dependency_sync(&plan).await
+    };
+    let override_result = if should_reassert_managed_kitchen_override(&repo.kind, override_mode) {
+        reassert_managed_kitchen_override_if_needed(state, app, operation_id, installation).await
+    } else {
+        Ok(())
+    };
+
+    match (dependency_result, override_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(dependency_error), Err(override_error)) => Err(
+            combine_dependency_and_override_errors(dependency_error, override_error),
+        ),
+    }
+}
+
+async fn maybe_sync_dependencies(
+    state: &AppState,
+    app: &AppHandle,
+    operation_id: &str,
+    installation: &Installation,
+    repo: &ManagedRepo,
+    repo_path: &Path,
+    enabled: bool,
+) -> AppResult<()> {
+    maybe_sync_dependencies_with_override_mode(
+        state,
+        app,
+        operation_id,
+        installation,
+        repo,
+        repo_path,
+        enabled,
+        ManagedPythonOverrideMode::Immediate,
+    )
+    .await
 }
 
 async fn maybe_restart_installation(
@@ -5202,6 +5346,7 @@ async fn run_restore_comfy_managed_kitchen(
                 &repo,
                 &checkpoint,
                 false,
+                true,
             )
             .await;
             return match restore_result {
@@ -6747,7 +6892,7 @@ async fn run_update_all(
                     "info",
                     format!("updating {}", repo.display_name),
                 );
-                match apply_repo_tracking_state(
+                match apply_repo_tracking_state_with_override_mode(
                     &state,
                     &app,
                     &operation_id,
@@ -6757,6 +6902,7 @@ async fn run_update_all(
                     &input.dirty_repo_strategy,
                     input.sync_dependencies,
                     true,
+                    ManagedPythonOverrideMode::Deferred,
                 )
                 .await
                 {
@@ -6772,6 +6918,19 @@ async fn run_update_all(
                     "warn",
                     format!("skipping {}: no tracked target", repo.display_name),
                 );
+            }
+        }
+
+        if input.sync_dependencies {
+            if let Err(error) = reassert_managed_kitchen_override_if_needed(
+                &state,
+                &app,
+                &operation_id,
+                &installation,
+            )
+            .await
+            {
+                failures.push(format!("Comfy Kitchen finalization: {error}"));
             }
         }
 
@@ -6956,7 +7115,7 @@ async fn run_rematerialize_tracked_repos(
                 format!("re-materializing {} with hard reset", repo.display_name),
             );
 
-            match apply_repo_tracking_state(
+            match apply_repo_tracking_state_with_override_mode(
                 &state,
                 &app,
                 &operation_id,
@@ -6966,6 +7125,7 @@ async fn run_rematerialize_tracked_repos(
                 &DirtyRepoStrategy::HardReset,
                 input.sync_dependencies,
                 true,
+                ManagedPythonOverrideMode::Deferred,
             )
             .await
             {
@@ -6974,6 +7134,19 @@ async fn run_rematerialize_tracked_repos(
                     checkpoints.push(checkpoint.id);
                 }
                 Err(err) => failures.push(format!("{}: {}", repo.display_name, err)),
+            }
+        }
+
+        if input.sync_dependencies {
+            if let Err(error) = reassert_managed_kitchen_override_if_needed(
+                &state,
+                &app,
+                &operation_id,
+                &installation,
+            )
+            .await
+            {
+                failures.push(format!("Comfy Kitchen finalization: {error}"));
             }
         }
 
@@ -7146,6 +7319,7 @@ async fn run_rollback_repo(
             &repo,
             &checkpoint,
             input.restore_stash,
+            true,
         )
         .await?;
         if repo.kind != RepoKind::Kitchen {
@@ -7324,6 +7498,7 @@ async fn run_restore_checkpoint(
             &repo,
             &checkpoint,
             input.restore_stash,
+            true,
         )
         .await?;
         if repo.kind != RepoKind::Kitchen {
@@ -7539,6 +7714,19 @@ async fn remove_path_with_retries(path: &Path) -> AppResult<()> {
     }))
 }
 
+fn kitchen_lifecycle_requires_comfy_restore(
+    kind: &RepoKind,
+    has_materialization: bool,
+    operation_kind: &OperationKind,
+) -> bool {
+    *kind == RepoKind::Kitchen
+        && has_materialization
+        && matches!(
+            operation_kind,
+            OperationKind::UninstallRepo | OperationKind::DisableRepo
+        )
+}
+
 #[tauri::command]
 async fn uninstall_repo(
     app: AppHandle,
@@ -7598,7 +7786,11 @@ async fn run_uninstall_repo(
             "info",
             format!("uninstalling {}", repo.display_name),
         );
-        if repo.kind == RepoKind::Kitchen && repo.materialization_state.is_some() {
+        if kitchen_lifecycle_requires_comfy_restore(
+            &repo.kind,
+            repo.materialization_state.is_some(),
+            &OperationKind::UninstallRepo,
+        ) {
             restore_comfy_requirement_for_repo(
                 &state,
                 &app,
@@ -7710,7 +7902,11 @@ async fn run_disable_repo(
                 disabled_path.to_string_lossy()
             ),
         );
-        if repo.kind == RepoKind::Kitchen && repo.materialization_state.is_some() {
+        if kitchen_lifecycle_requires_comfy_restore(
+            &repo.kind,
+            repo.materialization_state.is_some(),
+            &OperationKind::DisableRepo,
+        ) {
             restore_comfy_requirement_for_repo(
                 &state,
                 &app,
@@ -7787,7 +7983,7 @@ async fn untrack_repo(
     let op_id = op.id.clone();
     let state_handle = app.state::<AppState>().inner().clone();
     tauri::async_runtime::spawn(async move {
-        let _ = run_untrack_repo(app, state_handle, installation, repo, op_id).await;
+        let _ = run_untrack_repo(app, state_handle, repo, op_id).await;
     });
     Ok(OperationStart {
         operation_id: op.id,
@@ -7797,7 +7993,6 @@ async fn untrack_repo(
 async fn run_untrack_repo(
     app: AppHandle,
     state: AppState,
-    installation: Installation,
     repo: ManagedRepo,
     operation_id: String,
 ) -> AppResult<()> {
@@ -7815,14 +8010,14 @@ async fn run_untrack_repo(
             format!("stopping management for {}", repo.display_name),
         );
         if repo.kind == RepoKind::Kitchen && repo.materialization_state.is_some() {
-            restore_comfy_requirement_for_repo(
+            log_operation(
                 &state,
                 &app,
                 &operation_id,
-                &installation,
-                &repo,
-            )
-            .await?;
+                "materialization",
+                "warn",
+                "stopping Kitchen source management without changing the currently installed comfy-kitchen runtime; Patcher will no longer reassert this source build",
+            );
         }
         state
             .db
@@ -8422,6 +8617,74 @@ async fn shutdown_managed_installations(state: AppState) -> AppResult<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod kitchen_management_tests {
+    use super::*;
+
+    #[test]
+    fn kitchen_uses_official_upstream_before_a_checkout_exists() {
+        assert_eq!(
+            default_remote_for_repo_kind(&RepoKind::Kitchen),
+            Some(kitchen::DEFAULT_KITCHEN_REPO_URL)
+        );
+        assert_eq!(default_remote_for_repo_kind(&RepoKind::Core), None);
+        assert_eq!(default_remote_for_repo_kind(&RepoKind::Frontend), None);
+        assert_eq!(default_remote_for_repo_kind(&RepoKind::CustomNode), None);
+    }
+
+    #[test]
+    fn installation_wide_order_keeps_kitchen_after_python_dependency_repos() {
+        assert!(installation_repo_priority(&RepoKind::Kitchen)
+            > installation_repo_priority(&RepoKind::CustomNode));
+        assert!(installation_repo_priority(&RepoKind::Kitchen)
+            > installation_repo_priority(&RepoKind::Core));
+    }
+
+    #[test]
+    fn managed_python_override_policy_is_immediate_only_for_single_python_repo_ops() {
+        assert!(should_reassert_managed_kitchen_override(
+            &RepoKind::Core,
+            ManagedPythonOverrideMode::Immediate
+        ));
+        assert!(should_reassert_managed_kitchen_override(
+            &RepoKind::CustomNode,
+            ManagedPythonOverrideMode::Immediate
+        ));
+        assert!(!should_reassert_managed_kitchen_override(
+            &RepoKind::Core,
+            ManagedPythonOverrideMode::Deferred
+        ));
+        assert!(!should_reassert_managed_kitchen_override(
+            &RepoKind::Kitchen,
+            ManagedPythonOverrideMode::Immediate
+        ));
+    }
+
+    #[test]
+    fn kitchen_untrack_preserves_runtime_but_remove_and_disable_restore_comfyui_requirement() {
+        assert!(kitchen_lifecycle_requires_comfy_restore(
+            &RepoKind::Kitchen,
+            true,
+            &OperationKind::UninstallRepo
+        ));
+        assert!(kitchen_lifecycle_requires_comfy_restore(
+            &RepoKind::Kitchen,
+            true,
+            &OperationKind::DisableRepo
+        ));
+        assert!(!kitchen_lifecycle_requires_comfy_restore(
+            &RepoKind::Kitchen,
+            true,
+            &OperationKind::UntrackRepo
+        ));
+        assert!(!kitchen_lifecycle_requires_comfy_restore(
+            &RepoKind::Kitchen,
+            false,
+            &OperationKind::UninstallRepo
+        ));
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

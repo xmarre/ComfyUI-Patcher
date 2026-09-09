@@ -163,6 +163,7 @@ Resolution rules:
 * PR URLs are resolved through the GitHub API
 * repo URLs resolve to the repository default branch
 * raw names are resolved against `origin` for existing managed repos
+* before a Kitchen checkout exists, bare Kitchen branch/tag/commit inputs resolve against the official `Comfy-Org/comfy-kitchen` upstream
 * branch names containing slashes are supported
 * target resolution is repo-kind aware: `core`, `frontend`, `kitchen`, or `custom_node`
 
@@ -311,7 +312,9 @@ The app does **not** execute arbitrary install scripts beyond the supported mani
 
 Comfy Kitchen is handled as a project materialization rather than generic Python dependency sync. When source management is enabled, Patcher initializes the checkout's required submodules, asks the checkout's normal PEP 517/setuptools build to produce a wheel, installs that wheel into the configured installation Python, and records source/runtime provenance separately. Upstream Comfy Kitchen remains responsible for CUDA/HIP compiler discovery and architecture policy.
 
-A Patcher-managed Kitchen source override is reasserted after Patcher-controlled core/custom-node dependency installs if those installs replace the active `comfy-kitchen` distribution.
+A Patcher-managed Kitchen source override is reasserted after Patcher-controlled core/custom-node dependency installs if those installs replace the active `comfy-kitchen` distribution. Installation-wide **Update all** and tracked-repository rematerialization defer that override work until ordinary Python dependency mutations finish, then finalize Kitchen once at the end instead of rebuilding it after every repository.
+
+**Untrack** stops source management/reassertion but deliberately leaves the currently installed Kitchen package untouched. **Restore ComfyUI Kitchen**, **Disable**, and **Uninstall** return runtime ownership to the `comfy-kitchen` requirement declared by the current managed ComfyUI checkout before deactivating/removing the source override.
 
 ---
 

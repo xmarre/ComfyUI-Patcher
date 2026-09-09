@@ -1506,7 +1506,7 @@ mod tests {
             VALUES ('i','Old','/old','python','/old/custom_nodes',NULL,'venv',1,'t','t');
             INSERT INTO managed_repos
                 (id,installation_id,kind,display_name,local_path,canonical_remote,current_head_sha,current_branch,is_detached,is_dirty,tracked_target_kind,tracked_target_input,tracked_target_resolved_sha,created_at,updated_at)
-            VALUES ('r','i','\"custom_node\"','old-node','/old/custom_nodes/old-node',NULL,'abc','main',0,0,NULL,NULL,NULL,'t','t');
+            VALUES ('r','i','"custom_node"','old-node','/old/custom_nodes/old-node',NULL,'abc','main',0,0,NULL,NULL,NULL,'t','t');
             "#,
         )
         .unwrap();

@@ -13,7 +13,8 @@ remain available on the [GitHub Releases](https://github.com/xmarre/ComfyUI-Patc
 
 ### Safety
 
-- Patcher reasserts an active managed Kitchen source build after Patcher-controlled Python dependency installs replace it, and blocks Start/Restart when active Kitchen runtime provenance is incoherent.
+- Patcher reasserts an active managed Kitchen source build after Patcher-controlled Python dependency installs replace it, defers that reassertion to one final Kitchen pass during installation-wide operations, and blocks Start/Restart when active Kitchen runtime provenance is incoherent.
+- Kitchen Untrack preserves the currently installed runtime while stopping future source reassertion; Disable/Uninstall restore the requirement owned by the current ComfyUI checkout first.
 - Kitchen rollback/checkpoint restore includes runtime materialization state; failed fresh source installs clean up only operation-owned state and preserve/restore retained pre-existing paths.
 
 ## [0.1.18] - 2026-08-30

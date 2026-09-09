@@ -142,18 +142,14 @@ pub fn plan_kitchen_wheel_install(
 
 pub async fn probe_kitchen_runtime(installation: &Installation) -> AppResult<KitchenRuntimeProbe> {
     let args = vec!["-c".to_string(), KITCHEN_PROBE_SCRIPT.to_string()];
-    let output = output_command(
-        &installation.python_exe,
-        &args,
-        Some(Path::new(&installation.comfy_root)),
-    )
-    .await
-    .map_err(|error| {
-        AppError::Dependency(format!(
-            "failed to inspect {KITCHEN_DISTRIBUTION_NAME} with managed Python '{}': {error}",
-            installation.python_exe
-        ))
-    })?;
+    let output = output_command(&installation.python_exe, &args, Some(Path::new(&installation.comfy_root)))
+        .await
+        .map_err(|error| {
+            AppError::Dependency(format!(
+                "failed to inspect {KITCHEN_DISTRIBUTION_NAME} with managed Python '{}': {error}",
+                installation.python_exe
+            ))
+        })?;
     if !output.status.success() {
         return Err(AppError::Dependency(format!(
             "failed to inspect {KITCHEN_DISTRIBUTION_NAME} with managed Python '{}': {}\n{}",
@@ -167,9 +163,7 @@ pub async fn probe_kitchen_runtime(installation: &Installation) -> AppResult<Kit
         .lines()
         .rev()
         .find(|line| !line.trim().is_empty())
-        .ok_or_else(|| {
-            AppError::Dependency("Kitchen runtime probe returned no JSON".to_string())
-        })?;
+        .ok_or_else(|| AppError::Dependency("Kitchen runtime probe returned no JSON".to_string()))?;
     let mut probe: KitchenRuntimeProbe = serde_json::from_str(payload).map_err(|error| {
         AppError::Dependency(format!(
             "Kitchen runtime probe returned invalid JSON: {error}; output: {stdout}"
@@ -192,10 +186,7 @@ fn one_built_wheel(build_dir: &Path) -> AppResult<PathBuf> {
     let mut wheels = std::fs::read_dir(build_dir)?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("whl"))
-        })
+        .filter(|path| path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("whl")))
         .collect::<Vec<_>>();
     wheels.sort();
     match wheels.len() {
@@ -244,7 +235,12 @@ pub async fn materialize_kitchen_project(
         ));
     }
     let repo_path = Path::new(&repo.local_path);
-    let head_sha = rev_parse(repo_path, "HEAD").await?;
+    let head_sha = rev_parse(repo_path, "HEAD").await?.ok_or_else(|| {
+        AppError::Git(
+            "cannot materialize Comfy Kitchen source: repository HEAD could not be resolved"
+                .to_string(),
+        )
+    })?;
     let build_id = uuid::Uuid::new_v4().to_string();
     let build_root = repo_path.join(".patcher-build");
     let build_dir = build_root.join(&build_id);
@@ -330,19 +326,27 @@ pub fn evaluate_materialization(
     repo: &ManagedRepo,
     probe: &KitchenRuntimeProbe,
 ) -> RepoMaterializationState {
-    let mut state = repo
-        .materialization_state
-        .clone()
-        .unwrap_or(RepoMaterializationState {
-            materialized_head_sha: None,
-            installed_version: None,
-            installed_origin: None,
-            artifact_sha256: None,
-            installed_record_sha256: None,
-            status: MaterializationStatus::Stale,
-            last_materialized_at: None,
-            last_error: None,
-        });
+    let mut state = repo.materialization_state.clone().unwrap_or(RepoMaterializationState {
+        materialized_head_sha: None,
+        installed_version: None,
+        installed_origin: None,
+        artifact_sha256: None,
+        installed_record_sha256: None,
+        status: MaterializationStatus::Stale,
+        last_materialized_at: None,
+        last_error: None,
+    });
+
+    let installed_artifact_mismatch = state
+        .artifact_sha256
+        .as_deref()
+        .zip(probe.direct_url_sha256.as_deref())
+        .is_some_and(|(expected, actual)| !expected.eq_ignore_ascii_case(actual));
+    let installed_source_origin_mismatch = state
+        .installed_origin
+        .as_deref()
+        .filter(|origin| origin.starts_with("file:"))
+        .is_some_and(|expected| probe.direct_url.as_deref() != Some(expected));
 
     let status = if !probe.distribution_present {
         MaterializationStatus::Missing
@@ -362,6 +366,8 @@ pub fn evaluate_materialization(
             .as_deref()
             .zip(probe.installed_version.as_deref())
             .is_some_and(|(expected, actual)| expected != actual)
+        || installed_artifact_mismatch
+        || installed_source_origin_mismatch
     {
         MaterializationStatus::Replaced
     } else if state.installed_record_sha256.is_some() && probe.record_sha256.is_none() {
@@ -611,6 +617,8 @@ mod tests {
         let probe = KitchenRuntimeProbe {
             distribution_present: true,
             installed_version: Some("0.2.33".to_string()),
+            direct_url: Some("file:///wheel.whl".to_string()),
+            direct_url_sha256: Some("a".repeat(64)),
             record_sha256: Some("record-a".to_string()),
             import_ok: true,
             ..Default::default()
@@ -627,13 +635,48 @@ mod tests {
         );
 
         repo.current_head_sha = Some("abc".to_string());
-        let replaced = KitchenRuntimeProbe {
+        let replaced_record = KitchenRuntimeProbe {
             record_sha256: Some("record-b".to_string()),
             ..probe.clone()
         };
         assert_eq!(
-            evaluate_materialization(&repo, &replaced).status,
+            evaluate_materialization(&repo, &replaced_record).status,
             MaterializationStatus::Replaced
+        );
+
+        let replaced_artifact = KitchenRuntimeProbe {
+            direct_url_sha256: Some("b".repeat(64)),
+            ..probe.clone()
+        };
+        assert_eq!(
+            evaluate_materialization(&repo, &replaced_artifact).status,
+            MaterializationStatus::Replaced
+        );
+
+        let replaced_origin = KitchenRuntimeProbe {
+            direct_url: None,
+            direct_url_sha256: None,
+            ..probe.clone()
+        };
+        assert_eq!(
+            evaluate_materialization(&repo, &replaced_origin).status,
+            MaterializationStatus::Replaced
+        );
+
+        let mut fallback_repo = repo.clone();
+        fallback_repo
+            .materialization_state
+            .as_mut()
+            .unwrap()
+            .installed_origin = Some("/venv/site-packages".to_string());
+        let fallback_probe = KitchenRuntimeProbe {
+            direct_url: None,
+            direct_url_sha256: None,
+            ..probe
+        };
+        assert_eq!(
+            evaluate_materialization(&fallback_repo, &fallback_probe).status,
+            MaterializationStatus::Current
         );
     }
 

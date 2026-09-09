@@ -796,7 +796,7 @@ export default function RepoCard({
         <div className="stack">
           <div className="muted small">
             {repo.kind === "kitchen" && repo.materializationState
-              ? "Before Kitchen is uninstalled, disabled, or untracked, Patcher first restores the comfy-kitchen requirement declared by the current ComfyUI checkout. Lifecycle actions do not create new checkpoints."
+              ? "Uninstall and Disable first restore the comfy-kitchen requirement declared by the current ComfyUI checkout. Untrack instead leaves the currently installed runtime unchanged and only stops future Patcher source reassertion. Lifecycle actions do not create new checkpoints."
               : "Lifecycle actions do not create new checkpoints. They remove or hide the repo directly, and untrack also suppresses future reconcile rediscovery for this path."}
           </div>
           <div className="row gap repo-action-wrap">
