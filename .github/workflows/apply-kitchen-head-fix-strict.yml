@@ -35,6 +35,8 @@ jobs:
           from pathlib import Path
           path = Path('tools/apply_kitchen_hostile_review_fixes.py')
           text = path.read_text(encoding='utf-8')
+
+          # Narrow the checkpoint signature transformation to the Kitchen-aware helper.
           old = '''replace_block(
               "src-tauri/src/lib.rs",
               ''' + "'''" + '''    checkpoint: &RepoCheckpoint,
@@ -71,7 +73,116 @@ jobs:
           )'''
           if text.count(old) != 1:
               raise SystemExit(f'expected one broad checkpoint transform, found {text.count(old)}')
-          path.write_text(text.replace(old, new, 1), encoding='utf-8', newline='\n')
+          text = text.replace(old, new, 1)
+
+          # Replace the lifecycle part of the transformation script with function-specific anchors.
+          start_marker = '# 10. Kitchen lifecycle policy: untrack leaves the currently installed runtime untouched.'
+          end_marker = '# 11. Pure regression tests pin the orchestration/lifecycle invariants.'
+          start = text.index(start_marker)
+          end = text.index(end_marker)
+          lifecycle = r'''# 10. Kitchen lifecycle policy: untrack leaves the currently installed runtime untouched.
+          insert_lifecycle = ''' + "'''" + '''fn kitchen_lifecycle_requires_comfy_restore(
+              kind: &RepoKind,
+              has_materialization: bool,
+              operation_kind: &OperationKind,
+          ) -> bool {
+              *kind == RepoKind::Kitchen
+                  && has_materialization
+                  && matches!(
+                      operation_kind,
+                      OperationKind::UninstallRepo | OperationKind::DisableRepo
+                  )
+          }
+
+          #[tauri::command]
+          async fn uninstall_repo(''' + "'''" + '''
+          replace_block(
+              "src-tauri/src/lib.rs",
+              ''' + "'''" + '''#[tauri::command]
+          async fn uninstall_repo(''' + "'''" + ''',
+              insert_lifecycle,
+              "Kitchen lifecycle policy helper",
+          )
+          replace_block(
+              "src-tauri/src/lib.rs",
+              ''' + "'''" + '''            format!("uninstalling {}", repo.display_name),
+                  );
+                  if repo.kind == RepoKind::Kitchen && repo.materialization_state.is_some() {''' + "'''" + ''',
+              ''' + "'''" + '''            format!("uninstalling {}", repo.display_name),
+                  );
+                  if kitchen_lifecycle_requires_comfy_restore(
+                      &repo.kind,
+                      repo.materialization_state.is_some(),
+                      &OperationKind::UninstallRepo,
+                  ) {''' + "'''" + ''',
+              "Kitchen uninstall restore policy",
+          )
+          replace_block(
+              "src-tauri/src/lib.rs",
+              ''' + "'''" + '''                repo.display_name,
+                          disabled_path.to_string_lossy()
+                      ),
+                  );
+                  if repo.kind == RepoKind::Kitchen && repo.materialization_state.is_some() {''' + "'''" + ''',
+              ''' + "'''" + '''                repo.display_name,
+                          disabled_path.to_string_lossy()
+                      ),
+                  );
+                  if kitchen_lifecycle_requires_comfy_restore(
+                      &repo.kind,
+                      repo.materialization_state.is_some(),
+                      &OperationKind::DisableRepo,
+                  ) {''' + "'''" + ''',
+              "Kitchen disable restore policy",
+          )
+          replace_block(
+              "src-tauri/src/lib.rs",
+              ''' + "'''" + '''        let _ = run_untrack_repo(app, state_handle, installation, repo, op_id).await;''' + "'''" + ''',
+              ''' + "'''" + '''        let _ = run_untrack_repo(app, state_handle, repo, op_id).await;''' + "'''" + ''',
+              "Kitchen untrack spawn",
+          )
+          replace_block(
+              "src-tauri/src/lib.rs",
+              ''' + "'''" + '''async fn run_untrack_repo(
+              app: AppHandle,
+              state: AppState,
+              installation: Installation,
+              repo: ManagedRepo,
+              operation_id: String,
+          ) -> AppResult<()> {''' + "'''" + ''',
+              ''' + "'''" + '''async fn run_untrack_repo(
+              app: AppHandle,
+              state: AppState,
+              repo: ManagedRepo,
+              operation_id: String,
+          ) -> AppResult<()> {''' + "'''" + ''',
+              "Kitchen untrack signature",
+          )
+          old_untrack_restore = ''' + "'''" + '''        if repo.kind == RepoKind::Kitchen && repo.materialization_state.is_some() {
+              restore_comfy_requirement_for_repo(
+                  &state,
+                  &app,
+                  &operation_id,
+                  &installation,
+                  &repo,
+              )
+              .await?;
+          }''' + "'''" + '''
+          new_untrack_restore = ''' + "'''" + '''        if repo.kind == RepoKind::Kitchen && repo.materialization_state.is_some() {
+              log_operation(
+                  &state,
+                  &app,
+                  &operation_id,
+                  "materialization",
+                  "warn",
+                  "stopping Kitchen source management without changing the currently installed comfy-kitchen runtime; Patcher will no longer reassert this source build",
+              );
+          }''' + "'''" + '''
+          replace_block("src-tauri/src/lib.rs", old_untrack_restore, new_untrack_restore, "Kitchen untrack runtime preservation")
+
+          '''
+          text = text[:start] + lifecycle + text[end:]
+          path.write_text(text, encoding='utf-8', newline='\n')
           PY
           python tools/apply_kitchen_hostile_review_fixes.py
           grep -Fq 'cannot materialize Comfy Kitchen source: repository HEAD could not be resolved' src-tauri/src/kitchen.rs
