@@ -1,0 +1,33 @@
+name: Apply Kitchen implementation patch
+
+on:
+  push:
+    branches:
+      - feature/comfy-kitchen-management
+    paths:
+      - tools/comfy-kitchen-lib.patch
+      - .github/workflows/apply-kitchen-implementation-patch.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/comfy-kitchen-management
+          fetch-depth: 0
+      - name: Apply checked patch
+        run: |
+          git apply --check tools/comfy-kitchen-lib.patch
+          git apply tools/comfy-kitchen-lib.patch
+          rm tools/comfy-kitchen-lib.patch
+          rm .github/workflows/apply-kitchen-implementation-patch.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "Wire Comfy Kitchen repository discovery"
+          git push origin HEAD:feature/comfy-kitchen-management
