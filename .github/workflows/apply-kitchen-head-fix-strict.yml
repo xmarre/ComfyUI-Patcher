@@ -1,4 +1,4 @@
-name: Apply Kitchen HEAD provenance fix strictly
+name: Apply Kitchen HEAD provenance and migration fixture fixes strictly
 
 on:
   push:
@@ -19,7 +19,7 @@ jobs:
         with:
           ref: feature/comfy-kitchen-management
           fetch-depth: 0
-      - name: Apply minimal fix from clean implementation file
+      - name: Apply minimal source and fixture fixes
         shell: bash
         run: |
           set -euo pipefail
@@ -27,8 +27,8 @@ jobs:
           python - <<'PY'
           from pathlib import Path
 
-          path = Path("src-tauri/src/kitchen.rs")
-          text = path.read_text(encoding="utf-8")
+          kitchen = Path("src-tauri/src/kitchen.rs")
+          text = kitchen.read_text(encoding="utf-8")
           old = '    let head_sha = rev_parse(repo_path, "HEAD").await?;'
           new = '''    let head_sha = rev_parse(repo_path, "HEAD").await?.ok_or_else(|| {
               AppError::Git(
@@ -38,11 +38,20 @@ jobs:
           })?;'''
           if text.count(old) != 1:
               raise SystemExit(f"expected exactly one HEAD resolution anchor, found {text.count(old)}")
-          path.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
+          kitchen.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
+
+          db = Path("src-tauri/src/db.rs")
+          raw = db.read_bytes()
+          old_fixture = b"'\\\"custom_node\\\"'"
+          new_fixture = b"'\"custom_node\"'"
+          if raw.count(old_fixture) != 1:
+              raise SystemExit(f"expected exactly one invalid legacy kind fixture, found {raw.count(old_fixture)}")
+          db.write_bytes(raw.replace(old_fixture, new_fixture, 1))
           PY
           grep -Fq 'let head_sha = rev_parse(repo_path, "HEAD").await?.ok_or_else(|| {' src-tauri/src/kitchen.rs
           grep -Fq 'cannot materialize Comfy Kitchen source: repository HEAD could not be resolved' src-tauri/src/kitchen.rs
-          git diff --check -- src-tauri/src/kitchen.rs
+          grep -Fq "VALUES ('r','i','\"custom_node\"','old-node'" src-tauri/src/db.rs
+          git diff --check -- src-tauri/src/kitchen.rs src-tauri/src/db.rs
       - name: Validate ordinary and locked Rust paths
         shell: bash
         run: |
@@ -55,17 +64,17 @@ jobs:
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
           cargo build --locked --manifest-path src-tauri/Cargo.toml
           git diff --exit-code -- src-tauri/Cargo.lock
-      - name: Commit only the validated fix
+      - name: Commit only the validated fixes
         shell: bash
         run: |
           set -euo pipefail
           git rm .github/workflows/apply-kitchen-head-fix-strict.yml
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add src-tauri/src/kitchen.rs
+          git add src-tauri/src/kitchen.rs src-tauri/src/db.rs
           git diff --cached --check
           changed="$(git diff --cached --name-only | sort)"
-          expected="$(printf '%s\n' '.github/workflows/apply-kitchen-head-fix-strict.yml' 'src-tauri/src/kitchen.rs' | sort)"
+          expected="$(printf '%s\n' '.github/workflows/apply-kitchen-head-fix-strict.yml' 'src-tauri/src/db.rs' 'src-tauri/src/kitchen.rs' | sort)"
           test "$changed" = "$expected"
-          git commit -m "Require resolvable Kitchen HEAD before materialization"
+          git commit -m "Fix Kitchen provenance and migration compatibility test"
           git push origin HEAD:feature/comfy-kitchen-management
