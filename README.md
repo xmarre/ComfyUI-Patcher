@@ -456,7 +456,7 @@ When enabled, Patcher accepts targets from the official `https://github.com/Comf
 
 **Restore ComfyUI Kitchen** reinstalls the exact `comfy-kitchen` requirement declared by the current ComfyUI checkout, clears the tracked Kitchen source target, and leaves the source checkout on disk. A later **Update all** therefore does not silently reactivate the source override. Rollback/checkpoint restore can return to the prior source-managed runtime.
 
-Before an active source-managed Kitchen checkout is disabled, untracked, or uninstalled, Patcher restores the ComfyUI-declared runtime requirement first. Start/Restart also refuse to launch when an active managed source override is no longer coherent with its recorded source revision/runtime provenance.
+**Untrack** leaves the currently installed Kitchen runtime unchanged and only stops Patcher source reassertion. **Disable** and **Uninstall** restore the ComfyUI-declared runtime requirement before moving/removing the source checkout. Start/Restart also refuse to launch when an active managed source override is no longer coherent with its recorded source revision/runtime provenance.
 
 ### 5. Install or patch a custom node manually
 
@@ -494,8 +494,8 @@ When a managed frontend is configured, **Start / Restart** inject the frontend d
 1. **Core ComfyUI must be git-backed for patch / update / rollback.**
    A non-git core install can still be registered, but git-based core mutation is unavailable until the install is git-backed.
 
-2. **Raw branch / tag / SHA inputs only make sense for existing managed repos.**
-   A brand-new install flow generally needs a repository URL or PR URL so the app knows what to clone.
+2. **Raw branch / tag / SHA inputs normally require an existing managed repo.**
+   A brand-new install flow generally needs a repository URL or PR URL so the app knows what to clone. Comfy Kitchen is the explicit exception: before its checkout exists, bare refs resolve against the fixed official upstream.
 
 3. **Tracked updates preserve the user’s chosen target model.**
    Direct targets and stacked overlays are both valid tracked states.
@@ -562,6 +562,7 @@ When a managed frontend is configured, **Start / Restart** inject the frontend d
 * verify the recorded materialized source HEAD and installed-runtime provenance match the active source build
 * run a Patcher-controlled core/custom-node dependency sync that replaces `comfy-kitchen` and verify the active Kitchen source override is reasserted
 * use **Restore ComfyUI Kitchen** and verify the current ComfyUI requirement is installed, source tracking is cleared, the checkout remains on disk, and **Update all** does not reactivate it
+* use **Untrack** and verify the currently installed Kitchen runtime is left unchanged while future Patcher source reassertion stops
 * rollback/restore a Kitchen checkpoint and verify both checkout/tracked state and runtime ownership are restored coherently
 * replace or remove the installed source runtime out of band and verify Start/Restart refuses an incoherent active override
 * force a fresh Kitchen source install/materialization failure and verify only operation-owned checkout/DB state is cleaned up while any retained pre-existing path is restored
