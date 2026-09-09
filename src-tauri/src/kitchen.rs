@@ -142,14 +142,18 @@ pub fn plan_kitchen_wheel_install(
 
 pub async fn probe_kitchen_runtime(installation: &Installation) -> AppResult<KitchenRuntimeProbe> {
     let args = vec!["-c".to_string(), KITCHEN_PROBE_SCRIPT.to_string()];
-    let output = output_command(&installation.python_exe, &args, Some(Path::new(&installation.comfy_root)))
-        .await
-        .map_err(|error| {
-            AppError::Dependency(format!(
-                "failed to inspect {KITCHEN_DISTRIBUTION_NAME} with managed Python '{}': {error}",
-                installation.python_exe
-            ))
-        })?;
+    let output = output_command(
+        &installation.python_exe,
+        &args,
+        Some(Path::new(&installation.comfy_root)),
+    )
+    .await
+    .map_err(|error| {
+        AppError::Dependency(format!(
+            "failed to inspect {KITCHEN_DISTRIBUTION_NAME} with managed Python '{}': {error}",
+            installation.python_exe
+        ))
+    })?;
     if !output.status.success() {
         return Err(AppError::Dependency(format!(
             "failed to inspect {KITCHEN_DISTRIBUTION_NAME} with managed Python '{}': {}\n{}",
@@ -163,7 +167,9 @@ pub async fn probe_kitchen_runtime(installation: &Installation) -> AppResult<Kit
         .lines()
         .rev()
         .find(|line| !line.trim().is_empty())
-        .ok_or_else(|| AppError::Dependency("Kitchen runtime probe returned no JSON".to_string()))?;
+        .ok_or_else(|| {
+            AppError::Dependency("Kitchen runtime probe returned no JSON".to_string())
+        })?;
     let mut probe: KitchenRuntimeProbe = serde_json::from_str(payload).map_err(|error| {
         AppError::Dependency(format!(
             "Kitchen runtime probe returned invalid JSON: {error}; output: {stdout}"
@@ -186,7 +192,10 @@ fn one_built_wheel(build_dir: &Path) -> AppResult<PathBuf> {
     let mut wheels = std::fs::read_dir(build_dir)?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("whl")))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("whl"))
+        })
         .collect::<Vec<_>>();
     wheels.sort();
     match wheels.len() {
@@ -321,16 +330,19 @@ pub fn evaluate_materialization(
     repo: &ManagedRepo,
     probe: &KitchenRuntimeProbe,
 ) -> RepoMaterializationState {
-    let mut state = repo.materialization_state.clone().unwrap_or(RepoMaterializationState {
-        materialized_head_sha: None,
-        installed_version: None,
-        installed_origin: None,
-        artifact_sha256: None,
-        installed_record_sha256: None,
-        status: MaterializationStatus::Stale,
-        last_materialized_at: None,
-        last_error: None,
-    });
+    let mut state = repo
+        .materialization_state
+        .clone()
+        .unwrap_or(RepoMaterializationState {
+            materialized_head_sha: None,
+            installed_version: None,
+            installed_origin: None,
+            artifact_sha256: None,
+            installed_record_sha256: None,
+            status: MaterializationStatus::Stale,
+            last_materialized_at: None,
+            last_error: None,
+        });
 
     let status = if !probe.distribution_present {
         MaterializationStatus::Missing
