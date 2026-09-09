@@ -31,6 +31,48 @@ jobs:
             src-tauri/src/kitchen.rs \
             src-tauri/src/lib.rs \
             src/components/RepoCard.tsx
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('tools/apply_kitchen_hostile_review_fixes.py')
+          text = path.read_text(encoding='utf-8')
+          old = '''replace_block(
+              "src-tauri/src/lib.rs",
+              ''' + "'''" + '''    checkpoint: &RepoCheckpoint,
+              restore_stash: bool,
+          ) -> AppResult<()> {''' + "'''" + ''',
+              ''' + "'''" + '''    checkpoint: &RepoCheckpoint,
+              restore_stash: bool,
+              force_kitchen_runtime_rebuild: bool,
+          ) -> AppResult<()> {''' + "'''" + ''',
+              "Kitchen checkpoint recovery signature",
+          )'''
+          new = '''replace_block(
+              "src-tauri/src/lib.rs",
+              ''' + "'''" + '''async fn restore_checkpoint_with_kitchen_runtime(
+              state: &AppState,
+              app: &AppHandle,
+              operation_id: &str,
+              installation: &Installation,
+              repo: &ManagedRepo,
+              checkpoint: &RepoCheckpoint,
+              restore_stash: bool,
+          ) -> AppResult<()> {''' + "'''" + ''',
+              ''' + "'''" + '''async fn restore_checkpoint_with_kitchen_runtime(
+              state: &AppState,
+              app: &AppHandle,
+              operation_id: &str,
+              installation: &Installation,
+              repo: &ManagedRepo,
+              checkpoint: &RepoCheckpoint,
+              restore_stash: bool,
+              force_kitchen_runtime_rebuild: bool,
+          ) -> AppResult<()> {''' + "'''" + ''',
+              "Kitchen checkpoint recovery signature",
+          )'''
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one broad checkpoint transform, found {text.count(old)}')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8', newline='\n')
+          PY
           python tools/apply_kitchen_hostile_review_fixes.py
           grep -Fq 'cannot materialize Comfy Kitchen source: repository HEAD could not be resolved' src-tauri/src/kitchen.rs
           grep -Fq 'ManagedPythonOverrideMode::Deferred' src-tauri/src/lib.rs
