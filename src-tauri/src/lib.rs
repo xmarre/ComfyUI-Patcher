@@ -5051,6 +5051,48 @@ async fn run_install_or_patch_kitchen(
     Ok(())
 }
 
+async fn create_kitchen_runtime_checkpoint(
+    state: &AppState,
+    installation: &Installation,
+    repo: &ManagedRepo,
+    operation_id: &str,
+) -> AppResult<RepoCheckpoint> {
+    if repo.kind != RepoKind::Kitchen {
+        return Err(AppError::InvalidInput(
+            "Kitchen runtime checkpoint requires a Kitchen repository".to_string(),
+        ));
+    }
+    let path = Path::new(&repo.local_path);
+    let status = inspect_repo(path).await?;
+    let head = status
+        .head_sha
+        .clone()
+        .ok_or_else(|| AppError::Git("Kitchen repository has no HEAD".to_string()))?;
+    let operation = state
+        .db
+        .get_operation(operation_id)?
+        .ok_or_else(|| AppError::NotFound("operation not found".to_string()))?;
+    let (label, reason) = checkpoint_label_and_reason(&operation, repo);
+    let dependency_state =
+        build_repo_dependency_state(installation, repo, path, &status.changed_files);
+    state.db.create_checkpoint(
+        &repo.id,
+        operation_id,
+        &head,
+        status.branch.as_deref(),
+        status.is_detached,
+        true,
+        repo.tracked_target_kind.as_ref(),
+        repo.tracked_target_input.as_deref(),
+        repo.tracked_target_resolved_sha.as_deref(),
+        false,
+        None,
+        Some(&label),
+        Some(&reason),
+        dependency_state.as_ref(),
+    )
+}
+
 #[tauri::command]
 async fn restore_comfy_managed_kitchen(
     app: AppHandle,
@@ -5112,14 +5154,62 @@ async fn run_restore_comfy_managed_kitchen(
     let repo_lock = state.repo_lock(&repo.id).await;
     let _guard = repo_lock.lock().await;
     let result = async {
-        restore_comfy_requirement_for_repo(
+        let checkpoint = create_kitchen_runtime_checkpoint(
+            &state,
+            &installation,
+            &repo,
+            &operation_id,
+        )
+        .await?;
+        log_operation(
             &state,
             &app,
             &operation_id,
-            &installation,
-            &repo,
-        )
-        .await?;
+            "checkpoint",
+            "info",
+            format!(
+                "checkpoint {} created before returning Kitchen runtime ownership to ComfyUI",
+                checkpoint.id
+            ),
+        );
+
+        let mutation = async {
+            restore_comfy_requirement_for_repo(
+                &state,
+                &app,
+                &operation_id,
+                &installation,
+                &repo,
+            )
+            .await?;
+            // Returning runtime ownership to ComfyUI is a durable state transition.
+            // Clear the tracked source target as well as materialization provenance so
+            // Update all cannot silently reactivate the source override later. The
+            // checkout remains on disk and can be explicitly adopted again through
+            // Install / Patch source.
+            state.db.set_repo_tracked_state(&repo.id, None, None)?;
+            refresh_repo_state(&state, &repo.id).await?;
+            Ok::<(), AppError>(())
+        }
+        .await;
+
+        if let Err(error) = mutation {
+            let restore_result = restore_checkpoint_with_kitchen_runtime(
+                &state,
+                &app,
+                &operation_id,
+                &installation,
+                &repo,
+                &checkpoint,
+                false,
+            )
+            .await;
+            return match restore_result {
+                Ok(()) => Err(error),
+                Err(restore_error) => Err(restore_checkpoint_error(error, restore_error)),
+            };
+        }
+
         maybe_restart_installation(
             &state,
             &app,
@@ -5128,16 +5218,19 @@ async fn run_restore_comfy_managed_kitchen(
             input.restart_after_success,
         )
         .await?;
-        state
-            .db
-            .finish_operation(&operation_id, OperationStatus::Succeeded, None, None)?;
+        state.db.finish_operation(
+            &operation_id,
+            OperationStatus::Succeeded,
+            None,
+            Some(&checkpoint.id),
+        )?;
         log_operation(
             &state,
             &app,
             &operation_id,
             "done",
             "info",
-            "restored the ComfyUI-managed comfy-kitchen requirement",
+            "restored the ComfyUI-managed comfy-kitchen requirement and deactivated tracked source override management",
         );
         Ok::<(), AppError>(())
     }

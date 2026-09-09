@@ -615,7 +615,7 @@ export default function RepoCard({
               void runLocalAction(async () => {
                 if (
                   !window.confirm(
-                    "Restore the comfy-kitchen requirement declared by the current ComfyUI checkout? The source checkout stays on disk, but its built runtime override is deactivated."
+                    "Restore the comfy-kitchen requirement declared by the current ComfyUI checkout? The source checkout stays on disk, but its tracked source target and built runtime override are deactivated. Use Install / Patch source to enable source management again."
                   )
                 ) {
                   return;
