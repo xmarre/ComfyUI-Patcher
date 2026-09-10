@@ -1,0 +1,58 @@
+name: Validate Kitchen lifecycle recovery
+
+on:
+  push:
+    branches:
+      - feature/comfy-kitchen-management
+    paths:
+      - .github/workflows/fix-kitchen-lifecycle-recovery.yml
+
+permissions:
+  contents: write
+
+jobs:
+  validate-and-commit:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/comfy-kitchen-management
+          fetch-depth: 0
+
+      - name: Apply exact lifecycle transform
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/fix_kitchen_lifecycle_recovery.py
+          cargo fmt --manifest-path src-tauri/Cargo.toml
+          grep -Fq 'recover_kitchen_source_after_lifecycle_failure' src-tauri/src/lib.rs
+          grep -Fq 'Uninstall stages the checkout outside its managed sibling path' README.md
+          git diff --check -- CHANGELOG.md README.md src-tauri/src/lib.rs
+
+      - name: Validate permanent CI command path
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+          lock_before="$(git hash-object src-tauri/Cargo.lock)"
+          cargo test --manifest-path src-tauri/Cargo.toml
+          cargo build --manifest-path src-tauri/Cargo.toml
+          git checkout -- src-tauri/Cargo.lock
+          test "$(git hash-object src-tauri/Cargo.lock)" = "$lock_before"
+          git diff --exit-code -- src-tauri/Cargo.lock
+
+      - name: Commit validated source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/fix-kitchen-lifecycle-recovery.yml
+          git rm tools/fix_kitchen_lifecycle_recovery.py
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add CHANGELOG.md README.md src-tauri/src/lib.rs
+          test -z "$(git diff --cached --name-only | grep '^src-tauri/Cargo.lock$' || true)"
+          git diff --cached --check
+          git commit -m "Recover Kitchen source runtime after lifecycle failures"
+          git push origin HEAD:feature/comfy-kitchen-management
