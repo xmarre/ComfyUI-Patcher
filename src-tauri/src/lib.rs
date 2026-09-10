@@ -8,8 +8,8 @@ mod kitchen;
 mod models;
 mod process;
 mod registry;
-mod state;
 mod stack;
+mod state;
 mod util;
 
 use crate::deps::{execute_dependency_sync, plan_dependency_sync};
@@ -17,11 +17,10 @@ use crate::errors::{AppError, AppResult};
 use crate::git::{
     apply_stash, apply_stash_keep, canonicalize_remote, checkout_paths, clean_untracked_paths,
     clone_repo, commits_between, diff_name_status, ensure_clean_or_apply_strategy, fetch_origin,
-    fetch_refspec, force_fetch_refspec, inspect_repo, is_git_repo,
-    join_custom_node_path, merge_abort, merge_no_ff, preview_sequential_merge,
-    remote_branches_pointing_at, reset_hard, rev_parse, run_git_allow_fail, submodule_update,
-    switch_branch, switch_detached, unmerged_paths, SequentialMergePreview,
-    validate_custom_node_dir_name, RepoStatus,
+    fetch_refspec, force_fetch_refspec, inspect_repo, is_git_repo, join_custom_node_path,
+    merge_abort, merge_no_ff, preview_sequential_merge, remote_branches_pointing_at, reset_hard,
+    rev_parse, run_git_allow_fail, submodule_update, switch_branch, switch_detached,
+    unmerged_paths, validate_custom_node_dir_name, RepoStatus, SequentialMergePreview,
 };
 use crate::models::*;
 use crate::stack::{overlay_dependency_index, validate_overlay_stack};
@@ -132,7 +131,10 @@ fn ensure_repo_lifecycle_supported(repo: &ManagedRepo, action: &str) -> AppResul
     Ok(())
 }
 
-fn checkpoint_label_and_reason(operation: &OperationRecord, repo: &ManagedRepo) -> (String, String) {
+fn checkpoint_label_and_reason(
+    operation: &OperationRecord,
+    repo: &ManagedRepo,
+) -> (String, String) {
     let reason = operation
         .requested_input
         .clone()
@@ -149,7 +151,10 @@ fn checkpoint_label_and_reason(operation: &OperationRecord, repo: &ManagedRepo) 
             format!("Before installing {}", reason)
         }
         OperationKind::RestoreComfyManagedKitchen => {
-            format!("Before restoring {} to the ComfyUI requirement", repo.display_name)
+            format!(
+                "Before restoring {} to the ComfyUI requirement",
+                repo.display_name
+            )
         }
         OperationKind::UpdateRepo
         | OperationKind::UpdateAll
@@ -164,7 +169,9 @@ fn checkpoint_label_and_reason(operation: &OperationRecord, repo: &ManagedRepo) 
         OperationKind::UntrackRepo => format!("Before untracking {}", repo.display_name),
         OperationKind::StartInstallation
         | OperationKind::StopInstallation
-        | OperationKind::RestartInstallation => format!("Before lifecycle action on {}", repo.display_name),
+        | OperationKind::RestartInstallation => {
+            format!("Before lifecycle action on {}", repo.display_name)
+        }
     };
     (label, reason)
 }
@@ -217,11 +224,13 @@ async fn ensure_repo_clean_after_patcher_mutation(path: &Path, context: &str) ->
     )))
 }
 
-
 fn is_frontend_lockfile_path(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
     let trimmed = normalized.trim_start_matches("./");
-    matches!(trimmed, "package-lock.json" | "pnpm-lock.yaml" | "yarn.lock")
+    matches!(
+        trimmed,
+        "package-lock.json" | "pnpm-lock.yaml" | "yarn.lock"
+    )
 }
 
 async fn restore_frontend_lockfile_artifacts(path: &Path) -> AppResult<Vec<String>> {
@@ -367,8 +376,10 @@ async fn discover_repositories_for_installation(
         && is_git_repo(&kitchen_root).await
     {
         let status = inspect_repo(&kitchen_root).await?;
-        let expected_remote = canonicalize_remote(kitchen::DEFAULT_KITCHEN_REPO_URL)
-            .ok_or_else(|| AppError::InvalidInput("invalid built-in Comfy Kitchen repository URL".to_string()))?;
+        let expected_remote =
+            canonicalize_remote(kitchen::DEFAULT_KITCHEN_REPO_URL).ok_or_else(|| {
+                AppError::InvalidInput("invalid built-in Comfy Kitchen repository URL".to_string())
+            })?;
         if status.origin_url.as_deref() == Some(expected_remote.as_str()) {
             let repo = state.db.upsert_repo(
                 &installation.id,
@@ -392,10 +403,7 @@ async fn discover_repositories_for_installation(
             let entry = entry?;
             let path = entry.path();
             let path_string = path.to_string_lossy().to_string();
-            if ignored_paths.contains(&path_string)
-                || !path.is_dir()
-                || !has_git_marker(&path)
-            {
+            if ignored_paths.contains(&path_string) || !path.is_dir() || !has_git_marker(&path) {
                 continue;
             }
             candidates.push(path);
@@ -566,7 +574,9 @@ fn dependency_manifest_files(repo: &ManagedRepo, repo_path: &Path) -> Vec<String
         .iter()
         .filter_map(|relative| {
             let candidate = repo_path.join(relative);
-            candidate.exists().then(|| candidate.to_string_lossy().to_string())
+            candidate
+                .exists()
+                .then(|| candidate.to_string_lossy().to_string())
         })
         .collect()
 }
@@ -584,10 +594,7 @@ fn dependency_manifest_candidates(repo_kind: &RepoKind) -> &'static [&'static st
     }
 }
 
-fn relevant_dependency_changes(
-    repo: &ManagedRepo,
-    changed_files: &[String],
-) -> Vec<String> {
+fn relevant_dependency_changes(repo: &ManagedRepo, changed_files: &[String]) -> Vec<String> {
     let manifest_candidates = dependency_manifest_candidates(&repo.kind);
     changed_files
         .iter()
@@ -780,12 +787,8 @@ async fn hydrate_installation_detail(
         .get_installation(installation_id)?
         .ok_or_else(|| AppError::NotFound("installation not found".to_string()))?;
     let (core_repo, frontend_repo, kitchen_repo, discovered_custom_nodes) =
-        discover_repositories_for_installation(
-            state,
-            &installation,
-            prune_missing_custom_nodes,
-        )
-        .await?;
+        discover_repositories_for_installation(state, &installation, prune_missing_custom_nodes)
+            .await?;
     let mut discovered_statuses = HashMap::new();
     if let Some(repo) = core_repo {
         discovered_statuses.insert(repo.repo.id.clone(), repo.status);
@@ -804,7 +807,9 @@ async fn hydrate_installation_detail(
     // rebuilds them from the freshly inspected repository state below.
     detail.warnings.clear();
     let kitchen_runtime = kitchen::probe_kitchen_runtime(&installation).await?;
-    state.db.set_kitchen_runtime(installation_id, &kitchen_runtime)?;
+    state
+        .db
+        .set_kitchen_runtime(installation_id, &kitchen_runtime)?;
     detail.kitchen_runtime = Some(kitchen_runtime.clone());
 
     if let Some(repo) = detail.core_repo.take() {
@@ -904,15 +909,17 @@ fn stack_preview_items(tracked_state: &TrackedRepoState) -> Vec<RepoStackPreview
         enabled: true,
         status: None,
     }];
-    items.extend(tracked_state.overlays.iter().map(|overlay| RepoStackPreviewItem {
-        kind: "overlay".to_string(),
-        label: overlay.summary_label.clone(),
-        enabled: overlay.enabled,
-        status: overlay
-            .last_apply_status
-            .as_ref()
-            .map(|status| serde_json::to_string(status).unwrap_or_default())
-            .map(|value| value.trim_matches('"').to_string()),
+    items.extend(tracked_state.overlays.iter().map(|overlay| {
+        RepoStackPreviewItem {
+            kind: "overlay".to_string(),
+            label: overlay.summary_label.clone(),
+            enabled: overlay.enabled,
+            status: overlay
+                .last_apply_status
+                .as_ref()
+                .map(|status| serde_json::to_string(status).unwrap_or_default())
+                .map(|value| value.trim_matches('"').to_string()),
+        }
     }));
     items
 }
@@ -1010,7 +1017,8 @@ async fn incoming_write_paths_for_tracked_state(
     current_head: &str,
 ) -> AppResult<HashSet<String>> {
     let path = Path::new(&repo.local_path);
-    let base_resolved = resolve_existing_base_target(state, installation, repo, tracked_state).await?;
+    let base_resolved =
+        resolve_existing_base_target(state, installation, repo, tracked_state).await?;
     let base_ref = ensure_preview_target_available(path, &base_resolved).await?;
     let mut write_paths = HashSet::new();
 
@@ -1083,9 +1091,14 @@ async fn preflight_abort_strategy_for_tracked_state(
         .head_sha
         .as_deref()
         .ok_or_else(|| AppError::Git("repository has no HEAD".to_string()))?;
-    let incoming_write_paths =
-        incoming_write_paths_for_tracked_state(state, installation, repo, tracked_state, current_head)
-            .await?;
+    let incoming_write_paths = incoming_write_paths_for_tracked_state(
+        state,
+        installation,
+        repo,
+        tracked_state,
+        current_head,
+    )
+    .await?;
 
     let mut colliding_paths = status
         .untracked_files
@@ -1123,7 +1136,11 @@ fn sequential_stack_conflict_message(conflict: &SequentialStackConflict) -> Stri
     } else {
         format!(
             "earlier overlay{} {}",
-            if conflict.prior_prs.len() == 1 { "" } else { "s" },
+            if conflict.prior_prs.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
             conflict
                 .prior_prs
                 .iter()
@@ -1160,7 +1177,11 @@ async fn probe_sequential_stack_conflicts(
     let mut accumulated_head = ensure_preview_target_available(path, &base_resolved).await?;
     let mut prior_prs = Vec::new();
 
-    for overlay in tracked_state.overlays.iter().filter(|overlay| overlay.enabled) {
+    for overlay in tracked_state
+        .overlays
+        .iter()
+        .filter(|overlay| overlay.enabled)
+    {
         let overlay_resolved = resolve_stored_overlay_target(overlay);
         let incoming_head = ensure_preview_target_available(path, &overlay_resolved).await?;
         match preview_sequential_merge(path, &accumulated_head, &incoming_head).await? {
@@ -1190,9 +1211,13 @@ async fn preview_tracked_state_application(
 ) -> AppResult<RepoActionPreview> {
     let live_repo = enrich_managed_repo(state, installation, repo, None).await?;
     let path = Path::new(&repo.local_path);
-    let base_resolved = resolve_existing_base_target(state, installation, repo, tracked_state).await?;
-    let enabled_overlays: Vec<&TrackedPrOverlay> =
-        tracked_state.overlays.iter().filter(|overlay| overlay.enabled).collect();
+    let base_resolved =
+        resolve_existing_base_target(state, installation, repo, tracked_state).await?;
+    let enabled_overlays: Vec<&TrackedPrOverlay> = tracked_state
+        .overlays
+        .iter()
+        .filter(|overlay| overlay.enabled)
+        .collect();
     let has_enabled_overlays = !enabled_overlays.is_empty();
     let target_head_sha = if has_enabled_overlays {
         None
@@ -1214,7 +1239,10 @@ async fn preview_tracked_state_application(
         .clone()
         .or_else(|| Some(base_resolved.checkout_ref.clone()));
     let mut warnings = live_repo.live_warnings.clone();
-    if matches!(live_repo.live_status, RepoLiveStatus::Missing | RepoLiveStatus::NotGit) {
+    if matches!(
+        live_repo.live_status,
+        RepoLiveStatus::Missing | RepoLiveStatus::NotGit
+    ) {
         return Ok(RepoActionPreview {
             action: action.to_string(),
             repo_id: Some(repo.id.clone()),
@@ -1361,7 +1389,10 @@ async fn preview_resolved_install_target(
         target_ref: Some(resolved.checkout_ref.clone()),
         commits: Vec::new(),
         file_changes: Vec::new(),
-        warnings: vec!["No local checkout exists yet, so this preview only shows the resolved target.".to_string()],
+        warnings: vec![
+            "No local checkout exists yet, so this preview only shows the resolved target."
+                .to_string(),
+        ],
         conflict_files: Vec::new(),
         stack_preview,
         dependency_state: None,
@@ -1388,7 +1419,10 @@ fn parse_github_pr_url_same_repo(input: &str) -> Option<(String, u64)> {
 
 async fn infer_overlay_base_ref(repo: &ManagedRepo) -> Option<String> {
     if let Some(base_ref) = repo.tracked_state.as_ref().and_then(|state| {
-        if matches!(state.base.target_kind, TargetKind::Branch | TargetKind::NamedRef) {
+        if matches!(
+            state.base.target_kind,
+            TargetKind::Branch | TargetKind::NamedRef
+        ) {
             Some(state.base.checkout_ref.clone())
         } else {
             None
@@ -1408,7 +1442,12 @@ async fn infer_overlay_base_ref(repo: &ManagedRepo) -> Option<String> {
     }
     let upstream = run_git_allow_fail(
         path,
-        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
     )
     .await
     .ok()
@@ -1430,7 +1469,8 @@ async fn fetch_origin_with_retry(path: &Path) -> AppResult<()> {
             Err(error) => {
                 last_error = Some(error);
                 if attempt < SAME_REPO_GIT_ATTEMPTS {
-                    tokio::time::sleep(std::time::Duration::from_millis(250 * attempt as u64)).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(250 * attempt as u64))
+                        .await;
                 }
             }
         }
@@ -1438,11 +1478,7 @@ async fn fetch_origin_with_retry(path: &Path) -> AppResult<()> {
     Err(last_error.expect("same-repo git retry loop must capture an error"))
 }
 
-async fn force_fetch_refspec_with_retry(
-    path: &Path,
-    remote: &str,
-    refspec: &str,
-) -> AppResult<()> {
+async fn force_fetch_refspec_with_retry(path: &Path, remote: &str, refspec: &str) -> AppResult<()> {
     let mut last_error = None;
     for attempt in 1..=SAME_REPO_GIT_ATTEMPTS {
         match force_fetch_refspec(path, remote, refspec).await {
@@ -1450,7 +1486,8 @@ async fn force_fetch_refspec_with_retry(
             Err(error) => {
                 last_error = Some(error);
                 if attempt < SAME_REPO_GIT_ATTEMPTS {
-                    tokio::time::sleep(std::time::Duration::from_millis(250 * attempt as u64)).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(250 * attempt as u64))
+                        .await;
                 }
             }
         }
@@ -1575,7 +1612,8 @@ async fn try_resolve_same_repo_pr_without_github_api(
                 overlay_sha_candidates[0].clone()
             } else {
                 let _ = fetch_origin_with_retry(path).await;
-                let candidates = remote_branches_pointing_at(path, "origin", &merge_base_sha).await?;
+                let candidates =
+                    remote_branches_pointing_at(path, "origin", &merge_base_sha).await?;
                 let known_overlay_candidates = tracked_state
                     .overlays
                     .iter()
@@ -1626,7 +1664,12 @@ async fn try_resolve_same_repo_pr_without_github_api(
     let resolved_sha = rev_parse(path, &overlay_ref).await.ok().flatten();
     let summary_label = resolved_sha
         .as_deref()
-        .map(|sha| format!("PR #{pr_number} @ {}", sha.chars().take(7).collect::<String>()))
+        .map(|sha| {
+            format!(
+                "PR #{pr_number} @ {}",
+                sha.chars().take(7).collect::<String>()
+            )
+        })
         .unwrap_or_else(|| format!("PR #{pr_number}"));
 
     Ok(Some(ResolvedTarget {
@@ -1742,7 +1785,6 @@ fn ensure_remote_matches(current: Option<&str>, target: &ResolvedTarget) -> AppR
     }
     Ok(())
 }
-
 
 fn canonical_target_remote(resolved: &ResolvedTarget) -> AppResult<String> {
     canonicalize_remote(&resolved.canonical_repo_url).ok_or_else(|| {
@@ -1890,7 +1932,8 @@ async fn load_repo_tracked_state(
     }
 
     let resolved =
-        resolve_target_for_context(state, installation, &repo.kind, Some(&repo.id), raw_input).await?;
+        resolve_target_for_context(state, installation, &repo.kind, Some(&repo.id), raw_input)
+            .await?;
     ensure_remote_matches(repo.canonical_remote.as_deref(), &resolved)?;
     let base_ref = resolved
         .pr_base_ref
@@ -1901,7 +1944,9 @@ async fn load_repo_tracked_state(
         .as_deref()
         .and_then(canonicalize_remote)
         .or_else(|| canonicalize_remote(&resolved.canonical_repo_url))
-        .ok_or_else(|| AppError::Github("tracked PR base repo could not be canonicalized".to_string()))?;
+        .ok_or_else(|| {
+            AppError::Github("tracked PR base repo could not be canonicalized".to_string())
+        })?;
     Ok(Some(TrackedRepoState {
         version: STACK_TRACKING_VERSION,
         base: TrackedBaseTarget {
@@ -1971,7 +2016,10 @@ async fn restore_checkpoint_state(
         }
     }
     if let Err(err) = reset_hard(path, &checkpoint.old_head_sha).await {
-        restore_errors.push(format!("failed to reset HEAD {}: {err}", checkpoint.old_head_sha));
+        restore_errors.push(format!(
+            "failed to reset HEAD {}: {err}",
+            checkpoint.old_head_sha
+        ));
     }
 
     if restore_stash && checkpoint.stash_created {
@@ -2010,7 +2058,9 @@ async fn restore_checkpoint_state(
         .db
         .set_repo_materialization_state(repo_id, checkpoint.materialization_state.as_ref())
     {
-        restore_errors.push(format!("failed to restore project materialization metadata: {err}"));
+        restore_errors.push(format!(
+            "failed to restore project materialization metadata: {err}"
+        ));
     }
 
     if restore_errors.is_empty() {
@@ -2100,11 +2150,14 @@ async fn hydrate_overlay_dependency_metadata(
             Err(error) => local_error = Some(error),
         }
 
-        let previous_status = overlay.last_apply_status.clone().unwrap_or(if overlay.enabled {
-            OverlayApplyStatus::Pending
-        } else {
-            OverlayApplyStatus::Disabled
-        });
+        let previous_status = overlay
+            .last_apply_status
+            .clone()
+            .unwrap_or(if overlay.enabled {
+                OverlayApplyStatus::Pending
+            } else {
+                OverlayApplyStatus::Disabled
+            });
         let previous_error = overlay.last_error.clone();
         let resolved = match state
             .github
@@ -2165,10 +2218,11 @@ async fn materialize_tracked_state(
         });
     }
 
-    let base_resolved = match resolve_existing_base_target(state, installation, repo, &next_state).await {
-        Ok(resolved) => resolved,
-        Err(err) => return Err((next_state, err)),
-    };
+    let base_resolved =
+        match resolve_existing_base_target(state, installation, repo, &next_state).await {
+            Ok(resolved) => resolved,
+            Err(err) => return Err((next_state, err)),
+        };
     next_state.base = match make_tracked_base_target(&base_resolved) {
         Ok(base) => base,
         Err(err) => return Err((next_state, err)),
@@ -2176,7 +2230,9 @@ async fn materialize_tracked_state(
 
     if next_state.overlays.is_empty() {
         next_state.materialized_branch = None;
-        if let Err(err) = apply_resolved_target(state, app, operation_id, repo, &base_resolved).await {
+        if let Err(err) =
+            apply_resolved_target(state, app, operation_id, repo, &base_resolved).await
+        {
             return Err((next_state, err));
         }
         return Ok(next_state);
@@ -2185,9 +2241,7 @@ async fn materialize_tracked_state(
     if !branch_like_target_kind(&base_resolved.target_kind) {
         return Err((
             next_state,
-            AppError::Conflict(
-                "PR overlay stacks require a branch-like base target".to_string(),
-            ),
+            AppError::Conflict("PR overlay stacks require a branch-like base target".to_string()),
         ));
     }
     if let Err(err) = validate_overlay_stack(&next_state) {
@@ -2242,7 +2296,8 @@ async fn materialize_tracked_state(
             return Err((next_state, err));
         }
 
-        if let Err(err) = ensure_remote_matches(repo.canonical_remote.as_deref(), &overlay_resolved) {
+        if let Err(err) = ensure_remote_matches(repo.canonical_remote.as_deref(), &overlay_resolved)
+        {
             overlay.last_apply_status = Some(OverlayApplyStatus::Error);
             overlay.last_error = Some(err.to_string());
             return Err((next_state, err));
@@ -2384,8 +2439,30 @@ async fn apply_repo_tracking_state_with_override_mode(
     if let Some(conflict) =
         probe_sequential_stack_conflicts(state, installation, repo, tracked_state).await?
     {
-        return Err(AppError::Conflict(sequential_stack_conflict_message(&conflict)));
+        return Err(AppError::Conflict(sequential_stack_conflict_message(
+            &conflict,
+        )));
     }
+    let previous_kitchen_runtime = if repo.kind == RepoKind::Kitchen {
+        match kitchen::probe_kitchen_runtime(installation).await {
+            Ok(runtime) => Some(runtime),
+            Err(error) => {
+                log_operation(
+                    state,
+                    app,
+                    operation_id,
+                    "materialization",
+                    "warn",
+                    format!(
+                        "could not snapshot the pre-operation Kitchen runtime; failed forward recovery may need to fall back to the current ComfyUI requirement: {error}"
+                    ),
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
     let checkpoint = create_checkpoint_if_needed(
         state,
         installation,
@@ -2512,6 +2589,7 @@ async fn apply_repo_tracking_state_with_override_mode(
                 &checkpoint,
                 true,
                 false,
+                previous_kitchen_runtime.as_ref(),
             )
             .await;
             if let Err(refresh_err) = refresh_repo_state(state, &repo.id).await {
@@ -2545,17 +2623,22 @@ async fn build_requested_tracked_state_for_input(
 
     if matches!(resolved.target_kind, TargetKind::Pr) {
         let Some(base_ref) = resolved.pr_base_ref.clone() else {
-            return Err(AppError::Github("resolved PR is missing a base ref".to_string()));
+            return Err(AppError::Github(
+                "resolved PR is missing a base ref".to_string(),
+            ));
         };
         let canonical_repo_url = resolved
             .pr_base_repo_url
             .as_deref()
             .and_then(canonicalize_remote)
             .or_else(|| canonicalize_remote(&resolved.canonical_repo_url))
-            .ok_or_else(|| AppError::Github("resolved PR base repo could not be canonicalized".to_string()))?;
+            .ok_or_else(|| {
+                AppError::Github("resolved PR base repo could not be canonicalized".to_string())
+            })?;
         let mut tracked_state = match load_repo_tracked_state(state, installation, repo).await? {
             Some(mut existing) => {
-                let existing_base = resolve_existing_base_target(state, installation, repo, &existing).await?;
+                let existing_base =
+                    resolve_existing_base_target(state, installation, repo, &existing).await?;
                 existing.base = make_tracked_base_target(&existing_base)?;
                 if !branch_like_target_kind(&existing.base.target_kind) {
                     return Err(AppError::Conflict(
@@ -2698,7 +2781,8 @@ async fn find_existing_custom_node_repo_by_remote(
                     continue;
                 }
             };
-            let Some(live_remote) = status.origin_url.as_deref().and_then(canonicalize_remote) else {
+            let Some(live_remote) = status.origin_url.as_deref().and_then(canonicalize_remote)
+            else {
                 continue;
             };
             let remote_aliases = if live_remote == target_remote {
@@ -2738,10 +2822,7 @@ async fn find_existing_custom_node_repo_by_remote(
     }
 }
 
-async fn preferred_custom_node_dir_name(
-    state: &AppState,
-    resolved: &ResolvedTarget,
-) -> String {
+async fn preferred_custom_node_dir_name(state: &AppState, resolved: &ResolvedTarget) -> String {
     match state
         .manager_registry
         .preferred_dir_name_for_target(resolved)
@@ -2790,7 +2871,6 @@ fn normalize_path_components(path: &Path) -> PathBuf {
 
     normalized
 }
-
 
 fn normalize_frontend_settings(
     root: &Path,
@@ -2864,9 +2944,7 @@ fn default_frontend_settings_for_installation(
             package_manager,
         }),
     )?
-    .ok_or_else(|| {
-        AppError::InvalidInput("failed to derive managed frontend settings".to_string())
-    })
+    .ok_or_else(|| AppError::InvalidInput("failed to derive managed frontend settings".to_string()))
 }
 
 fn strip_frontend_root_args(args: &[String]) -> Vec<String> {
@@ -3080,7 +3158,8 @@ async fn create_checkpoint_if_needed(
         .get_operation(operation_id)?
         .ok_or_else(|| AppError::NotFound("operation not found".to_string()))?;
     let (label, reason) = checkpoint_label_and_reason(&operation, repo);
-    let dependency_state = build_repo_dependency_state(installation, repo, path, &status.changed_files);
+    let dependency_state =
+        build_repo_dependency_state(installation, repo, path, &status.changed_files);
 
     let checkpoint = state.db.create_checkpoint(
         &repo.id,
@@ -3208,7 +3287,6 @@ async fn apply_resolved_target(
     let _ = submodule_update(path).await;
     Ok(())
 }
-
 
 async fn materialize_kitchen_override(
     state: &AppState,
@@ -3419,6 +3497,15 @@ async fn ensure_kitchen_runtime_ready_for_launch(
     Ok(())
 }
 
+fn should_preserve_unmanaged_kitchen_runtime(
+    force_restore: bool,
+    previous: Option<&KitchenRuntimeProbe>,
+    current: &KitchenRuntimeProbe,
+) -> bool {
+    !force_restore
+        && previous.is_some_and(|expected| kitchen::runtime_identity_matches(expected, current))
+}
+
 async fn restore_checkpoint_with_kitchen_runtime(
     state: &AppState,
     app: &AppHandle,
@@ -3428,25 +3515,17 @@ async fn restore_checkpoint_with_kitchen_runtime(
     checkpoint: &RepoCheckpoint,
     restore_stash: bool,
     force_kitchen_runtime_rebuild: bool,
+    previous_unmanaged_runtime: Option<&KitchenRuntimeProbe>,
 ) -> AppResult<()> {
     let path = Path::new(&repo.local_path);
     if repo.kind != RepoKind::Kitchen {
-        return restore_checkpoint_state(
-            state,
-            path,
-            &repo.id,
-            checkpoint,
-            restore_stash,
-        )
-        .await;
+        return restore_checkpoint_state(state, path, &repo.id, checkpoint, restore_stash).await;
     }
 
     restore_checkpoint_state(state, path, &repo.id, checkpoint, false).await?;
     if let Some(saved_materialization) = checkpoint.materialization_state.as_ref() {
         let status = inspect_repo(path).await?;
-        if status.head_sha.as_deref()
-            != saved_materialization.materialized_head_sha.as_deref()
-        {
+        if status.head_sha.as_deref() != saved_materialization.materialized_head_sha.as_deref() {
             return Err(AppError::Conflict(format!(
                 "cannot restore Comfy Kitchen runtime provenance exactly: checkpoint source HEAD {} differs from saved materialized HEAD {}",
                 status.head_sha.as_deref().unwrap_or("unknown"),
@@ -3502,24 +3581,67 @@ async fn restore_checkpoint_with_kitchen_runtime(
                 "previous Comfy Kitchen runtime still matches the restored checkpoint; skipping an unnecessary rebuild",
             );
         } else {
-            materialize_kitchen_override(
-                state,
-                app,
-                operation_id,
-                installation,
-                &restored_repo,
-            )
-            .await?;
+            materialize_kitchen_override(state, app, operation_id, installation, &restored_repo)
+                .await?;
         }
     } else {
-        restore_comfy_requirement_for_repo(
-            state,
-            app,
-            operation_id,
-            installation,
-            repo,
-        )
-        .await?;
+        let preserved_unmanaged_runtime = if force_kitchen_runtime_rebuild {
+            false
+        } else if let Some(previous_runtime) = previous_unmanaged_runtime {
+            match kitchen::probe_kitchen_runtime(installation).await {
+                Ok(current_runtime) => {
+                    let unchanged = should_preserve_unmanaged_kitchen_runtime(
+                        false,
+                        Some(previous_runtime),
+                        &current_runtime,
+                    );
+                    if unchanged {
+                        state
+                            .db
+                            .set_kitchen_runtime(&installation.id, &current_runtime)?;
+                        log_operation(
+                            state,
+                            app,
+                            operation_id,
+                            "rollback",
+                            "info",
+                            "failed Kitchen source application did not change the pre-existing unmanaged runtime; leaving that runtime untouched",
+                        );
+                    }
+                    unchanged
+                }
+                Err(error) => {
+                    log_operation(
+                        state,
+                        app,
+                        operation_id,
+                        "rollback",
+                        "warn",
+                        format!(
+                            "could not verify whether the pre-existing unmanaged Kitchen runtime survived unchanged; restoring the current ComfyUI requirement: {error}"
+                        ),
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
+        if !preserved_unmanaged_runtime {
+            if !force_kitchen_runtime_rebuild {
+                log_operation(
+                    state,
+                    app,
+                    operation_id,
+                    "rollback",
+                    "warn",
+                    "failed Kitchen source application changed or could not verify the pre-existing unmanaged runtime; restoring the requirement declared by the current ComfyUI checkout",
+                );
+            }
+            restore_comfy_requirement_for_repo(state, app, operation_id, installation, repo)
+                .await?;
+        }
     }
 
     if restore_stash && checkpoint.stash_created {
@@ -3675,9 +3797,7 @@ async fn maybe_restart_installation(
     Ok(())
 }
 
-async fn acquire_background_work_guard(
-    state: &AppState,
-) -> tokio::sync::OwnedMutexGuard<()> {
+async fn acquire_background_work_guard(state: &AppState) -> tokio::sync::OwnedMutexGuard<()> {
     state.background_work_lock().lock_owned().await
 }
 
@@ -3710,14 +3830,9 @@ async fn apply_repo_target_update(
     sync_dependencies: bool,
     write_tracked_target: bool,
 ) -> AppResult<RepoCheckpoint> {
-    let tracked_state = build_requested_tracked_state_for_input(
-        state,
-        installation,
-        repo,
-        target_input,
-        false,
-    )
-    .await?;
+    let tracked_state =
+        build_requested_tracked_state_for_input(state, installation, repo, target_input, false)
+            .await?;
     apply_repo_tracking_state(
         state,
         app,
@@ -3794,12 +3909,9 @@ async fn register_installation_impl(
     } else {
         None
     };
-    let frontend_settings = if input.frontend_settings.is_some() || existing_installation.is_none() {
-        normalize_frontend_settings(
-            &root,
-            &custom_nodes_dir,
-            input.frontend_settings.clone(),
-        )?
+    let frontend_settings = if input.frontend_settings.is_some() || existing_installation.is_none()
+    {
+        normalize_frontend_settings(&root, &custom_nodes_dir, input.frontend_settings.clone())?
     } else {
         existing_installation
             .as_ref()
@@ -3830,7 +3942,9 @@ async fn register_installation_impl(
     let (core_repo, frontend_repo, kitchen_repo, discovered_custom_nodes) =
         discover_repositories_for_installation(state, &installation, true).await?;
     let kitchen_runtime = kitchen::probe_kitchen_runtime(&installation).await?;
-    state.db.set_kitchen_runtime(&installation.id, &kitchen_runtime)?;
+    state
+        .db
+        .set_kitchen_runtime(&installation.id, &kitchen_runtime)?;
     Ok(RegisterInstallationResult {
         installation,
         core_repo: core_repo.map(|repo| repo.repo),
@@ -3921,18 +4035,20 @@ async fn save_installation(
     let root = root.canonicalize().map_err(|e| e.to_string())?;
     let (python_string, detected_env_kind) = if let Some(python_input) = input.python_exe.as_deref()
     {
-        let python = normalize_python_executable(&root, Some(python_input))
-            .map_err(|e| e.to_string())?;
+        let python =
+            normalize_python_executable(&root, Some(python_input)).map_err(|e| e.to_string())?;
         (
             python.to_string_lossy().to_string(),
             detect_env_kind(&python),
         )
     } else {
-        (existing.python_exe.clone(), existing.detected_env_kind.clone())
+        (
+            existing.python_exe.clone(),
+            existing.detected_env_kind.clone(),
+        )
     };
     let launch_profile = if input.launch_profile.is_some() {
-        normalize_launch_profile(&root, input.launch_profile)
-            .map_err(|e| e.to_string())?
+        normalize_launch_profile(&root, input.launch_profile).map_err(|e| e.to_string())?
     } else {
         existing.launch_profile.clone()
     };
@@ -4031,7 +4147,8 @@ async fn collect_manager_custom_node_items(
     query: Option<&str>,
     limit: usize,
 ) -> AppResult<Vec<ManagerRegistryCustomNode>> {
-    let discovered_custom_nodes = discover_custom_node_repos_best_effort(state, installation).await?;
+    let discovered_custom_nodes =
+        discover_custom_node_repos_best_effort(state, installation).await?;
 
     let mut tracking_managed_dirs: HashMap<String, Vec<String>> = HashMap::new();
     let mut present_non_git_dirs: HashMap<String, Vec<String>> = HashMap::new();
@@ -4066,9 +4183,15 @@ async fn collect_manager_custom_node_items(
                     }
                     let path_string = path.to_string_lossy().to_string();
                     if has_tracking {
-                        tracking_managed_dirs.entry(key).or_default().push(path_string);
+                        tracking_managed_dirs
+                            .entry(key)
+                            .or_default()
+                            .push(path_string);
                     } else if !has_git {
-                        present_non_git_dirs.entry(key).or_default().push(path_string);
+                        present_non_git_dirs
+                            .entry(key)
+                            .or_default()
+                            .push(path_string);
                     }
                 }
             }
@@ -4084,7 +4207,11 @@ async fn collect_manager_custom_node_items(
 
     let mut installed_by_remote: HashMap<String, Option<ManagedRepo>> = HashMap::new();
     for repo in discovered_custom_nodes {
-        if let Some(remote) = repo.canonical_remote.as_deref().and_then(canonicalize_remote) {
+        if let Some(remote) = repo
+            .canonical_remote
+            .as_deref()
+            .and_then(canonicalize_remote)
+        {
             let remote_aliases = state.manager_registry.remote_aliases(&remote).await;
             for alias in remote_aliases {
                 match installed_by_remote.entry(alias) {
@@ -4106,7 +4233,10 @@ async fn collect_manager_custom_node_items(
     }
 
     let limit = limit.clamp(1, 10000);
-    let entries = state.manager_registry.search_entries(query, usize::MAX).await?;
+    let entries = state
+        .manager_registry
+        .search_entries(query, usize::MAX)
+        .await?;
     let mut items = Vec::with_capacity(entries.len());
     for entry in entries {
         let install_type = entry.install_type_label();
@@ -4166,7 +4296,11 @@ async fn collect_manager_custom_node_items(
         right
             .is_installed
             .cmp(&left.is_installed)
-            .then_with(|| left.title.to_ascii_lowercase().cmp(&right.title.to_ascii_lowercase()))
+            .then_with(|| {
+                left.title
+                    .to_ascii_lowercase()
+                    .cmp(&right.title.to_ascii_lowercase())
+            })
             .then_with(|| left.registry_id.cmp(&right.registry_id))
     });
     items.truncate(limit);
@@ -4282,9 +4416,15 @@ async fn preview_tracked_repo_update(
         .ok_or_else(|| "repo has no tracked target".to_string())?;
     let repo_lock = state.repo_lock(&repo.id).await;
     let _guard = repo_lock.lock().await;
-    preview_tracked_state_application(&state, &installation, &repo, &tracked_state, "Preview update")
-        .await
-        .map_err(|e| e.to_string())
+    preview_tracked_state_application(
+        &state,
+        &installation,
+        &repo,
+        &tracked_state,
+        "Preview update",
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -4846,7 +4986,6 @@ async fn run_install_or_patch_frontend(
     Ok(())
 }
 
-
 #[tauri::command]
 async fn install_or_patch_kitchen(
     app: AppHandle,
@@ -5270,15 +5409,9 @@ async fn restore_comfy_managed_kitchen(
     let op_id = op.id.clone();
     let state_handle = app.state::<AppState>().inner().clone();
     tauri::async_runtime::spawn(async move {
-        let _ = run_restore_comfy_managed_kitchen(
-            app,
-            state_handle,
-            installation,
-            repo,
-            input,
-            op_id,
-        )
-        .await;
+        let _ =
+            run_restore_comfy_managed_kitchen(app, state_handle, installation, repo, input, op_id)
+                .await;
     });
     Ok(OperationStart {
         operation_id: op.id,
@@ -5347,6 +5480,7 @@ async fn run_restore_comfy_managed_kitchen(
                 &checkpoint,
                 false,
                 true,
+                None,
             )
             .await;
             return match restore_result {
@@ -5808,7 +5942,9 @@ async fn run_install_or_patch_custom_node(
         "installing or patching custom node",
     );
 
-    match execute_install_or_patch_custom_node(&app, &state, &installation, &input, &operation_id).await {
+    match execute_install_or_patch_custom_node(&app, &state, &installation, &input, &operation_id)
+        .await
+    {
         Ok(outcome) => {
             state.db.finish_operation(
                 &operation_id,
@@ -6880,7 +7016,8 @@ async fn run_update_all(
         let mut failures = Vec::new();
 
         for repo in repos {
-            if let Some(tracked_state) = load_repo_tracked_state(&state, &installation, &repo).await?
+            if let Some(tracked_state) =
+                load_repo_tracked_state(&state, &installation, &repo).await?
             {
                 let repo_lock = state.repo_lock(&repo.id).await;
                 let _guard = repo_lock.lock().await;
@@ -7029,7 +7166,8 @@ async fn rematerialize_tracked_repos(
     let op_id = op.id.clone();
     let state_handle = app.state::<AppState>().inner().clone();
     tauri::async_runtime::spawn(async move {
-        let _ = run_rematerialize_tracked_repos(app, state_handle, installation, input, op_id).await;
+        let _ =
+            run_rematerialize_tracked_repos(app, state_handle, installation, input, op_id).await;
     });
     Ok(OperationStart {
         operation_id: op.id,
@@ -7071,7 +7209,10 @@ async fn run_rematerialize_tracked_repos(
                     &operation_id,
                     "preflight",
                     "warn",
-                    format!("skipping {}: repository path no longer exists", repo.display_name),
+                    format!(
+                        "skipping {}: repository path no longer exists",
+                        repo.display_name
+                    ),
                 );
                 continue;
             }
@@ -7320,6 +7461,7 @@ async fn run_rollback_repo(
             &checkpoint,
             input.restore_stash,
             true,
+            None,
         )
         .await?;
         if repo.kind != RepoKind::Kitchen {
@@ -7499,6 +7641,7 @@ async fn run_restore_checkpoint(
             &checkpoint,
             input.restore_stash,
             true,
+            None,
         )
         .await?;
         if repo.kind != RepoKind::Kitchen {
@@ -7605,7 +7748,10 @@ async fn compare_checkpoint(
     let mut commits = Vec::new();
     let mut file_changes = Vec::new();
     let mut warnings = live_repo.live_warnings.clone();
-    if matches!(live_repo.live_status, RepoLiveStatus::Missing | RepoLiveStatus::NotGit) {
+    if matches!(
+        live_repo.live_status,
+        RepoLiveStatus::Missing | RepoLiveStatus::NotGit
+    ) {
         warnings.push(
             "Checkpoint comparison is unavailable because this repo is not currently a valid git worktree."
                 .to_string(),
@@ -7709,9 +7855,8 @@ async fn remove_path_with_retries(path: &Path) -> AppResult<()> {
             )));
         }
     }
-    Err(last_error.unwrap_or_else(|| {
-        AppError::Io(format!("failed to remove {}", path.to_string_lossy()))
-    }))
+    Err(last_error
+        .unwrap_or_else(|| AppError::Io(format!("failed to remove {}", path.to_string_lossy()))))
 }
 
 fn kitchen_lifecycle_requires_comfy_restore(
@@ -7791,20 +7936,16 @@ async fn run_uninstall_repo(
             repo.materialization_state.is_some(),
             &OperationKind::UninstallRepo,
         ) {
-            restore_comfy_requirement_for_repo(
-                &state,
-                &app,
-                &operation_id,
-                &installation,
-                &repo,
-            )
-            .await?;
+            restore_comfy_requirement_for_repo(&state, &app, &operation_id, &installation, &repo)
+                .await?;
         }
         if path.exists() {
             remove_path_with_retries(&path).await?;
         }
         state.db.delete_repo(&repo.id)?;
-        state.db.finish_operation(&operation_id, OperationStatus::Succeeded, None, None)?;
+        state
+            .db
+            .finish_operation(&operation_id, OperationStatus::Succeeded, None, None)?;
         log_operation(
             &state,
             &app,
@@ -7907,20 +8048,16 @@ async fn run_disable_repo(
             repo.materialization_state.is_some(),
             &OperationKind::DisableRepo,
         ) {
-            restore_comfy_requirement_for_repo(
-                &state,
-                &app,
-                &operation_id,
-                &installation,
-                &repo,
-            )
-            .await?;
+            restore_comfy_requirement_for_repo(&state, &app, &operation_id, &installation, &repo)
+                .await?;
         }
         if path.exists() {
             std::fs::rename(&path, &disabled_path)?;
         }
         state.db.delete_repo(&repo.id)?;
-        state.db.finish_operation(&operation_id, OperationStatus::Succeeded, None, None)?;
+        state
+            .db
+            .finish_operation(&operation_id, OperationStatus::Succeeded, None, None)?;
         log_operation(
             &state,
             &app,
@@ -8440,11 +8577,9 @@ mod app_updates {
         let update = app
             .updater_builder()
             .pubkey(&pubkey)
-            .endpoints(vec![
-                UPDATE_ENDPOINT
-                    .parse()
-                    .map_err(|e: url::ParseError| e.to_string())?,
-            ])
+            .endpoints(vec![UPDATE_ENDPOINT
+                .parse()
+                .map_err(|e: url::ParseError| e.to_string())?])
             .map_err(|e| e.to_string())?
             .build()
             .map_err(|e| e.to_string())?
@@ -8476,9 +8611,9 @@ mod app_updates {
         let lifecycle_lock = state.lifecycle_lock();
         let _lifecycle_guard = lifecycle_lock.lock().await;
         let background_work_lock = state.background_work_lock();
-        let _background_work_guard = background_work_lock.try_lock().map_err(|_| {
-            "cannot install update while operations are running".to_string()
-        })?;
+        let _background_work_guard = background_work_lock
+            .try_lock()
+            .map_err(|_| "cannot install update while operations are running".to_string())?;
         if state
             .db
             .has_in_flight_background_operations()
@@ -8599,7 +8734,12 @@ async fn shutdown_managed_installations(state: AppState) -> AppResult<()> {
 
     for installation in installations {
         if let Some(profile) = installation.launch_profile.as_ref() {
-            if state.processes.stop(&installation.id, profile).await.is_err() {
+            if state
+                .processes
+                .stop(&installation.id, profile)
+                .await
+                .is_err()
+            {
                 if let Err(force_stop_error) = state.processes.force_stop(&installation.id).await {
                     return Err(AppError::Process(format!(
                         "failed to stop managed installation '{}' during app update handoff: {}",
@@ -8608,12 +8748,16 @@ async fn shutdown_managed_installations(state: AppState) -> AppResult<()> {
                 }
             }
         } else {
-            state.processes.force_stop(&installation.id).await.map_err(|error| {
-                AppError::Process(format!(
+            state
+                .processes
+                .force_stop(&installation.id)
+                .await
+                .map_err(|error| {
+                    AppError::Process(format!(
                     "failed to force-stop managed installation '{}' during app update handoff: {}",
                     installation.name, error
                 ))
-            })?;
+                })?;
         }
     }
     Ok(())
@@ -8636,10 +8780,14 @@ mod kitchen_management_tests {
 
     #[test]
     fn installation_wide_order_keeps_kitchen_after_python_dependency_repos() {
-        assert!(installation_repo_priority(&RepoKind::Kitchen)
-            > installation_repo_priority(&RepoKind::CustomNode));
-        assert!(installation_repo_priority(&RepoKind::Kitchen)
-            > installation_repo_priority(&RepoKind::Core));
+        assert!(
+            installation_repo_priority(&RepoKind::Kitchen)
+                > installation_repo_priority(&RepoKind::CustomNode)
+        );
+        assert!(
+            installation_repo_priority(&RepoKind::Kitchen)
+                > installation_repo_priority(&RepoKind::Core)
+        );
     }
 
     #[test]
@@ -8659,6 +8807,43 @@ mod kitchen_management_tests {
         assert!(!should_reassert_managed_kitchen_override(
             &RepoKind::Kitchen,
             ManagedPythonOverrideMode::Immediate
+        ));
+    }
+
+    #[test]
+    fn failed_first_source_build_preserves_unchanged_unmanaged_runtime() {
+        let previous = KitchenRuntimeProbe {
+            distribution_present: true,
+            installed_version: Some("0.2.33".to_string()),
+            record_sha256: Some("record-a".to_string()),
+            import_ok: true,
+            ..Default::default()
+        };
+        let current = KitchenRuntimeProbe {
+            probed_at: Some("later".to_string()),
+            ..previous.clone()
+        };
+        assert!(should_preserve_unmanaged_kitchen_runtime(
+            false,
+            Some(&previous),
+            &current
+        ));
+        assert!(!should_preserve_unmanaged_kitchen_runtime(
+            true,
+            Some(&previous),
+            &current
+        ));
+        assert!(!should_preserve_unmanaged_kitchen_runtime(
+            false, None, &current
+        ));
+        let changed = KitchenRuntimeProbe {
+            record_sha256: Some("record-b".to_string()),
+            ..current
+        };
+        assert!(!should_preserve_unmanaged_kitchen_runtime(
+            false,
+            Some(&previous),
+            &changed
         ));
     }
 

@@ -142,14 +142,18 @@ pub fn plan_kitchen_wheel_install(
 
 pub async fn probe_kitchen_runtime(installation: &Installation) -> AppResult<KitchenRuntimeProbe> {
     let args = vec!["-c".to_string(), KITCHEN_PROBE_SCRIPT.to_string()];
-    let output = output_command(&installation.python_exe, &args, Some(Path::new(&installation.comfy_root)))
-        .await
-        .map_err(|error| {
-            AppError::Dependency(format!(
-                "failed to inspect {KITCHEN_DISTRIBUTION_NAME} with managed Python '{}': {error}",
-                installation.python_exe
-            ))
-        })?;
+    let output = output_command(
+        &installation.python_exe,
+        &args,
+        Some(Path::new(&installation.comfy_root)),
+    )
+    .await
+    .map_err(|error| {
+        AppError::Dependency(format!(
+            "failed to inspect {KITCHEN_DISTRIBUTION_NAME} with managed Python '{}': {error}",
+            installation.python_exe
+        ))
+    })?;
     if !output.status.success() {
         return Err(AppError::Dependency(format!(
             "failed to inspect {KITCHEN_DISTRIBUTION_NAME} with managed Python '{}': {}\n{}",
@@ -163,7 +167,9 @@ pub async fn probe_kitchen_runtime(installation: &Installation) -> AppResult<Kit
         .lines()
         .rev()
         .find(|line| !line.trim().is_empty())
-        .ok_or_else(|| AppError::Dependency("Kitchen runtime probe returned no JSON".to_string()))?;
+        .ok_or_else(|| {
+            AppError::Dependency("Kitchen runtime probe returned no JSON".to_string())
+        })?;
     let mut probe: KitchenRuntimeProbe = serde_json::from_str(payload).map_err(|error| {
         AppError::Dependency(format!(
             "Kitchen runtime probe returned invalid JSON: {error}; output: {stdout}"
@@ -186,7 +192,10 @@ fn one_built_wheel(build_dir: &Path) -> AppResult<PathBuf> {
     let mut wheels = std::fs::read_dir(build_dir)?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("whl")))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("whl"))
+        })
         .collect::<Vec<_>>();
     wheels.sort();
     match wheels.len() {
@@ -322,20 +331,37 @@ pub async fn materialize_kitchen_project(
     result
 }
 
+pub fn runtime_identity_matches(
+    expected: &KitchenRuntimeProbe,
+    actual: &KitchenRuntimeProbe,
+) -> bool {
+    expected.distribution_present == actual.distribution_present
+        && expected.installed_version == actual.installed_version
+        && expected.distribution_location == actual.distribution_location
+        && expected.direct_url == actual.direct_url
+        && expected.direct_url_sha256 == actual.direct_url_sha256
+        && expected.record_sha256 == actual.record_sha256
+        && expected.import_ok == actual.import_ok
+        && expected.module_location == actual.module_location
+}
+
 pub fn evaluate_materialization(
     repo: &ManagedRepo,
     probe: &KitchenRuntimeProbe,
 ) -> RepoMaterializationState {
-    let mut state = repo.materialization_state.clone().unwrap_or(RepoMaterializationState {
-        materialized_head_sha: None,
-        installed_version: None,
-        installed_origin: None,
-        artifact_sha256: None,
-        installed_record_sha256: None,
-        status: MaterializationStatus::Stale,
-        last_materialized_at: None,
-        last_error: None,
-    });
+    let mut state = repo
+        .materialization_state
+        .clone()
+        .unwrap_or(RepoMaterializationState {
+            materialized_head_sha: None,
+            installed_version: None,
+            installed_origin: None,
+            artifact_sha256: None,
+            installed_record_sha256: None,
+            status: MaterializationStatus::Stale,
+            last_materialized_at: None,
+            last_error: None,
+        });
 
     let installed_artifact_mismatch = state
         .artifact_sha256
@@ -609,6 +635,45 @@ mod tests {
                 .as_deref(),
             Some("comfy_kitchen @ https://example.test/kitchen.whl")
         );
+    }
+
+    #[test]
+    fn runtime_identity_ignores_probe_time_but_detects_distribution_changes() {
+        let baseline = KitchenRuntimeProbe {
+            distribution_present: true,
+            installed_version: Some("0.2.33".to_string()),
+            distribution_location: Some("/venv/site-packages".to_string()),
+            direct_url: Some("file:///old.whl".to_string()),
+            direct_url_sha256: Some("a".repeat(64)),
+            record_sha256: Some("record-a".to_string()),
+            import_ok: true,
+            module_location: Some("/venv/site-packages/comfy_kitchen/__init__.py".to_string()),
+            probed_at: Some("before".to_string()),
+            ..Default::default()
+        };
+        let reprobe = KitchenRuntimeProbe {
+            probed_at: Some("after".to_string()),
+            ..baseline.clone()
+        };
+        assert!(runtime_identity_matches(&baseline, &reprobe));
+
+        let replaced = KitchenRuntimeProbe {
+            direct_url: Some("file:///new.whl".to_string()),
+            direct_url_sha256: Some("b".repeat(64)),
+            record_sha256: Some("record-b".to_string()),
+            ..reprobe
+        };
+        assert!(!runtime_identity_matches(&baseline, &replaced));
+
+        let missing_before = KitchenRuntimeProbe {
+            probed_at: Some("before".to_string()),
+            ..Default::default()
+        };
+        let missing_after = KitchenRuntimeProbe {
+            probed_at: Some("after".to_string()),
+            ..Default::default()
+        };
+        assert!(runtime_identity_matches(&missing_before, &missing_after));
     }
 
     #[test]

@@ -310,7 +310,7 @@ The app does **not** execute arbitrary install scripts beyond the supported mani
 
 ### Comfy Kitchen source overrides
 
-Comfy Kitchen is handled as a project materialization rather than generic Python dependency sync. When source management is enabled, Patcher initializes the checkout's required submodules, asks the checkout's normal PEP 517/setuptools build to produce a wheel, installs that wheel into the configured installation Python, and records source/runtime provenance separately. Upstream Comfy Kitchen remains responsible for CUDA/HIP compiler discovery and architecture policy.
+Comfy Kitchen is handled as a project materialization rather than generic Python dependency sync. When source management is enabled, Patcher initializes the checkout's required submodules, asks the checkout's normal PEP 517/setuptools build to produce a wheel, installs that wheel into the configured installation Python, and records source/runtime provenance separately. Upstream Comfy Kitchen remains responsible for CUDA/HIP compiler discovery and architecture policy. The wheel is built before `pip install`; if a failed first source-management attempt never changes the existing unmanaged runtime, automatic recovery verifies that identity and leaves it untouched instead of reinstalling a package unnecessarily.
 
 A Patcher-managed Kitchen source override is reasserted after Patcher-controlled core/custom-node dependency installs if those installs replace the active `comfy-kitchen` distribution. Installation-wide **Update all** and tracked-repository rematerialization defer that override work until ordinary Python dependency mutations finish, then finalize Kitchen once at the end instead of rebuilding it after every repository.
 
