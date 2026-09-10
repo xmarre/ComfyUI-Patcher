@@ -26,6 +26,7 @@ jobs:
           set -euo pipefail
           python tools/prepare_kitchen_lifecycle_readme_anchor.py
           python tools/fix_kitchen_lifecycle_recovery.py
+          cargo fmt --manifest-path src-tauri/Cargo.toml
           python tools/fix_kitchen_lifecycle_result_type.py
           cargo fmt --manifest-path src-tauri/Cargo.toml
           grep -Fq 'recover_kitchen_source_after_lifecycle_failure' src-tauri/src/lib.rs
