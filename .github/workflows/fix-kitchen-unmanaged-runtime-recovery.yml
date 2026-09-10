@@ -1,0 +1,422 @@
+name: Fix unmanaged Kitchen runtime recovery
+
+on:
+  push:
+    branches:
+      - feature/comfy-kitchen-management
+    paths:
+      - .github/workflows/fix-kitchen-unmanaged-runtime-recovery.yml
+
+permissions:
+  contents: write
+
+jobs:
+  validate-and-commit:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/comfy-kitchen-management
+          fetch-depth: 0
+
+      - name: Apply exact Kitchen recovery fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new, label):
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected 1 match, found {count}')
+              p.write_text(text.replace(old, new, 1), encoding='utf-8', newline='\n')
+
+          def replace_n(path, old, new, expected, label):
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              count = text.count(old)
+              if count != expected:
+                  raise SystemExit(f'{label}: expected {expected} matches, found {count}')
+              p.write_text(text.replace(old, new), encoding='utf-8', newline='\n')
+
+          def replace_in_region(path, start_marker, end_marker, old, new, label):
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              start = text.index(start_marker)
+              end = text.index(end_marker, start)
+              region = text[start:end]
+              count = region.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected 1 regional match, found {count}')
+              region = region.replace(old, new, 1)
+              p.write_text(text[:start] + region + text[end:], encoding='utf-8', newline='\n')
+
+          # Stable runtime identity excludes probe timestamp/error prose but includes
+          # package location, direct-url/artifact evidence, RECORD, import result and module path.
+          replace_once(
+              'src-tauri/src/kitchen.rs',
+              'pub fn evaluate_materialization(\n',
+              '''pub fn runtime_identity_matches(
+    expected: &KitchenRuntimeProbe,
+    actual: &KitchenRuntimeProbe,
+) -> bool {
+    expected.distribution_present == actual.distribution_present
+        && expected.installed_version == actual.installed_version
+        && expected.distribution_location == actual.distribution_location
+        && expected.direct_url == actual.direct_url
+        && expected.direct_url_sha256 == actual.direct_url_sha256
+        && expected.record_sha256 == actual.record_sha256
+        && expected.import_ok == actual.import_ok
+        && expected.module_location == actual.module_location
+}
+
+pub fn evaluate_materialization(
+''',
+              'Kitchen runtime identity helper',
+          )
+
+          replace_once(
+              'src-tauri/src/kitchen.rs',
+              '''    #[test]
+    fn reconciliation_distinguishes_checkout_staleness_and_external_replacement() {''',
+              '''    #[test]
+    fn runtime_identity_ignores_probe_time_but_detects_distribution_changes() {
+        let baseline = KitchenRuntimeProbe {
+            distribution_present: true,
+            installed_version: Some("0.2.33".to_string()),
+            distribution_location: Some("/venv/site-packages".to_string()),
+            direct_url: Some("file:///old.whl".to_string()),
+            direct_url_sha256: Some("a".repeat(64)),
+            record_sha256: Some("record-a".to_string()),
+            import_ok: true,
+            module_location: Some("/venv/site-packages/comfy_kitchen/__init__.py".to_string()),
+            probed_at: Some("before".to_string()),
+            ..Default::default()
+        };
+        let reprobe = KitchenRuntimeProbe {
+            probed_at: Some("after".to_string()),
+            ..baseline.clone()
+        };
+        assert!(runtime_identity_matches(&baseline, &reprobe));
+
+        let replaced = KitchenRuntimeProbe {
+            direct_url: Some("file:///new.whl".to_string()),
+            direct_url_sha256: Some("b".repeat(64)),
+            record_sha256: Some("record-b".to_string()),
+            ..reprobe
+        };
+        assert!(!runtime_identity_matches(&baseline, &replaced));
+
+        let missing_before = KitchenRuntimeProbe {
+            probed_at: Some("before".to_string()),
+            ..Default::default()
+        };
+        let missing_after = KitchenRuntimeProbe {
+            probed_at: Some("after".to_string()),
+            ..Default::default()
+        };
+        assert!(runtime_identity_matches(&missing_before, &missing_after));
+    }
+
+    #[test]
+    fn reconciliation_distinguishes_checkout_staleness_and_external_replacement() {''',
+              'Kitchen runtime identity test',
+          )
+
+          apply_start = 'async fn apply_repo_tracking_state_with_override_mode('
+          apply_end = 'async fn build_requested_tracked_state_for_input('
+          replace_in_region(
+              'src-tauri/src/lib.rs',
+              apply_start,
+              apply_end,
+              '    let checkpoint = create_checkpoint_if_needed(\n',
+              '''    let previous_kitchen_runtime = if repo.kind == RepoKind::Kitchen {
+        match kitchen::probe_kitchen_runtime(installation).await {
+            Ok(runtime) => Some(runtime),
+            Err(error) => {
+                log_operation(
+                    state,
+                    app,
+                    operation_id,
+                    "materialization",
+                    "warn",
+                    format!(
+                        "could not snapshot the pre-operation Kitchen runtime; failed forward recovery may need to fall back to the current ComfyUI requirement: {error}"
+                    ),
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let checkpoint = create_checkpoint_if_needed(
+''',
+              'pre-operation Kitchen runtime snapshot',
+          )
+          replace_in_region(
+              'src-tauri/src/lib.rs',
+              apply_start,
+              apply_end,
+              '''                &checkpoint,
+                true,
+                false,
+            )''',
+              '''                &checkpoint,
+                true,
+                false,
+                previous_kitchen_runtime.as_ref(),
+            )''',
+              'automatic recovery runtime snapshot',
+          )
+
+          restore_start = 'async fn restore_checkpoint_with_kitchen_runtime('
+          restore_end = '#[derive(Debug, Clone, Copy, PartialEq, Eq)]\nenum ManagedPythonOverrideMode'
+          replace_in_region(
+              'src-tauri/src/lib.rs',
+              restore_start,
+              restore_end,
+              '''    restore_stash: bool,
+    force_kitchen_runtime_rebuild: bool,
+) -> AppResult<()> {''',
+              '''    restore_stash: bool,
+    force_kitchen_runtime_rebuild: bool,
+    previous_unmanaged_runtime: Option<&KitchenRuntimeProbe>,
+) -> AppResult<()> {''',
+              'Kitchen restore helper signature',
+          )
+
+          replace_once(
+              'src-tauri/src/lib.rs',
+              'async fn restore_checkpoint_with_kitchen_runtime(\n',
+              '''fn should_preserve_unmanaged_kitchen_runtime(
+    force_restore: bool,
+    previous: Option<&KitchenRuntimeProbe>,
+    current: &KitchenRuntimeProbe,
+) -> bool {
+    !force_restore
+        && previous.is_some_and(|expected| kitchen::runtime_identity_matches(expected, current))
+}
+
+async fn restore_checkpoint_with_kitchen_runtime(
+''',
+              'unmanaged runtime recovery policy helper',
+          )
+
+          old_unmanaged = '''    } else {
+        restore_comfy_requirement_for_repo(
+            state,
+            app,
+            operation_id,
+            installation,
+            repo,
+        )
+        .await?;
+    }
+
+    if restore_stash'''
+          new_unmanaged = '''    } else {
+        let preserved_unmanaged_runtime = if force_kitchen_runtime_rebuild {
+            false
+        } else if let Some(previous_runtime) = previous_unmanaged_runtime {
+            match kitchen::probe_kitchen_runtime(installation).await {
+                Ok(current_runtime) => {
+                    let unchanged = should_preserve_unmanaged_kitchen_runtime(
+                        false,
+                        Some(previous_runtime),
+                        &current_runtime,
+                    );
+                    if unchanged {
+                        state
+                            .db
+                            .set_kitchen_runtime(&installation.id, &current_runtime)?;
+                        log_operation(
+                            state,
+                            app,
+                            operation_id,
+                            "rollback",
+                            "info",
+                            "failed Kitchen source application did not change the pre-existing unmanaged runtime; leaving that runtime untouched",
+                        );
+                    }
+                    unchanged
+                }
+                Err(error) => {
+                    log_operation(
+                        state,
+                        app,
+                        operation_id,
+                        "rollback",
+                        "warn",
+                        format!(
+                            "could not verify whether the pre-existing unmanaged Kitchen runtime survived unchanged; restoring the current ComfyUI requirement: {error}"
+                        ),
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
+        if !preserved_unmanaged_runtime {
+            if !force_kitchen_runtime_rebuild {
+                log_operation(
+                    state,
+                    app,
+                    operation_id,
+                    "rollback",
+                    "warn",
+                    "failed Kitchen source application changed or could not verify the pre-existing unmanaged runtime; restoring the requirement declared by the current ComfyUI checkout",
+                );
+            }
+            restore_comfy_requirement_for_repo(
+                state,
+                app,
+                operation_id,
+                installation,
+                repo,
+            )
+            .await?;
+        }
+    }
+
+    if restore_stash'''
+          replace_in_region(
+              'src-tauri/src/lib.rs',
+              restore_start,
+              restore_end,
+              old_unmanaged,
+              new_unmanaged,
+              'unmanaged Kitchen recovery branch',
+          )
+
+          replace_n(
+              'src-tauri/src/lib.rs',
+              '''            input.restore_stash,
+            true,
+        )''',
+              '''            input.restore_stash,
+            true,
+            None,
+        )''',
+              2,
+              'explicit rollback runtime argument',
+          )
+          replace_once(
+              'src-tauri/src/lib.rs',
+              '''                &checkpoint,
+                false,
+                true,
+            )''',
+              '''                &checkpoint,
+                false,
+                true,
+                None,
+            )''',
+              'Restore ComfyUI mutation recovery runtime argument',
+          )
+
+          replace_once(
+              'src-tauri/src/lib.rs',
+              '''    #[test]
+    fn kitchen_untrack_preserves_runtime_but_remove_and_disable_restore_comfyui_requirement() {''',
+              '''    #[test]
+    fn failed_first_source_build_preserves_unchanged_unmanaged_runtime() {
+        let previous = KitchenRuntimeProbe {
+            distribution_present: true,
+            installed_version: Some("0.2.33".to_string()),
+            record_sha256: Some("record-a".to_string()),
+            import_ok: true,
+            ..Default::default()
+        };
+        let current = KitchenRuntimeProbe {
+            probed_at: Some("later".to_string()),
+            ..previous.clone()
+        };
+        assert!(should_preserve_unmanaged_kitchen_runtime(
+            false,
+            Some(&previous),
+            &current
+        ));
+        assert!(!should_preserve_unmanaged_kitchen_runtime(
+            true,
+            Some(&previous),
+            &current
+        ));
+        assert!(!should_preserve_unmanaged_kitchen_runtime(
+            false,
+            None,
+            &current
+        ));
+        let changed = KitchenRuntimeProbe {
+            record_sha256: Some("record-b".to_string()),
+            ..current
+        };
+        assert!(!should_preserve_unmanaged_kitchen_runtime(
+            false,
+            Some(&previous),
+            &changed
+        ));
+    }
+
+    #[test]
+    fn kitchen_untrack_preserves_runtime_but_remove_and_disable_restore_comfyui_requirement() {''',
+              'unmanaged runtime recovery policy test',
+          )
+
+          # Ensure exactly one helper definition plus four call sites remain.
+          lib = Path('src-tauri/src/lib.rs').read_text(encoding='utf-8')
+          count = lib.count('restore_checkpoint_with_kitchen_runtime(')
+          if count != 5:
+              raise SystemExit(f'expected restore helper + four call sites, found {count}')
+
+          replace_once(
+              'README.md',
+              '''Comfy Kitchen is handled as a project materialization rather than generic Python dependency sync. When source management is enabled, Patcher initializes the checkout's required submodules, asks the checkout's normal PEP 517/setuptools build to produce a wheel, installs that wheel into the configured installation Python, and records source/runtime provenance separately. Upstream Comfy Kitchen remains responsible for CUDA/HIP compiler discovery and architecture policy.''',
+              '''Comfy Kitchen is handled as a project materialization rather than generic Python dependency sync. When source management is enabled, Patcher initializes the checkout's required submodules, asks the checkout's normal PEP 517/setuptools build to produce a wheel, installs that wheel into the configured installation Python, and records source/runtime provenance separately. Upstream Comfy Kitchen remains responsible for CUDA/HIP compiler discovery and architecture policy. The wheel is built before `pip install`; if a failed first source-management attempt never changes the existing unmanaged runtime, automatic recovery verifies that identity and leaves it untouched instead of reinstalling a package unnecessarily.''',
+              'README build-before-install recovery semantics',
+          )
+          replace_once(
+              'CHANGELOG.md',
+              '- Kitchen rollback/checkpoint restore includes runtime materialization state; failed fresh source installs clean up only operation-owned state and preserve/restore retained pre-existing paths.\n',
+              '- Kitchen rollback/checkpoint restore includes runtime materialization state; failed fresh source installs clean up only operation-owned state and preserve/restore retained pre-existing paths.\n- A failed first Kitchen source build now preserves an unchanged pre-existing unmanaged runtime; ComfyUI requirement restoration is reserved for failed attempts that changed or could not verify that runtime.\n',
+              'CHANGELOG unmanaged runtime recovery',
+          )
+          PY
+
+          cargo fmt --manifest-path src-tauri/Cargo.toml
+          grep -Fq 'failed Kitchen source application did not change the pre-existing unmanaged runtime' src-tauri/src/lib.rs
+          grep -Fq 'runtime_identity_matches' src-tauri/src/kitchen.rs
+          grep -Fq 'failed first source-management attempt never changes the existing unmanaged runtime' README.md
+          git diff --check -- CHANGELOG.md README.md src-tauri/src/kitchen.rs src-tauri/src/lib.rs
+
+      - name: Validate permanent CI command path
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+          lock_before="$(git hash-object src-tauri/Cargo.lock)"
+          cargo test --manifest-path src-tauri/Cargo.toml
+          cargo build --manifest-path src-tauri/Cargo.toml
+          git checkout -- src-tauri/Cargo.lock
+          test "$(git hash-object src-tauri/Cargo.lock)" = "$lock_before"
+          git diff --exit-code -- src-tauri/Cargo.lock
+
+      - name: Commit only validated source/docs
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/fix-kitchen-unmanaged-runtime-recovery.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add CHANGELOG.md README.md src-tauri/src/kitchen.rs src-tauri/src/lib.rs
+          test -z "$(git diff --cached --name-only | grep '^src-tauri/Cargo.lock$' || true)"
+          git diff --cached --check
+          git commit -m "Preserve unmanaged Kitchen runtime on pre-install failure"
+          git push origin HEAD:feature/comfy-kitchen-management
