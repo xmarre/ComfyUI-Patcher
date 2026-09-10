@@ -3,7 +3,9 @@
 All notable changes to ComfyUI Patcher are documented here. Earlier release notes
 remain available on the [GitHub Releases](https://github.com/xmarre/ComfyUI-Patcher/releases) page.
 
-## Unreleased
+## [0.1.19] - 2026-09-10
+
+This release adds first-class management for the official `Comfy-Org/comfy-kitchen` source project, keeping its Git checkout and the compiled Python runtime coherent under the same patch/update/rollback lifecycle as the rest of ComfyUI Patcher.
 
 ### Added
 
@@ -11,12 +13,17 @@ remain available on the [GitHub Releases](https://github.com/xmarre/ComfyUI-Patc
 - Added an installation-level Kitchen runtime probe and UI that reports installed/import state independently of whether a source checkout is managed.
 - Added durable **Restore ComfyUI Kitchen** behavior that returns runtime ownership to the requirement declared by the current ComfyUI checkout without deleting the source checkout.
 
+### Fixed
+
+- Patcher-owned root `.patcher-build` output is excluded from meaningful Git dirtiness without hiding similarly named or nested user paths, preventing interrupted/interleaved Kitchen builds from triggering false dirty-worktree strategies.
+- Pending Kitchen preview requests are invalidated after installation registration/update and successful source installation so stale asynchronous previews cannot repopulate cleared UI state.
+
 ### Safety
 
 - Patcher reasserts an active managed Kitchen source build after Patcher-controlled Python dependency installs replace it, defers that reassertion to one final Kitchen pass during installation-wide operations, and blocks Start/Restart when active Kitchen runtime provenance is incoherent.
 - Kitchen Untrack preserves the currently installed runtime while stopping future source reassertion; Disable/Uninstall restore the requirement owned by the current ComfyUI checkout first and recover the previous source runtime if a later lifecycle mutation fails.
 - Kitchen rollback/checkpoint restore includes runtime materialization state; Restore ComfyUI Kitchen retains dirty-worktree recovery data without leaving the user's checkout stashed, and inactive source checkouts no longer expose tracked Update actions. Failed fresh source installs clean up only operation-owned state and preserve/restore retained pre-existing paths.
-- A failed first Kitchen source build now preserves an unchanged pre-existing unmanaged runtime; ComfyUI requirement restoration is reserved for failed attempts that changed or could not verify that runtime.
+- A failed first Kitchen source build preserves an unchanged pre-existing unmanaged runtime; ComfyUI requirement restoration is reserved for failed attempts that changed or could not verify that runtime.
 
 ## [0.1.18] - 2026-08-30
 
@@ -195,6 +202,7 @@ This cumulative maintenance release contains every merged change since v0.1.9.
 - Fixed transient Windows directory deletion failures during uninstall with retry and safe staging behavior.
 - Fixed force-pushed pull requests failing to refresh cached PR overlay and preview refs with a non-fast-forward fetch rejection. Forced updates are restricted to disposable refs owned by ComfyUI Patcher.
 
+[0.1.19]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.18...v0.1.19
 [0.1.18]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.17...v0.1.18
 [0.1.17]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.16...v0.1.17
 [0.1.16]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.15...v0.1.16
