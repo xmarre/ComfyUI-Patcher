@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -20,6 +21,30 @@ def replace_bytes(path: str, old: str, new: str, expected: int = 1) -> None:
     target.write_bytes(data.replace(old_bytes, new_bytes))
 
 
+def replace_cargo_lock_version() -> None:
+    path = Path("src-tauri/Cargo.lock")
+    data = path.read_bytes()
+    pattern = re.compile(
+        br'name = "comfyui-patcher"(\r?\n)version = "0\.1\.18"(\r?\n)'
+    )
+    matches = list(pattern.finditer(data))
+    if len(matches) != 1:
+        raise SystemExit(
+            f"src-tauri/Cargo.lock: expected one comfyui-patcher 0.1.18 block, found {len(matches)}"
+        )
+    data = pattern.sub(
+        lambda match: (
+            b'name = "comfyui-patcher"'
+            + match.group(1)
+            + b'version = "0.1.19"'
+            + match.group(2)
+        ),
+        data,
+        count=1,
+    )
+    path.write_bytes(data)
+
+
 replace_bytes(
     "package.json",
     '"name": "comfyui-patcher",\n  "private": true,\n  "version": "0.1.18"',
@@ -40,11 +65,7 @@ replace_bytes(
     'name = "comfyui-patcher"\nversion = "0.1.18"',
     'name = "comfyui-patcher"\nversion = "0.1.19"',
 )
-replace_bytes(
-    "src-tauri/Cargo.lock",
-    'name = "comfyui-patcher"\nversion = "0.1.18"\n',
-    'name = "comfyui-patcher"\nversion = "0.1.19"\n',
-)
+replace_cargo_lock_version()
 replace_bytes(
     "src-tauri/tauri.conf.json",
     '"productName": "ComfyUI Patcher",\n  "version": "0.1.18"',
