@@ -26,8 +26,10 @@ jobs:
           set -euo pipefail
           python tools/prepare_kitchen_lifecycle_readme_anchor.py
           python tools/fix_kitchen_lifecycle_recovery.py
+          python tools/fix_kitchen_lifecycle_result_type.py
           cargo fmt --manifest-path src-tauri/Cargo.toml
           grep -Fq 'recover_kitchen_source_after_lifecycle_failure' src-tauri/src/lib.rs
+          grep -Fq '.map(|_| ())' src-tauri/src/lib.rs
           grep -Fq 'Uninstall stages the checkout outside its managed sibling path' README.md
           git diff --check -- CHANGELOG.md README.md src-tauri/src/lib.rs
 
@@ -51,6 +53,7 @@ jobs:
           git rm .github/workflows/fix-kitchen-lifecycle-recovery.yml
           git rm tools/fix_kitchen_lifecycle_recovery.py
           git rm tools/prepare_kitchen_lifecycle_readme_anchor.py
+          git rm tools/fix_kitchen_lifecycle_result_type.py
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add CHANGELOG.md README.md src-tauri/src/lib.rs
