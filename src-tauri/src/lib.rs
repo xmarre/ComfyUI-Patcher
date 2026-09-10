@@ -3522,6 +3522,17 @@ async fn restore_checkpoint_with_kitchen_runtime(
         return restore_checkpoint_state(state, path, &repo.id, checkpoint, restore_stash).await;
     }
 
+    // A Restore ComfyUI Kitchen checkpoint can intentionally retain a stash
+    // while leaving the user's worktree dirty. When that checkpoint is restored,
+    // its stash is the recovery copy for those untracked paths, so remove only
+    // those currently visible untracked files before resetting/rebuilding source.
+    if restore_stash && checkpoint.stash_created {
+        let current_status = inspect_repo(path).await?;
+        if !current_status.untracked_files.is_empty() {
+            clean_untracked_paths(path, &current_status.untracked_files).await?;
+        }
+    }
+
     restore_checkpoint_state(state, path, &repo.id, checkpoint, false).await?;
     if let Some(saved_materialization) = checkpoint.materialization_state.as_ref() {
         let status = inspect_repo(path).await?;
@@ -5346,34 +5357,46 @@ async fn create_kitchen_runtime_checkpoint(
         ));
     }
     let path = Path::new(&repo.local_path);
-    let status = inspect_repo(path).await?;
-    let head = status
-        .head_sha
-        .clone()
-        .ok_or_else(|| AppError::Git("Kitchen repository has no HEAD".to_string()))?;
-    let operation = state
-        .db
-        .get_operation(operation_id)?
-        .ok_or_else(|| AppError::NotFound("operation not found".to_string()))?;
-    let (label, reason) = checkpoint_label_and_reason(&operation, repo);
-    let dependency_state =
-        build_repo_dependency_state(installation, repo, path, &status.changed_files);
-    state.db.create_checkpoint(
-        &repo.id,
-        operation_id,
-        &head,
-        status.branch.as_deref(),
-        status.is_detached,
-        true,
-        repo.tracked_target_kind.as_ref(),
-        repo.tracked_target_input.as_deref(),
-        repo.tracked_target_resolved_sha.as_deref(),
-        false,
+    let checkpoint = create_checkpoint_if_needed(
+        state,
+        installation,
+        repo,
         None,
-        Some(&label),
-        Some(&reason),
-        dependency_state.as_ref(),
+        operation_id,
+        &DirtyRepoStrategy::Stash,
     )
+    .await?;
+
+    // Restore ComfyUI Kitchen does not mutate the source checkout. If the user
+    // has local work, retain an immutable recovery stash in the checkpoint but
+    // immediately put the worktree back exactly where the user left it.
+    if checkpoint.stash_created {
+        let stash_ref = checkpoint.stash_ref.as_deref().ok_or_else(|| {
+            AppError::Git(
+                "Kitchen runtime checkpoint recorded a stash without its recovery reference"
+                    .to_string(),
+            )
+        })?;
+        if let Err(apply_error) = apply_stash_keep(path, stash_ref).await {
+            let compensation = async {
+                reset_hard(path, &checkpoint.old_head_sha).await?;
+                let status = inspect_repo(path).await?;
+                if !status.untracked_files.is_empty() {
+                    clean_untracked_paths(path, &status.untracked_files).await?;
+                }
+                apply_stash_keep(path, stash_ref).await?;
+                Ok::<(), AppError>(())
+            }
+            .await;
+            return match compensation {
+                Ok(()) => Err(apply_error),
+                Err(compensation_error) => Err(AppError::Git(format!(
+                    "{apply_error}; additionally failed to restore the Kitchen worktree from its retained checkpoint stash: {compensation_error}"
+                ))),
+            };
+        }
+    }
+    Ok(checkpoint)
 }
 
 #[tauri::command]
@@ -5478,7 +5501,7 @@ async fn run_restore_comfy_managed_kitchen(
                 &installation,
                 &repo,
                 &checkpoint,
-                false,
+                true,
                 true,
                 None,
             )

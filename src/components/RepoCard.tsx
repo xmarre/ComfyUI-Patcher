@@ -222,6 +222,8 @@ export default function RepoCard({
   const [overlayPreview, setOverlayPreview] = useState<RepoActionPreview | null>(null);
   const integrationBranch = trackedState?.materializedBranch ?? repo.currentBranch ?? "detached";
   const hasOverlays = overlays.length > 0;
+  const hasTrackedUpdate =
+    trackedState !== null || (repo.trackedTargetKind !== null && repo.trackedTargetInput !== null);
   const lifecycleSupported = repo.kind !== "core";
 
   async function runStackAction(action: () => Promise<boolean>): Promise<boolean> {
@@ -581,19 +583,21 @@ export default function RepoCard({
       </div>
 
       <div className="row gap repo-action-wrap">
-        <button
-          className="secondary"
-          disabled={isSubmitting}
-          onClick={() =>
-            void runLocalAction(async () => {
-              const preview = await api.previewTrackedRepoUpdate(repo.id);
-              setUpdatePreview(preview);
-            })
-          }
-        >
-          Preview update
-        </button>
-        {onUpdate ? (
+        {hasTrackedUpdate ? (
+          <button
+            className="secondary"
+            disabled={isSubmitting}
+            onClick={() =>
+              void runLocalAction(async () => {
+                const preview = await api.previewTrackedRepoUpdate(repo.id);
+                setUpdatePreview(preview);
+              })
+            }
+          >
+            Preview update
+          </button>
+        ) : null}
+        {hasTrackedUpdate && onUpdate ? (
           <button disabled={isSubmitting} onClick={() => void runLocalAction(onUpdate)}>
             Update
           </button>
@@ -615,7 +619,7 @@ export default function RepoCard({
               void runLocalAction(async () => {
                 if (
                   !window.confirm(
-                    "Restore the comfy-kitchen requirement declared by the current ComfyUI checkout? The source checkout stays on disk, but its tracked source target and built runtime override are deactivated. Use Install / Patch source to enable source management again."
+                    "Restore the comfy-kitchen requirement declared by the current ComfyUI checkout? The source checkout stays on disk, but its tracked source target and built runtime override are deactivated. Local source changes stay in place and are retained in the rollback checkpoint. Use Install / Patch source or set a tracked base target to enable source management again."
                   )
                 ) {
                   return;
@@ -634,7 +638,9 @@ export default function RepoCard({
           {historyOpen ? "Hide history" : "History"}
         </button>
       </div>
-      {renderPreview(updatePreview, "Preview the tracked update plan to inspect incoming commits and files before mutating the checkout.")}
+      {hasTrackedUpdate
+        ? renderPreview(updatePreview, "Preview the tracked update plan to inspect incoming commits and files before mutating the checkout.")
+        : null}
 
       {historyOpen ? (
         <div className="repo-history-panel">
