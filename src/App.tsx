@@ -1012,6 +1012,7 @@ export default function App() {
                 });
                 setCorePreview(null);
                 setFrontendPreview(null);
+                kitchenPreviewRequestSeq.current += 1;
                 setKitchenActionPreview(null);
                 setNodePreview(null);
                 setCorePreviewError(null);
@@ -1832,6 +1833,7 @@ export default function App() {
                         setTrackedTarget: true,
                         restartAfterSuccess: false
                       });
+                      kitchenPreviewRequestSeq.current += 1;
                       setKitchenActionPreview(null);
                       setKitchenPreviewError(null);
                     })
