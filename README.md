@@ -316,6 +316,8 @@ A Patcher-managed Kitchen source override is reasserted after Patcher-controlled
 
 **Untrack** stops source management/reassertion but deliberately leaves the currently installed Kitchen package untouched. **Restore ComfyUI Kitchen**, **Disable**, and **Uninstall** return runtime ownership to the `comfy-kitchen` requirement declared by the current managed ComfyUI checkout before deactivating/removing the source override.
 
+- **Disable / Uninstall**: before moving or deleting an active source checkout, Patcher requires the deployed source checkout to be recoverable, then restores and verifies the Kitchen requirement declared by the current managed ComfyUI core checkout. If the later filesystem/DB transition fails, Patcher restores the checkout path and reasserts the previous source runtime before reporting failure. Uninstall stages the checkout outside its managed sibling path until DB removal succeeds, so a cleanup failure cannot silently recreate source management.
+
 ---
 
 ## Setup
