@@ -4,11 +4,12 @@ mod errors;
 mod execution;
 mod git;
 mod github;
+mod kitchen;
 mod models;
 mod process;
 mod registry;
-mod state;
 mod stack;
+mod state;
 mod util;
 
 use crate::deps::{execute_dependency_sync, plan_dependency_sync};
@@ -16,11 +17,10 @@ use crate::errors::{AppError, AppResult};
 use crate::git::{
     apply_stash, apply_stash_keep, canonicalize_remote, checkout_paths, clean_untracked_paths,
     clone_repo, commits_between, diff_name_status, ensure_clean_or_apply_strategy, fetch_origin,
-    fetch_refspec, force_fetch_refspec, inspect_repo, is_git_repo,
-    join_custom_node_path, merge_abort, merge_no_ff, preview_sequential_merge,
-    remote_branches_pointing_at, reset_hard, rev_parse, run_git_allow_fail, submodule_update,
-    switch_branch, switch_detached, unmerged_paths, SequentialMergePreview,
-    validate_custom_node_dir_name, RepoStatus,
+    fetch_refspec, force_fetch_refspec, inspect_repo, is_git_repo, join_custom_node_path,
+    merge_abort, merge_no_ff, preview_sequential_merge, remote_branches_pointing_at, reset_hard,
+    rev_parse, run_git_allow_fail, submodule_update, switch_branch, switch_detached,
+    unmerged_paths, validate_custom_node_dir_name, RepoStatus, SequentialMergePreview,
 };
 use crate::models::*;
 use crate::stack::{overlay_dependency_index, validate_overlay_stack};
@@ -131,7 +131,10 @@ fn ensure_repo_lifecycle_supported(repo: &ManagedRepo, action: &str) -> AppResul
     Ok(())
 }
 
-fn checkpoint_label_and_reason(operation: &OperationRecord, repo: &ManagedRepo) -> (String, String) {
+fn checkpoint_label_and_reason(
+    operation: &OperationRecord,
+    repo: &ManagedRepo,
+) -> (String, String) {
     let reason = operation
         .requested_input
         .clone()
@@ -139,10 +142,19 @@ fn checkpoint_label_and_reason(operation: &OperationRecord, repo: &ManagedRepo) 
     let label = match operation.kind {
         OperationKind::PatchCore
         | OperationKind::PatchFrontend
+        | OperationKind::PatchKitchen
         | OperationKind::PatchCustomNode
         | OperationKind::ManageRepoStack => format!("Before applying {}", reason),
-        OperationKind::InstallFrontend | OperationKind::InstallCustomNode => {
+        OperationKind::InstallFrontend
+        | OperationKind::InstallKitchen
+        | OperationKind::InstallCustomNode => {
             format!("Before installing {}", reason)
+        }
+        OperationKind::RestoreComfyManagedKitchen => {
+            format!(
+                "Before restoring {} to the ComfyUI requirement",
+                repo.display_name
+            )
         }
         OperationKind::UpdateRepo
         | OperationKind::UpdateAll
@@ -157,7 +169,9 @@ fn checkpoint_label_and_reason(operation: &OperationRecord, repo: &ManagedRepo) 
         OperationKind::UntrackRepo => format!("Before untracking {}", repo.display_name),
         OperationKind::StartInstallation
         | OperationKind::StopInstallation
-        | OperationKind::RestartInstallation => format!("Before lifecycle action on {}", repo.display_name),
+        | OperationKind::RestartInstallation => {
+            format!("Before lifecycle action on {}", repo.display_name)
+        }
     };
     (label, reason)
 }
@@ -172,6 +186,15 @@ fn repo_has_tracked_local_changes(status: &RepoStatus) -> bool {
     !status.tracked_changed_files.is_empty()
 }
 
+fn installation_repo_priority(kind: &RepoKind) -> u8 {
+    match kind {
+        RepoKind::Core => 0,
+        RepoKind::Frontend => 1,
+        RepoKind::CustomNode => 2,
+        RepoKind::Kitchen => 3,
+    }
+}
+
 fn collect_installation_repos(detail: InstallationDetail) -> Vec<ManagedRepo> {
     let mut repos = Vec::new();
     if let Some(core) = detail.core_repo {
@@ -181,6 +204,10 @@ fn collect_installation_repos(detail: InstallationDetail) -> Vec<ManagedRepo> {
         repos.push(frontend);
     }
     repos.extend(detail.custom_node_repos);
+    if let Some(kitchen) = detail.kitchen_repo {
+        repos.push(kitchen);
+    }
+    repos.sort_by_key(|repo| installation_repo_priority(&repo.kind));
     repos
 }
 
@@ -197,11 +224,13 @@ async fn ensure_repo_clean_after_patcher_mutation(path: &Path, context: &str) ->
     )))
 }
 
-
 fn is_frontend_lockfile_path(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
     let trimmed = normalized.trim_start_matches("./");
-    matches!(trimmed, "package-lock.json" | "pnpm-lock.yaml" | "yarn.lock")
+    matches!(
+        trimmed,
+        "package-lock.json" | "pnpm-lock.yaml" | "yarn.lock"
+    )
 }
 
 async fn restore_frontend_lockfile_artifacts(path: &Path) -> AppResult<Vec<String>> {
@@ -286,11 +315,13 @@ async fn discover_repositories_for_installation(
 ) -> AppResult<(
     Option<DiscoveredRepoState>,
     Option<DiscoveredRepoState>,
+    Option<DiscoveredRepoState>,
     Vec<DiscoveredRepoState>,
 )> {
     let root = PathBuf::from(&installation.comfy_root);
     let mut core_repo = None;
     let mut frontend_repo = None;
+    let mut kitchen_repo = None;
     let mut custom_node_repos = Vec::new();
     let ignored_paths: HashSet<String> = state
         .db
@@ -338,6 +369,33 @@ async fn discover_repositories_for_installation(
         }
     }
 
+    let kitchen_root = kitchen::default_kitchen_path(installation);
+    let kitchen_root_string = kitchen_root.to_string_lossy().to_string();
+    if !ignored_paths.contains(&kitchen_root_string)
+        && has_git_marker(&kitchen_root)
+        && is_git_repo(&kitchen_root).await
+    {
+        let status = inspect_repo(&kitchen_root).await?;
+        let expected_remote =
+            canonicalize_remote(kitchen::DEFAULT_KITCHEN_REPO_URL).ok_or_else(|| {
+                AppError::InvalidInput("invalid built-in Comfy Kitchen repository URL".to_string())
+            })?;
+        if status.origin_url.as_deref() == Some(expected_remote.as_str()) {
+            let repo = state.db.upsert_repo(
+                &installation.id,
+                RepoKind::Kitchen,
+                "Comfy Kitchen",
+                &kitchen_root_string,
+                status.origin_url.as_deref(),
+                status.head_sha.as_deref(),
+                status.branch.as_deref(),
+                status.is_detached,
+                repo_has_tracked_local_changes(&status),
+            )?;
+            kitchen_repo = Some(DiscoveredRepoState { repo, status });
+        }
+    }
+
     let custom_nodes_dir = PathBuf::from(&installation.custom_nodes_dir);
     if custom_nodes_dir.exists() {
         let mut candidates = Vec::new();
@@ -345,10 +403,7 @@ async fn discover_repositories_for_installation(
             let entry = entry?;
             let path = entry.path();
             let path_string = path.to_string_lossy().to_string();
-            if ignored_paths.contains(&path_string)
-                || !path.is_dir()
-                || !has_git_marker(&path)
-            {
+            if ignored_paths.contains(&path_string) || !path.is_dir() || !has_git_marker(&path) {
                 continue;
             }
             candidates.push(path);
@@ -409,6 +464,9 @@ async fn discover_repositories_for_installation(
     if let Some(repo) = frontend_repo.as_ref() {
         discovered_paths.insert(repo.repo.local_path.clone());
     }
+    if let Some(repo) = kitchen_repo.as_ref() {
+        discovered_paths.insert(repo.repo.local_path.clone());
+    }
     for repo in &custom_node_repos {
         discovered_paths.insert(repo.repo.local_path.clone());
     }
@@ -424,7 +482,7 @@ async fn discover_repositories_for_installation(
         }
     }
 
-    Ok((core_repo, frontend_repo, custom_node_repos))
+    Ok((core_repo, frontend_repo, kitchen_repo, custom_node_repos))
 }
 
 async fn discover_custom_node_repos_best_effort(
@@ -516,7 +574,9 @@ fn dependency_manifest_files(repo: &ManagedRepo, repo_path: &Path) -> Vec<String
         .iter()
         .filter_map(|relative| {
             let candidate = repo_path.join(relative);
-            candidate.exists().then(|| candidate.to_string_lossy().to_string())
+            candidate
+                .exists()
+                .then(|| candidate.to_string_lossy().to_string())
         })
         .collect()
 }
@@ -524,6 +584,7 @@ fn dependency_manifest_files(repo: &ManagedRepo, repo_path: &Path) -> Vec<String
 fn dependency_manifest_candidates(repo_kind: &RepoKind) -> &'static [&'static str] {
     match repo_kind {
         RepoKind::Core | RepoKind::CustomNode => &["requirements.txt", "pyproject.toml"],
+        RepoKind::Kitchen => &["pyproject.toml", "setup.py", ".gitmodules"],
         RepoKind::Frontend => &[
             "package.json",
             "package-lock.json",
@@ -533,10 +594,7 @@ fn dependency_manifest_candidates(repo_kind: &RepoKind) -> &'static [&'static st
     }
 }
 
-fn relevant_dependency_changes(
-    repo: &ManagedRepo,
-    changed_files: &[String],
-) -> Vec<String> {
+fn relevant_dependency_changes(repo: &ManagedRepo, changed_files: &[String]) -> Vec<String> {
     let manifest_candidates = dependency_manifest_candidates(&repo.kind);
     changed_files
         .iter()
@@ -728,18 +786,17 @@ async fn hydrate_installation_detail(
         .db
         .get_installation(installation_id)?
         .ok_or_else(|| AppError::NotFound("installation not found".to_string()))?;
-    let (core_repo, frontend_repo, discovered_custom_nodes) =
-        discover_repositories_for_installation(
-            state,
-            &installation,
-            prune_missing_custom_nodes,
-        )
-        .await?;
+    let (core_repo, frontend_repo, kitchen_repo, discovered_custom_nodes) =
+        discover_repositories_for_installation(state, &installation, prune_missing_custom_nodes)
+            .await?;
     let mut discovered_statuses = HashMap::new();
     if let Some(repo) = core_repo {
         discovered_statuses.insert(repo.repo.id.clone(), repo.status);
     }
     if let Some(repo) = frontend_repo {
+        discovered_statuses.insert(repo.repo.id.clone(), repo.status);
+    }
+    if let Some(repo) = kitchen_repo {
         discovered_statuses.insert(repo.repo.id.clone(), repo.status);
     }
     for repo in discovered_custom_nodes {
@@ -749,6 +806,11 @@ async fn hydrate_installation_detail(
     // Cached warnings belong to the fast detail-read path. A full hydration
     // rebuilds them from the freshly inspected repository state below.
     detail.warnings.clear();
+    let kitchen_runtime = kitchen::probe_kitchen_runtime(&installation).await?;
+    state
+        .db
+        .set_kitchen_runtime(installation_id, &kitchen_runtime)?;
+    detail.kitchen_runtime = Some(kitchen_runtime.clone());
 
     if let Some(repo) = detail.core_repo.take() {
         let repo = enrich_managed_repo(
@@ -780,6 +842,30 @@ async fn hydrate_installation_detail(
                 .push(format!("{}: {}", repo.display_name, warning));
         }
         detail.frontend_repo = Some(repo);
+    }
+
+    if let Some(repo) = detail.kitchen_repo.take() {
+        let mut repo = enrich_managed_repo(
+            state,
+            &installation,
+            &repo,
+            discovered_statuses.get(&repo.id).cloned(),
+        )
+        .await?;
+        if repo.materialization_state.is_some() {
+            let materialization = kitchen::evaluate_materialization(&repo, &kitchen_runtime);
+            if let Some(warning) = kitchen::materialization_warning(&materialization) {
+                repo.live_warnings.push(warning);
+            }
+            repo.materialization_state = Some(materialization);
+            state.db.update_repo_reconciliation_state(&mut repo)?;
+        }
+        for warning in &repo.live_warnings {
+            detail
+                .warnings
+                .push(format!("{}: {}", repo.display_name, warning));
+        }
+        detail.kitchen_repo = Some(repo);
     }
 
     let mut enriched_custom_nodes = Vec::with_capacity(detail.custom_node_repos.len());
@@ -823,15 +909,17 @@ fn stack_preview_items(tracked_state: &TrackedRepoState) -> Vec<RepoStackPreview
         enabled: true,
         status: None,
     }];
-    items.extend(tracked_state.overlays.iter().map(|overlay| RepoStackPreviewItem {
-        kind: "overlay".to_string(),
-        label: overlay.summary_label.clone(),
-        enabled: overlay.enabled,
-        status: overlay
-            .last_apply_status
-            .as_ref()
-            .map(|status| serde_json::to_string(status).unwrap_or_default())
-            .map(|value| value.trim_matches('"').to_string()),
+    items.extend(tracked_state.overlays.iter().map(|overlay| {
+        RepoStackPreviewItem {
+            kind: "overlay".to_string(),
+            label: overlay.summary_label.clone(),
+            enabled: overlay.enabled,
+            status: overlay
+                .last_apply_status
+                .as_ref()
+                .map(|status| serde_json::to_string(status).unwrap_or_default())
+                .map(|value| value.trim_matches('"').to_string()),
+        }
     }));
     items
 }
@@ -929,7 +1017,8 @@ async fn incoming_write_paths_for_tracked_state(
     current_head: &str,
 ) -> AppResult<HashSet<String>> {
     let path = Path::new(&repo.local_path);
-    let base_resolved = resolve_existing_base_target(state, installation, repo, tracked_state).await?;
+    let base_resolved =
+        resolve_existing_base_target(state, installation, repo, tracked_state).await?;
     let base_ref = ensure_preview_target_available(path, &base_resolved).await?;
     let mut write_paths = HashSet::new();
 
@@ -1002,9 +1091,14 @@ async fn preflight_abort_strategy_for_tracked_state(
         .head_sha
         .as_deref()
         .ok_or_else(|| AppError::Git("repository has no HEAD".to_string()))?;
-    let incoming_write_paths =
-        incoming_write_paths_for_tracked_state(state, installation, repo, tracked_state, current_head)
-            .await?;
+    let incoming_write_paths = incoming_write_paths_for_tracked_state(
+        state,
+        installation,
+        repo,
+        tracked_state,
+        current_head,
+    )
+    .await?;
 
     let mut colliding_paths = status
         .untracked_files
@@ -1042,7 +1136,11 @@ fn sequential_stack_conflict_message(conflict: &SequentialStackConflict) -> Stri
     } else {
         format!(
             "earlier overlay{} {}",
-            if conflict.prior_prs.len() == 1 { "" } else { "s" },
+            if conflict.prior_prs.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
             conflict
                 .prior_prs
                 .iter()
@@ -1079,7 +1177,11 @@ async fn probe_sequential_stack_conflicts(
     let mut accumulated_head = ensure_preview_target_available(path, &base_resolved).await?;
     let mut prior_prs = Vec::new();
 
-    for overlay in tracked_state.overlays.iter().filter(|overlay| overlay.enabled) {
+    for overlay in tracked_state
+        .overlays
+        .iter()
+        .filter(|overlay| overlay.enabled)
+    {
         let overlay_resolved = resolve_stored_overlay_target(overlay);
         let incoming_head = ensure_preview_target_available(path, &overlay_resolved).await?;
         match preview_sequential_merge(path, &accumulated_head, &incoming_head).await? {
@@ -1109,9 +1211,13 @@ async fn preview_tracked_state_application(
 ) -> AppResult<RepoActionPreview> {
     let live_repo = enrich_managed_repo(state, installation, repo, None).await?;
     let path = Path::new(&repo.local_path);
-    let base_resolved = resolve_existing_base_target(state, installation, repo, tracked_state).await?;
-    let enabled_overlays: Vec<&TrackedPrOverlay> =
-        tracked_state.overlays.iter().filter(|overlay| overlay.enabled).collect();
+    let base_resolved =
+        resolve_existing_base_target(state, installation, repo, tracked_state).await?;
+    let enabled_overlays: Vec<&TrackedPrOverlay> = tracked_state
+        .overlays
+        .iter()
+        .filter(|overlay| overlay.enabled)
+        .collect();
     let has_enabled_overlays = !enabled_overlays.is_empty();
     let target_head_sha = if has_enabled_overlays {
         None
@@ -1133,7 +1239,10 @@ async fn preview_tracked_state_application(
         .clone()
         .or_else(|| Some(base_resolved.checkout_ref.clone()));
     let mut warnings = live_repo.live_warnings.clone();
-    if matches!(live_repo.live_status, RepoLiveStatus::Missing | RepoLiveStatus::NotGit) {
+    if matches!(
+        live_repo.live_status,
+        RepoLiveStatus::Missing | RepoLiveStatus::NotGit
+    ) {
         return Ok(RepoActionPreview {
             action: action.to_string(),
             repo_id: Some(repo.id.clone()),
@@ -1271,6 +1380,7 @@ async fn preview_resolved_install_target(
         repo_display_name: match kind {
             RepoKind::Core => "ComfyUI".to_string(),
             RepoKind::Frontend => "ComfyUI Frontend".to_string(),
+            RepoKind::Kitchen => "Comfy Kitchen".to_string(),
             RepoKind::CustomNode => resolved.suggested_local_dir_name.clone(),
         },
         current_head_sha: None,
@@ -1279,7 +1389,10 @@ async fn preview_resolved_install_target(
         target_ref: Some(resolved.checkout_ref.clone()),
         commits: Vec::new(),
         file_changes: Vec::new(),
-        warnings: vec!["No local checkout exists yet, so this preview only shows the resolved target.".to_string()],
+        warnings: vec![
+            "No local checkout exists yet, so this preview only shows the resolved target."
+                .to_string(),
+        ],
         conflict_files: Vec::new(),
         stack_preview,
         dependency_state: None,
@@ -1306,7 +1419,10 @@ fn parse_github_pr_url_same_repo(input: &str) -> Option<(String, u64)> {
 
 async fn infer_overlay_base_ref(repo: &ManagedRepo) -> Option<String> {
     if let Some(base_ref) = repo.tracked_state.as_ref().and_then(|state| {
-        if matches!(state.base.target_kind, TargetKind::Branch | TargetKind::NamedRef) {
+        if matches!(
+            state.base.target_kind,
+            TargetKind::Branch | TargetKind::NamedRef
+        ) {
             Some(state.base.checkout_ref.clone())
         } else {
             None
@@ -1326,7 +1442,12 @@ async fn infer_overlay_base_ref(repo: &ManagedRepo) -> Option<String> {
     }
     let upstream = run_git_allow_fail(
         path,
-        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
     )
     .await
     .ok()
@@ -1348,7 +1469,8 @@ async fn fetch_origin_with_retry(path: &Path) -> AppResult<()> {
             Err(error) => {
                 last_error = Some(error);
                 if attempt < SAME_REPO_GIT_ATTEMPTS {
-                    tokio::time::sleep(std::time::Duration::from_millis(250 * attempt as u64)).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(250 * attempt as u64))
+                        .await;
                 }
             }
         }
@@ -1356,11 +1478,7 @@ async fn fetch_origin_with_retry(path: &Path) -> AppResult<()> {
     Err(last_error.expect("same-repo git retry loop must capture an error"))
 }
 
-async fn force_fetch_refspec_with_retry(
-    path: &Path,
-    remote: &str,
-    refspec: &str,
-) -> AppResult<()> {
+async fn force_fetch_refspec_with_retry(path: &Path, remote: &str, refspec: &str) -> AppResult<()> {
     let mut last_error = None;
     for attempt in 1..=SAME_REPO_GIT_ATTEMPTS {
         match force_fetch_refspec(path, remote, refspec).await {
@@ -1368,7 +1486,8 @@ async fn force_fetch_refspec_with_retry(
             Err(error) => {
                 last_error = Some(error);
                 if attempt < SAME_REPO_GIT_ATTEMPTS {
-                    tokio::time::sleep(std::time::Duration::from_millis(250 * attempt as u64)).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(250 * attempt as u64))
+                        .await;
                 }
             }
         }
@@ -1493,7 +1612,8 @@ async fn try_resolve_same_repo_pr_without_github_api(
                 overlay_sha_candidates[0].clone()
             } else {
                 let _ = fetch_origin_with_retry(path).await;
-                let candidates = remote_branches_pointing_at(path, "origin", &merge_base_sha).await?;
+                let candidates =
+                    remote_branches_pointing_at(path, "origin", &merge_base_sha).await?;
                 let known_overlay_candidates = tracked_state
                     .overlays
                     .iter()
@@ -1544,7 +1664,12 @@ async fn try_resolve_same_repo_pr_without_github_api(
     let resolved_sha = rev_parse(path, &overlay_ref).await.ok().flatten();
     let summary_label = resolved_sha
         .as_deref()
-        .map(|sha| format!("PR #{pr_number} @ {}", sha.chars().take(7).collect::<String>()))
+        .map(|sha| {
+            format!(
+                "PR #{pr_number} @ {}",
+                sha.chars().take(7).collect::<String>()
+            )
+        })
         .unwrap_or_else(|| format!("PR #{pr_number}"));
 
     Ok(Some(ResolvedTarget {
@@ -1562,6 +1687,13 @@ async fn try_resolve_same_repo_pr_without_github_api(
         summary_label,
         suggested_local_dir_name: String::new(),
     }))
+}
+
+fn default_remote_for_repo_kind(kind: &RepoKind) -> Option<&'static str> {
+    match kind {
+        RepoKind::Kitchen => Some(kitchen::DEFAULT_KITCHEN_REPO_URL),
+        _ => None,
+    }
 }
 
 async fn resolve_target_for_context(
@@ -1586,6 +1718,12 @@ async fn resolve_target_for_context(
                     .get_installation_detail(&installation.id)?
                     .frontend_repo
             }
+            RepoKind::Kitchen => {
+                state
+                    .db
+                    .get_installation_detail(&installation.id)?
+                    .kitchen_repo
+            }
             RepoKind::CustomNode => None,
         },
     };
@@ -1594,7 +1732,16 @@ async fn resolve_target_for_context(
         return Ok(resolved.clone());
     }
 
-    let current_remote = repo.as_ref().and_then(|r| r.canonical_remote.as_deref());
+    let current_remote = repo
+        .as_ref()
+        .and_then(|r| r.canonical_remote.as_deref())
+        .or_else(|| {
+            if repo.is_none() {
+                default_remote_for_repo_kind(kind)
+            } else {
+                None
+            }
+        });
     let current_repo_path = repo.as_ref().map(|r| Path::new(&r.local_path));
     match state
         .github
@@ -1638,7 +1785,6 @@ fn ensure_remote_matches(current: Option<&str>, target: &ResolvedTarget) -> AppR
     }
     Ok(())
 }
-
 
 fn canonical_target_remote(resolved: &ResolvedTarget) -> AppResult<String> {
     canonicalize_remote(&resolved.canonical_repo_url).ok_or_else(|| {
@@ -1786,7 +1932,8 @@ async fn load_repo_tracked_state(
     }
 
     let resolved =
-        resolve_target_for_context(state, installation, &repo.kind, Some(&repo.id), raw_input).await?;
+        resolve_target_for_context(state, installation, &repo.kind, Some(&repo.id), raw_input)
+            .await?;
     ensure_remote_matches(repo.canonical_remote.as_deref(), &resolved)?;
     let base_ref = resolved
         .pr_base_ref
@@ -1797,7 +1944,9 @@ async fn load_repo_tracked_state(
         .as_deref()
         .and_then(canonicalize_remote)
         .or_else(|| canonicalize_remote(&resolved.canonical_repo_url))
-        .ok_or_else(|| AppError::Github("tracked PR base repo could not be canonicalized".to_string()))?;
+        .ok_or_else(|| {
+            AppError::Github("tracked PR base repo could not be canonicalized".to_string())
+        })?;
     Ok(Some(TrackedRepoState {
         version: STACK_TRACKING_VERSION,
         base: TrackedBaseTarget {
@@ -1867,7 +2016,10 @@ async fn restore_checkpoint_state(
         }
     }
     if let Err(err) = reset_hard(path, &checkpoint.old_head_sha).await {
-        restore_errors.push(format!("failed to reset HEAD {}: {err}", checkpoint.old_head_sha));
+        restore_errors.push(format!(
+            "failed to reset HEAD {}: {err}",
+            checkpoint.old_head_sha
+        ));
     }
 
     if restore_stash && checkpoint.stash_created {
@@ -1900,6 +2052,15 @@ async fn restore_checkpoint_state(
         ) {
             restore_errors.push(format!("failed to restore tracked target metadata: {err}"));
         }
+    }
+
+    if let Err(err) = state
+        .db
+        .set_repo_materialization_state(repo_id, checkpoint.materialization_state.as_ref())
+    {
+        restore_errors.push(format!(
+            "failed to restore project materialization metadata: {err}"
+        ));
     }
 
     if restore_errors.is_empty() {
@@ -1989,11 +2150,14 @@ async fn hydrate_overlay_dependency_metadata(
             Err(error) => local_error = Some(error),
         }
 
-        let previous_status = overlay.last_apply_status.clone().unwrap_or(if overlay.enabled {
-            OverlayApplyStatus::Pending
-        } else {
-            OverlayApplyStatus::Disabled
-        });
+        let previous_status = overlay
+            .last_apply_status
+            .clone()
+            .unwrap_or(if overlay.enabled {
+                OverlayApplyStatus::Pending
+            } else {
+                OverlayApplyStatus::Disabled
+            });
         let previous_error = overlay.last_error.clone();
         let resolved = match state
             .github
@@ -2054,10 +2218,11 @@ async fn materialize_tracked_state(
         });
     }
 
-    let base_resolved = match resolve_existing_base_target(state, installation, repo, &next_state).await {
-        Ok(resolved) => resolved,
-        Err(err) => return Err((next_state, err)),
-    };
+    let base_resolved =
+        match resolve_existing_base_target(state, installation, repo, &next_state).await {
+            Ok(resolved) => resolved,
+            Err(err) => return Err((next_state, err)),
+        };
     next_state.base = match make_tracked_base_target(&base_resolved) {
         Ok(base) => base,
         Err(err) => return Err((next_state, err)),
@@ -2065,7 +2230,9 @@ async fn materialize_tracked_state(
 
     if next_state.overlays.is_empty() {
         next_state.materialized_branch = None;
-        if let Err(err) = apply_resolved_target(state, app, operation_id, repo, &base_resolved).await {
+        if let Err(err) =
+            apply_resolved_target(state, app, operation_id, repo, &base_resolved).await
+        {
             return Err((next_state, err));
         }
         return Ok(next_state);
@@ -2074,9 +2241,7 @@ async fn materialize_tracked_state(
     if !branch_like_target_kind(&base_resolved.target_kind) {
         return Err((
             next_state,
-            AppError::Conflict(
-                "PR overlay stacks require a branch-like base target".to_string(),
-            ),
+            AppError::Conflict("PR overlay stacks require a branch-like base target".to_string()),
         ));
     }
     if let Err(err) = validate_overlay_stack(&next_state) {
@@ -2131,7 +2296,8 @@ async fn materialize_tracked_state(
             return Err((next_state, err));
         }
 
-        if let Err(err) = ensure_remote_matches(repo.canonical_remote.as_deref(), &overlay_resolved) {
+        if let Err(err) = ensure_remote_matches(repo.canonical_remote.as_deref(), &overlay_resolved)
+        {
             overlay.last_apply_status = Some(OverlayApplyStatus::Error);
             overlay.last_error = Some(err.to_string());
             return Err((next_state, err));
@@ -2242,12 +2408,61 @@ async fn apply_repo_tracking_state(
     sync_dependencies: bool,
     write_tracked_target: bool,
 ) -> AppResult<RepoCheckpoint> {
+    apply_repo_tracking_state_with_override_mode(
+        state,
+        app,
+        operation_id,
+        installation,
+        repo,
+        tracked_state,
+        dirty_repo_strategy,
+        sync_dependencies,
+        write_tracked_target,
+        ManagedPythonOverrideMode::Immediate,
+    )
+    .await
+}
+
+async fn apply_repo_tracking_state_with_override_mode(
+    state: &AppState,
+    app: &AppHandle,
+    operation_id: &str,
+    installation: &Installation,
+    repo: &ManagedRepo,
+    tracked_state: &TrackedRepoState,
+    dirty_repo_strategy: &DirtyRepoStrategy,
+    sync_dependencies: bool,
+    write_tracked_target: bool,
+    override_mode: ManagedPythonOverrideMode,
+) -> AppResult<RepoCheckpoint> {
     validate_overlay_stack(tracked_state)?;
     if let Some(conflict) =
         probe_sequential_stack_conflicts(state, installation, repo, tracked_state).await?
     {
-        return Err(AppError::Conflict(sequential_stack_conflict_message(&conflict)));
+        return Err(AppError::Conflict(sequential_stack_conflict_message(
+            &conflict,
+        )));
     }
+    let previous_kitchen_runtime = if repo.kind == RepoKind::Kitchen {
+        match kitchen::probe_kitchen_runtime(installation).await {
+            Ok(runtime) => Some(runtime),
+            Err(error) => {
+                log_operation(
+                    state,
+                    app,
+                    operation_id,
+                    "materialization",
+                    "warn",
+                    format!(
+                        "could not snapshot the pre-operation Kitchen runtime; failed forward recovery may need to fall back to the current ComfyUI requirement: {error}"
+                    ),
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
     let checkpoint = create_checkpoint_if_needed(
         state,
         installation,
@@ -2279,25 +2494,37 @@ async fn apply_repo_tracking_state(
         .await
         .map_err(|(_, err)| err)?;
 
-        maybe_sync_dependencies(
-            state,
-            app,
-            operation_id,
-            installation,
-            repo,
-            path,
-            sync_dependencies,
-        )
-        .await?;
-        cleanup_frontend_dependency_artifacts(
-            state,
-            app,
-            operation_id,
-            repo,
-            path,
-            sync_dependencies,
-        )
-        .await?;
+        if repo.kind == RepoKind::Kitchen {
+            materialize_kitchen_override(
+                state,
+                app,
+                operation_id,
+                installation,
+                repo,
+            )
+            .await?;
+        } else {
+            maybe_sync_dependencies_with_override_mode(
+                state,
+                app,
+                operation_id,
+                installation,
+                repo,
+                path,
+                sync_dependencies,
+                override_mode,
+            )
+            .await?;
+            cleanup_frontend_dependency_artifacts(
+                state,
+                app,
+                operation_id,
+                repo,
+                path,
+                sync_dependencies,
+            )
+            .await?;
+        }
         ensure_repo_clean_after_patcher_mutation(path, "patcher-controlled checkout materialization")
             .await?;
 
@@ -2353,8 +2580,18 @@ async fn apply_repo_tracking_state(
     match result {
         Ok(()) => Ok(checkpoint),
         Err(err) => {
-            let restore_result =
-                restore_checkpoint_state(state, path, &repo.id, &checkpoint, true).await;
+            let restore_result = restore_checkpoint_with_kitchen_runtime(
+                state,
+                app,
+                operation_id,
+                installation,
+                repo,
+                &checkpoint,
+                true,
+                false,
+                previous_kitchen_runtime.as_ref(),
+            )
+            .await;
             if let Err(refresh_err) = refresh_repo_state(state, &repo.id).await {
                 log_operation(
                     state,
@@ -2386,17 +2623,22 @@ async fn build_requested_tracked_state_for_input(
 
     if matches!(resolved.target_kind, TargetKind::Pr) {
         let Some(base_ref) = resolved.pr_base_ref.clone() else {
-            return Err(AppError::Github("resolved PR is missing a base ref".to_string()));
+            return Err(AppError::Github(
+                "resolved PR is missing a base ref".to_string(),
+            ));
         };
         let canonical_repo_url = resolved
             .pr_base_repo_url
             .as_deref()
             .and_then(canonicalize_remote)
             .or_else(|| canonicalize_remote(&resolved.canonical_repo_url))
-            .ok_or_else(|| AppError::Github("resolved PR base repo could not be canonicalized".to_string()))?;
+            .ok_or_else(|| {
+                AppError::Github("resolved PR base repo could not be canonicalized".to_string())
+            })?;
         let mut tracked_state = match load_repo_tracked_state(state, installation, repo).await? {
             Some(mut existing) => {
-                let existing_base = resolve_existing_base_target(state, installation, repo, &existing).await?;
+                let existing_base =
+                    resolve_existing_base_target(state, installation, repo, &existing).await?;
                 existing.base = make_tracked_base_target(&existing_base)?;
                 if !branch_like_target_kind(&existing.base.target_kind) {
                     return Err(AppError::Conflict(
@@ -2539,7 +2781,8 @@ async fn find_existing_custom_node_repo_by_remote(
                     continue;
                 }
             };
-            let Some(live_remote) = status.origin_url.as_deref().and_then(canonicalize_remote) else {
+            let Some(live_remote) = status.origin_url.as_deref().and_then(canonicalize_remote)
+            else {
                 continue;
             };
             let remote_aliases = if live_remote == target_remote {
@@ -2579,10 +2822,7 @@ async fn find_existing_custom_node_repo_by_remote(
     }
 }
 
-async fn preferred_custom_node_dir_name(
-    state: &AppState,
-    resolved: &ResolvedTarget,
-) -> String {
+async fn preferred_custom_node_dir_name(state: &AppState, resolved: &ResolvedTarget) -> String {
     match state
         .manager_registry
         .preferred_dir_name_for_target(resolved)
@@ -2631,7 +2871,6 @@ fn normalize_path_components(path: &Path) -> PathBuf {
 
     normalized
 }
-
 
 fn normalize_frontend_settings(
     root: &Path,
@@ -2705,9 +2944,7 @@ fn default_frontend_settings_for_installation(
             package_manager,
         }),
     )?
-    .ok_or_else(|| {
-        AppError::InvalidInput("failed to derive managed frontend settings".to_string())
-    })
+    .ok_or_else(|| AppError::InvalidInput("failed to derive managed frontend settings".to_string()))
 }
 
 fn strip_frontend_root_args(args: &[String]) -> Vec<String> {
@@ -2921,7 +3158,8 @@ async fn create_checkpoint_if_needed(
         .get_operation(operation_id)?
         .ok_or_else(|| AppError::NotFound("operation not found".to_string()))?;
     let (label, reason) = checkpoint_label_and_reason(&operation, repo);
-    let dependency_state = build_repo_dependency_state(installation, repo, path, &status.changed_files);
+    let dependency_state =
+        build_repo_dependency_state(installation, repo, path, &status.changed_files);
 
     let checkpoint = state.db.create_checkpoint(
         &repo.id,
@@ -3050,7 +3288,409 @@ async fn apply_resolved_target(
     Ok(())
 }
 
-async fn maybe_sync_dependencies(
+async fn materialize_kitchen_override(
+    state: &AppState,
+    app: &AppHandle,
+    operation_id: &str,
+    installation: &Installation,
+    repo: &ManagedRepo,
+) -> AppResult<RepoMaterializationState> {
+    if repo.kind != RepoKind::Kitchen {
+        return Err(AppError::InvalidInput(
+            "Kitchen materialization requires a Kitchen repository".to_string(),
+        ));
+    }
+    let path = Path::new(&repo.local_path);
+    log_operation(
+        state,
+        app,
+        operation_id,
+        "submodules",
+        "info",
+        "initializing required Comfy Kitchen submodules",
+    );
+    submodule_update(path).await.map_err(|error| {
+        AppError::Dependency(format!(
+            "Comfy Kitchen submodule initialization failed; source materialization was not attempted: {error}"
+        ))
+    })?;
+    log_operation(
+        state,
+        app,
+        operation_id,
+        "materialization",
+        "info",
+        "building Comfy Kitchen from the managed source checkout before installation",
+    );
+    match kitchen::materialize_kitchen_project(installation, repo).await {
+        Ok(materialization) => {
+            state
+                .db
+                .set_repo_materialization_state(&repo.id, Some(&materialization))?;
+            let runtime = kitchen::probe_kitchen_runtime(installation).await?;
+            state.db.set_kitchen_runtime(&installation.id, &runtime)?;
+            log_operation(
+                state,
+                app,
+                operation_id,
+                "materialization",
+                "info",
+                format!(
+                    "Comfy Kitchen source materialized at {}",
+                    materialization
+                        .materialized_head_sha
+                        .as_deref()
+                        .unwrap_or("unknown HEAD")
+                ),
+            );
+            Ok(materialization)
+        }
+        Err(error) => {
+            let failed = kitchen::failed_materialization_state(
+                repo.materialization_state.as_ref(),
+                &error.to_string(),
+            );
+            let _ = state
+                .db
+                .set_repo_materialization_state(&repo.id, Some(&failed));
+            Err(error)
+        }
+    }
+}
+
+async fn restore_comfy_requirement_for_repo(
+    state: &AppState,
+    app: &AppHandle,
+    operation_id: &str,
+    installation: &Installation,
+    repo: &ManagedRepo,
+) -> AppResult<()> {
+    if repo.kind != RepoKind::Kitchen {
+        return Err(AppError::InvalidInput(
+            "ComfyUI-managed Kitchen restore requires a Kitchen repository".to_string(),
+        ));
+    }
+    log_operation(
+        state,
+        app,
+        operation_id,
+        "materialization",
+        "info",
+        "restoring the comfy-kitchen requirement declared by the current ComfyUI checkout",
+    );
+    let runtime = kitchen::restore_comfy_managed_kitchen(installation).await?;
+    state.db.set_kitchen_runtime(&installation.id, &runtime)?;
+    state.db.set_repo_materialization_state(&repo.id, None)?;
+    Ok(())
+}
+
+async fn reassert_managed_kitchen_override_if_needed(
+    state: &AppState,
+    app: &AppHandle,
+    operation_id: &str,
+    installation: &Installation,
+) -> AppResult<()> {
+    let detail = state.db.get_installation_detail(&installation.id)?;
+    let Some(mut kitchen_repo) = detail.kitchen_repo else {
+        return Ok(());
+    };
+    let Some(saved_materialization) = kitchen_repo.materialization_state.clone() else {
+        return Ok(());
+    };
+    let path = Path::new(&kitchen_repo.local_path);
+    if !path.exists() || !has_git_marker(path) || !is_git_repo(path).await {
+        return Err(AppError::Conflict(
+            "Patcher-managed Comfy Kitchen override is active, but its source checkout is missing or is no longer a git repository"
+                .to_string(),
+        ));
+    }
+    let status = inspect_repo(path).await?;
+    if status.is_dirty {
+        return Err(AppError::Conflict(
+            "Patcher-managed Comfy Kitchen override was replaced by another dependency operation, but the Kitchen source checkout is dirty; refusing to rebuild from uncommitted source"
+                .to_string(),
+        ));
+    }
+    kitchen_repo.current_head_sha = status.head_sha.clone();
+    kitchen_repo.current_branch = status.branch.clone();
+    kitchen_repo.is_detached = status.is_detached;
+    kitchen_repo.is_dirty = false;
+    let runtime = kitchen::probe_kitchen_runtime(installation).await?;
+    state.db.set_kitchen_runtime(&installation.id, &runtime)?;
+    let evaluated = kitchen::evaluate_materialization(&kitchen_repo, &runtime);
+    match evaluated.status {
+        MaterializationStatus::Current => Ok(()),
+        MaterializationStatus::Replaced
+        | MaterializationStatus::Missing
+        | MaterializationStatus::ImportFailed => {
+            if status.head_sha.as_deref()
+                != saved_materialization.materialized_head_sha.as_deref()
+            {
+                return Err(AppError::Conflict(
+                    "Comfy Kitchen runtime was replaced, but the Kitchen source checkout has also moved since the last successful materialization; update or repair Kitchen explicitly before continuing"
+                        .to_string(),
+                ));
+            }
+            log_operation(
+                state,
+                app,
+                operation_id,
+                "materialization",
+                "warn",
+                "another Patcher-controlled dependency install replaced the active Comfy Kitchen source build; reasserting the managed source override",
+            );
+            materialize_kitchen_override(
+                state,
+                app,
+                operation_id,
+                installation,
+                &kitchen_repo,
+            )
+            .await?;
+            Ok(())
+        }
+        MaterializationStatus::Stale | MaterializationStatus::Failed => Err(AppError::Conflict(
+            "Patcher-managed Comfy Kitchen runtime is not coherent with its source checkout; repair or update Kitchen explicitly before continuing"
+                .to_string(),
+        )),
+    }
+}
+
+async fn ensure_kitchen_runtime_ready_for_launch(
+    state: &AppState,
+    installation: &Installation,
+) -> AppResult<()> {
+    let detail = state.db.get_installation_detail(&installation.id)?;
+    let Some(mut kitchen_repo) = detail.kitchen_repo else {
+        return Ok(());
+    };
+    if kitchen_repo.materialization_state.is_none() {
+        return Ok(());
+    }
+    let path = Path::new(&kitchen_repo.local_path);
+    if !path.exists() || !has_git_marker(path) || !is_git_repo(path).await {
+        return Err(AppError::Process(
+            "cannot start ComfyUI: the active Patcher-managed Comfy Kitchen source checkout is missing or invalid"
+                .to_string(),
+        ));
+    }
+    let status = inspect_repo(path).await?;
+    kitchen_repo.current_head_sha = status.head_sha;
+    kitchen_repo.current_branch = status.branch;
+    kitchen_repo.is_detached = status.is_detached;
+    kitchen_repo.is_dirty = !status.tracked_changed_files.is_empty();
+    let runtime = kitchen::probe_kitchen_runtime(installation).await.map_err(|error| {
+        AppError::Process(format!(
+            "cannot start ComfyUI: failed to inspect active Patcher-managed Comfy Kitchen runtime: {error}"
+        ))
+    })?;
+    state.db.set_kitchen_runtime(&installation.id, &runtime)?;
+    let evaluated = kitchen::evaluate_materialization(&kitchen_repo, &runtime);
+    if evaluated.status != MaterializationStatus::Current {
+        return Err(AppError::Process(format!(
+            "cannot start ComfyUI: active Patcher-managed Comfy Kitchen runtime is {}",
+            serde_json::to_string(&evaluated.status)
+                .unwrap_or_else(|_| "inconsistent".to_string())
+                .trim_matches('"')
+        )));
+    }
+    Ok(())
+}
+
+fn should_preserve_unmanaged_kitchen_runtime(
+    force_restore: bool,
+    previous: Option<&KitchenRuntimeProbe>,
+    current: &KitchenRuntimeProbe,
+) -> bool {
+    !force_restore
+        && previous.is_some_and(|expected| kitchen::runtime_identity_matches(expected, current))
+}
+
+async fn restore_checkpoint_with_kitchen_runtime(
+    state: &AppState,
+    app: &AppHandle,
+    operation_id: &str,
+    installation: &Installation,
+    repo: &ManagedRepo,
+    checkpoint: &RepoCheckpoint,
+    restore_stash: bool,
+    force_kitchen_runtime_rebuild: bool,
+    previous_unmanaged_runtime: Option<&KitchenRuntimeProbe>,
+) -> AppResult<()> {
+    let path = Path::new(&repo.local_path);
+    if repo.kind != RepoKind::Kitchen {
+        return restore_checkpoint_state(state, path, &repo.id, checkpoint, restore_stash).await;
+    }
+
+    // A Restore ComfyUI Kitchen checkpoint can intentionally retain a stash
+    // while leaving the user's worktree dirty. When that checkpoint is restored,
+    // its stash is the recovery copy for those untracked paths, so remove only
+    // those currently visible untracked files before resetting/rebuilding source.
+    if restore_stash && checkpoint.stash_created {
+        let current_status = inspect_repo(path).await?;
+        if !current_status.untracked_files.is_empty() {
+            clean_untracked_paths(path, &current_status.untracked_files).await?;
+        }
+    }
+
+    restore_checkpoint_state(state, path, &repo.id, checkpoint, false).await?;
+    if let Some(saved_materialization) = checkpoint.materialization_state.as_ref() {
+        let status = inspect_repo(path).await?;
+        if status.head_sha.as_deref() != saved_materialization.materialized_head_sha.as_deref() {
+            return Err(AppError::Conflict(format!(
+                "cannot restore Comfy Kitchen runtime provenance exactly: checkpoint source HEAD {} differs from saved materialized HEAD {}",
+                status.head_sha.as_deref().unwrap_or("unknown"),
+                saved_materialization
+                    .materialized_head_sha
+                    .as_deref()
+                    .unwrap_or("none")
+            )));
+        }
+        if status.is_dirty {
+            return Err(AppError::Conflict(
+                "cannot restore Comfy Kitchen runtime from a dirty checkpoint worktree before stash reapplication"
+                    .to_string(),
+            ));
+        }
+        let mut restored_repo = repo.clone();
+        restored_repo.current_head_sha = status.head_sha;
+        restored_repo.current_branch = status.branch;
+        restored_repo.is_detached = status.is_detached;
+        restored_repo.is_dirty = false;
+        restored_repo.materialization_state = Some(saved_materialization.clone());
+        let runtime_is_current = if force_kitchen_runtime_rebuild {
+            false
+        } else {
+            match kitchen::probe_kitchen_runtime(installation).await {
+                Ok(runtime) => {
+                    state.db.set_kitchen_runtime(&installation.id, &runtime)?;
+                    kitchen::evaluate_materialization(&restored_repo, &runtime).status
+                        == MaterializationStatus::Current
+                }
+                Err(error) => {
+                    log_operation(
+                        state,
+                        app,
+                        operation_id,
+                        "rollback",
+                        "warn",
+                        format!(
+                            "failed to verify whether the previous Kitchen runtime survived unchanged; rebuilding checkpointed source: {error}"
+                        ),
+                    );
+                    false
+                }
+            }
+        };
+        if runtime_is_current {
+            log_operation(
+                state,
+                app,
+                operation_id,
+                "rollback",
+                "info",
+                "previous Comfy Kitchen runtime still matches the restored checkpoint; skipping an unnecessary rebuild",
+            );
+        } else {
+            materialize_kitchen_override(state, app, operation_id, installation, &restored_repo)
+                .await?;
+        }
+    } else {
+        let preserved_unmanaged_runtime = if force_kitchen_runtime_rebuild {
+            false
+        } else if let Some(previous_runtime) = previous_unmanaged_runtime {
+            match kitchen::probe_kitchen_runtime(installation).await {
+                Ok(current_runtime) => {
+                    let unchanged = should_preserve_unmanaged_kitchen_runtime(
+                        false,
+                        Some(previous_runtime),
+                        &current_runtime,
+                    );
+                    if unchanged {
+                        state
+                            .db
+                            .set_kitchen_runtime(&installation.id, &current_runtime)?;
+                        log_operation(
+                            state,
+                            app,
+                            operation_id,
+                            "rollback",
+                            "info",
+                            "failed Kitchen source application did not change the pre-existing unmanaged runtime; leaving that runtime untouched",
+                        );
+                    }
+                    unchanged
+                }
+                Err(error) => {
+                    log_operation(
+                        state,
+                        app,
+                        operation_id,
+                        "rollback",
+                        "warn",
+                        format!(
+                            "could not verify whether the pre-existing unmanaged Kitchen runtime survived unchanged; restoring the current ComfyUI requirement: {error}"
+                        ),
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
+        if !preserved_unmanaged_runtime {
+            if !force_kitchen_runtime_rebuild {
+                log_operation(
+                    state,
+                    app,
+                    operation_id,
+                    "rollback",
+                    "warn",
+                    "failed Kitchen source application changed or could not verify the pre-existing unmanaged runtime; restoring the requirement declared by the current ComfyUI checkout",
+                );
+            }
+            restore_comfy_requirement_for_repo(state, app, operation_id, installation, repo)
+                .await?;
+        }
+    }
+
+    if restore_stash && checkpoint.stash_created {
+        let stash_ref = checkpoint.stash_ref.as_deref().ok_or_else(|| {
+            AppError::Git(
+                "checkpoint indicates a stash was created but no stash reference was stored"
+                    .to_string(),
+            )
+        })?;
+        apply_stash(path, stash_ref).await?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManagedPythonOverrideMode {
+    Immediate,
+    Deferred,
+}
+
+fn should_reassert_managed_kitchen_override(
+    repo_kind: &RepoKind,
+    mode: ManagedPythonOverrideMode,
+) -> bool {
+    mode == ManagedPythonOverrideMode::Immediate
+        && matches!(repo_kind, RepoKind::Core | RepoKind::CustomNode)
+}
+
+fn combine_dependency_and_override_errors(
+    dependency_error: AppError,
+    override_error: AppError,
+) -> AppError {
+    AppError::Dependency(format!(
+        "{dependency_error}; additionally failed to reassert the managed Comfy Kitchen source override: {override_error}"
+    ))
+}
+
+async fn maybe_sync_dependencies_with_override_mode(
     state: &AppState,
     app: &AppHandle,
     operation_id: &str,
@@ -3058,6 +3698,7 @@ async fn maybe_sync_dependencies(
     repo: &ManagedRepo,
     repo_path: &Path,
     enabled: bool,
+    override_mode: ManagedPythonOverrideMode,
 ) -> AppResult<()> {
     if !enabled {
         return Ok(());
@@ -3071,9 +3712,6 @@ async fn maybe_sync_dependencies(
         "info",
         format!("dependency plan: {} ({})", plan.strategy, plan.reason),
     );
-    if plan.steps.is_empty() {
-        return Ok(());
-    }
     for step in &plan.steps {
         log_operation(
             state,
@@ -3084,8 +3722,48 @@ async fn maybe_sync_dependencies(
             format!("{} step: {} ({})", step.phase, step.strategy, step.reason),
         );
     }
-    execute_dependency_sync(&plan).await?;
-    Ok(())
+
+    let dependency_result = if plan.steps.is_empty() {
+        Ok(())
+    } else {
+        execute_dependency_sync(&plan).await
+    };
+    let override_result = if should_reassert_managed_kitchen_override(&repo.kind, override_mode) {
+        reassert_managed_kitchen_override_if_needed(state, app, operation_id, installation).await
+    } else {
+        Ok(())
+    };
+
+    match (dependency_result, override_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(dependency_error), Err(override_error)) => Err(
+            combine_dependency_and_override_errors(dependency_error, override_error),
+        ),
+    }
+}
+
+async fn maybe_sync_dependencies(
+    state: &AppState,
+    app: &AppHandle,
+    operation_id: &str,
+    installation: &Installation,
+    repo: &ManagedRepo,
+    repo_path: &Path,
+    enabled: bool,
+) -> AppResult<()> {
+    maybe_sync_dependencies_with_override_mode(
+        state,
+        app,
+        operation_id,
+        installation,
+        repo,
+        repo_path,
+        enabled,
+        ManagedPythonOverrideMode::Immediate,
+    )
+    .await
 }
 
 async fn maybe_restart_installation(
@@ -3111,6 +3789,7 @@ async fn maybe_restart_installation(
         );
         return Ok(());
     }
+    ensure_kitchen_runtime_ready_for_launch(state, installation).await?;
     let require_managed_frontend_dist = state
         .db
         .get_installation_detail(&installation.id)?
@@ -3129,9 +3808,7 @@ async fn maybe_restart_installation(
     Ok(())
 }
 
-async fn acquire_background_work_guard(
-    state: &AppState,
-) -> tokio::sync::OwnedMutexGuard<()> {
+async fn acquire_background_work_guard(state: &AppState) -> tokio::sync::OwnedMutexGuard<()> {
     state.background_work_lock().lock_owned().await
 }
 
@@ -3164,14 +3841,9 @@ async fn apply_repo_target_update(
     sync_dependencies: bool,
     write_tracked_target: bool,
 ) -> AppResult<RepoCheckpoint> {
-    let tracked_state = build_requested_tracked_state_for_input(
-        state,
-        installation,
-        repo,
-        target_input,
-        false,
-    )
-    .await?;
+    let tracked_state =
+        build_requested_tracked_state_for_input(state, installation, repo, target_input, false)
+            .await?;
     apply_repo_tracking_state(
         state,
         app,
@@ -3248,12 +3920,9 @@ async fn register_installation_impl(
     } else {
         None
     };
-    let frontend_settings = if input.frontend_settings.is_some() || existing_installation.is_none() {
-        normalize_frontend_settings(
-            &root,
-            &custom_nodes_dir,
-            input.frontend_settings.clone(),
-        )?
+    let frontend_settings = if input.frontend_settings.is_some() || existing_installation.is_none()
+    {
+        normalize_frontend_settings(&root, &custom_nodes_dir, input.frontend_settings.clone())?
     } else {
         existing_installation
             .as_ref()
@@ -3281,12 +3950,18 @@ async fn register_installation_impl(
     } else {
         Vec::new()
     };
-    let (core_repo, frontend_repo, discovered_custom_nodes) =
+    let (core_repo, frontend_repo, kitchen_repo, discovered_custom_nodes) =
         discover_repositories_for_installation(state, &installation, true).await?;
+    let kitchen_runtime = kitchen::probe_kitchen_runtime(&installation).await?;
+    state
+        .db
+        .set_kitchen_runtime(&installation.id, &kitchen_runtime)?;
     Ok(RegisterInstallationResult {
         installation,
         core_repo: core_repo.map(|repo| repo.repo),
         frontend_repo: frontend_repo.map(|repo| repo.repo),
+        kitchen_repo: kitchen_repo.map(|repo| repo.repo),
+        kitchen_runtime: Some(kitchen_runtime),
         discovered_custom_nodes: discovered_custom_nodes
             .into_iter()
             .map(|repo| repo.repo)
@@ -3371,18 +4046,20 @@ async fn save_installation(
     let root = root.canonicalize().map_err(|e| e.to_string())?;
     let (python_string, detected_env_kind) = if let Some(python_input) = input.python_exe.as_deref()
     {
-        let python = normalize_python_executable(&root, Some(python_input))
-            .map_err(|e| e.to_string())?;
+        let python =
+            normalize_python_executable(&root, Some(python_input)).map_err(|e| e.to_string())?;
         (
             python.to_string_lossy().to_string(),
             detect_env_kind(&python),
         )
     } else {
-        (existing.python_exe.clone(), existing.detected_env_kind.clone())
+        (
+            existing.python_exe.clone(),
+            existing.detected_env_kind.clone(),
+        )
     };
     let launch_profile = if input.launch_profile.is_some() {
-        normalize_launch_profile(&root, input.launch_profile)
-            .map_err(|e| e.to_string())?
+        normalize_launch_profile(&root, input.launch_profile).map_err(|e| e.to_string())?
     } else {
         existing.launch_profile.clone()
     };
@@ -3481,7 +4158,8 @@ async fn collect_manager_custom_node_items(
     query: Option<&str>,
     limit: usize,
 ) -> AppResult<Vec<ManagerRegistryCustomNode>> {
-    let discovered_custom_nodes = discover_custom_node_repos_best_effort(state, installation).await?;
+    let discovered_custom_nodes =
+        discover_custom_node_repos_best_effort(state, installation).await?;
 
     let mut tracking_managed_dirs: HashMap<String, Vec<String>> = HashMap::new();
     let mut present_non_git_dirs: HashMap<String, Vec<String>> = HashMap::new();
@@ -3516,9 +4194,15 @@ async fn collect_manager_custom_node_items(
                     }
                     let path_string = path.to_string_lossy().to_string();
                     if has_tracking {
-                        tracking_managed_dirs.entry(key).or_default().push(path_string);
+                        tracking_managed_dirs
+                            .entry(key)
+                            .or_default()
+                            .push(path_string);
                     } else if !has_git {
-                        present_non_git_dirs.entry(key).or_default().push(path_string);
+                        present_non_git_dirs
+                            .entry(key)
+                            .or_default()
+                            .push(path_string);
                     }
                 }
             }
@@ -3534,7 +4218,11 @@ async fn collect_manager_custom_node_items(
 
     let mut installed_by_remote: HashMap<String, Option<ManagedRepo>> = HashMap::new();
     for repo in discovered_custom_nodes {
-        if let Some(remote) = repo.canonical_remote.as_deref().and_then(canonicalize_remote) {
+        if let Some(remote) = repo
+            .canonical_remote
+            .as_deref()
+            .and_then(canonicalize_remote)
+        {
             let remote_aliases = state.manager_registry.remote_aliases(&remote).await;
             for alias in remote_aliases {
                 match installed_by_remote.entry(alias) {
@@ -3556,7 +4244,10 @@ async fn collect_manager_custom_node_items(
     }
 
     let limit = limit.clamp(1, 10000);
-    let entries = state.manager_registry.search_entries(query, usize::MAX).await?;
+    let entries = state
+        .manager_registry
+        .search_entries(query, usize::MAX)
+        .await?;
     let mut items = Vec::with_capacity(entries.len());
     for entry in entries {
         let install_type = entry.install_type_label();
@@ -3616,7 +4307,11 @@ async fn collect_manager_custom_node_items(
         right
             .is_installed
             .cmp(&left.is_installed)
-            .then_with(|| left.title.to_ascii_lowercase().cmp(&right.title.to_ascii_lowercase()))
+            .then_with(|| {
+                left.title
+                    .to_ascii_lowercase()
+                    .cmp(&right.title.to_ascii_lowercase())
+            })
             .then_with(|| left.registry_id.cmp(&right.registry_id))
     });
     items.truncate(limit);
@@ -3732,9 +4427,15 @@ async fn preview_tracked_repo_update(
         .ok_or_else(|| "repo has no tracked target".to_string())?;
     let repo_lock = state.repo_lock(&repo.id).await;
     let _guard = repo_lock.lock().await;
-    preview_tracked_state_application(&state, &installation, &repo, &tracked_state, "Preview update")
-        .await
-        .map_err(|e| e.to_string())
+    preview_tracked_state_application(
+        &state,
+        &installation,
+        &repo,
+        &tracked_state,
+        "Preview update",
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -4296,6 +4997,566 @@ async fn run_install_or_patch_frontend(
     Ok(())
 }
 
+#[tauri::command]
+async fn install_or_patch_kitchen(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: PatchKitchenInput,
+) -> Result<OperationStart, String> {
+    let installation = state
+        .db
+        .get_installation(&input.installation_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "installation not found".to_string())?;
+    let detail = state
+        .db
+        .get_installation_detail(&installation.id)
+        .map_err(|e| e.to_string())?;
+    let operation_kind = if detail.kitchen_repo.is_some() {
+        OperationKind::PatchKitchen
+    } else {
+        OperationKind::InstallKitchen
+    };
+    let background_work_lock = state.background_work_lock();
+    let _background_work_accept_guard = background_work_lock.lock().await;
+    let op = state
+        .db
+        .create_operation(
+            &installation.id,
+            detail.kitchen_repo.as_ref().map(|repo| repo.id.as_str()),
+            operation_kind,
+            Some(&input.input),
+        )
+        .map_err(|e| e.to_string())?;
+    let op_id = op.id.clone();
+    let state_handle = app.state::<AppState>().inner().clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = run_install_or_patch_kitchen(app, state_handle, installation, input, op_id).await;
+    });
+    Ok(OperationStart {
+        operation_id: op.id,
+    })
+}
+
+async fn run_install_or_patch_kitchen(
+    app: AppHandle,
+    state: AppState,
+    installation: Installation,
+    input: PatchKitchenInput,
+    operation_id: String,
+) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
+    state.db.set_operation_running(&operation_id)?;
+    let installation_lock = state.installation_lock(&installation.id).await;
+    let _installation_guard = installation_lock.lock().await;
+    let mut replaced_backup_path: Option<PathBuf> = None;
+    let mut created_repo_id: Option<String> = None;
+    let mut created_target_path = false;
+    let mut source_apply_completed = false;
+    let result = async {
+        let target_path = kitchen::default_kitchen_path(&installation);
+        let detail = state.db.get_installation_detail(&installation.id)?;
+        let resolved = resolve_target_for_context(
+            &state,
+            &installation,
+            &RepoKind::Kitchen,
+            detail.kitchen_repo.as_ref().map(|repo| repo.id.as_str()),
+            &input.input,
+        )
+        .await?;
+        let resolved_remote = canonical_target_remote(&resolved)?;
+        let expected_remote = canonicalize_remote(kitchen::DEFAULT_KITCHEN_REPO_URL)
+            .ok_or_else(|| AppError::InvalidInput("invalid built-in Comfy Kitchen repository URL".to_string()))?;
+        if resolved_remote != expected_remote {
+            return Err(AppError::Conflict(format!(
+                "Comfy Kitchen source management only accepts targets from {}; resolved target belongs to {}",
+                expected_remote, resolved_remote
+            )));
+        }
+
+        let apply_existing = async {
+            if !target_path.exists() || !is_git_repo(&target_path).await {
+                return Ok::<Option<RepoCheckpoint>, AppError>(None);
+            }
+            let status = inspect_repo(&target_path).await?;
+            let existing_remote = status.origin_url.as_deref().and_then(canonicalize_remote);
+            if existing_remote.as_deref() != Some(expected_remote.as_str()) {
+                return Ok(None);
+            }
+            state
+                .db
+                .unignore_repo_path(&installation.id, &target_path.to_string_lossy())?;
+            let repo = state.db.upsert_repo(
+                &installation.id,
+                RepoKind::Kitchen,
+                "Comfy Kitchen",
+                &target_path.to_string_lossy(),
+                status.origin_url.as_deref(),
+                status.head_sha.as_deref(),
+                status.branch.as_deref(),
+                status.is_detached,
+                repo_has_tracked_local_changes(&status),
+            )?;
+            let repo_lock = state.repo_lock(&repo.id).await;
+            let _guard = repo_lock.lock().await;
+            let tracked_state = build_requested_tracked_state_for_input(
+                &state,
+                &installation,
+                &repo,
+                &input.input,
+                false,
+            )
+            .await?;
+            let checkpoint = apply_repo_tracking_state(
+                &state,
+                &app,
+                &operation_id,
+                &installation,
+                &repo,
+                &tracked_state,
+                &input.dirty_repo_strategy,
+                false,
+                input.set_tracked_target,
+            )
+            .await?;
+            Ok(Some(checkpoint))
+        }
+        .await?;
+
+        let checkpoint = if let Some(checkpoint) = apply_existing {
+            checkpoint
+        } else {
+            if target_path.exists() {
+                if detail
+                    .kitchen_repo
+                    .as_ref()
+                    .is_some_and(|repo| repo.local_path == target_path.to_string_lossy().as_ref())
+                {
+                    return Err(AppError::Conflict(
+                        "the configured Kitchen source path is already tracked but does not match the official Comfy Kitchen remote; repair or untrack it before replacement"
+                            .to_string(),
+                    ));
+                }
+                match input.existing_repo_conflict_strategy {
+                    ExistingRepoConflictStrategy::Abort => {
+                        return Err(AppError::Conflict(
+                            "the managed Comfy Kitchen source path already exists and is not the expected repository"
+                                .to_string(),
+                        ));
+                    }
+                    ExistingRepoConflictStrategy::InstallWithSuffix => {
+                        return Err(AppError::Conflict(
+                            "the managed Comfy Kitchen source path is fixed; Install with suffix is not supported"
+                                .to_string(),
+                        ));
+                    }
+                    ExistingRepoConflictStrategy::Replace => {
+                        let backup_root = installation_retained_backup_root(&installation, "kitchen");
+                        std::fs::create_dir_all(&backup_root)?;
+                        let backup_path = choose_tracking_backup_path(&target_path, &backup_root);
+                        std::fs::rename(&target_path, &backup_path)?;
+                        replaced_backup_path = Some(backup_path);
+                    }
+                }
+            }
+            log_operation(
+                &state,
+                &app,
+                &operation_id,
+                "clone",
+                "info",
+                format!("cloning {}", resolved.canonical_repo_url),
+            );
+            // The target did not exist when this operation reached clone (or was
+            // moved to the retained backup above), so cleanup may safely remove
+            // anything clone creates here if source application fails.
+            created_target_path = true;
+            clone_repo(&resolved.fetch_url, &target_path).await?;
+            let status = inspect_repo(&target_path).await?;
+            state
+                .db
+                .unignore_repo_path(&installation.id, &target_path.to_string_lossy())?;
+            let repo = state.db.upsert_repo(
+                &installation.id,
+                RepoKind::Kitchen,
+                "Comfy Kitchen",
+                &target_path.to_string_lossy(),
+                status.origin_url.as_deref(),
+                status.head_sha.as_deref(),
+                status.branch.as_deref(),
+                status.is_detached,
+                repo_has_tracked_local_changes(&status),
+            )?;
+            created_repo_id = Some(repo.id.clone());
+            let repo_lock = state.repo_lock(&repo.id).await;
+            let _guard = repo_lock.lock().await;
+            let tracked_state = build_requested_tracked_state_for_input(
+                &state,
+                &installation,
+                &repo,
+                &input.input,
+                false,
+            )
+            .await?;
+            let checkpoint = apply_repo_tracking_state(
+                &state,
+                &app,
+                &operation_id,
+                &installation,
+                &repo,
+                &tracked_state,
+                &DirtyRepoStrategy::Abort,
+                false,
+                input.set_tracked_target,
+            )
+            .await?;
+            source_apply_completed = true;
+            checkpoint
+        };
+
+        maybe_restart_installation(
+            &state,
+            &app,
+            &operation_id,
+            &installation,
+            input.restart_after_success,
+        )
+        .await?;
+        state.db.finish_operation(
+            &operation_id,
+            OperationStatus::Succeeded,
+            None,
+            Some(&checkpoint.id),
+        )?;
+        if let Some(backup) = replaced_backup_path.as_ref() {
+            log_operation(
+                &state,
+                &app,
+                &operation_id,
+                "done",
+                "info",
+                format!(
+                    "replaced path was preserved at {}; review it before deleting the backup",
+                    backup.to_string_lossy()
+                ),
+            );
+        }
+        log_operation(
+            &state,
+            &app,
+            &operation_id,
+            "done",
+            "info",
+            "Comfy Kitchen source install/patch completed",
+        );
+        Ok::<(), AppError>(())
+    }
+    .await;
+
+    if let Err(err) = result {
+        let mut cleanup_errors = Vec::new();
+        if created_target_path && !source_apply_completed {
+            if let Some(repo_id) = created_repo_id.as_deref() {
+                match state.db.list_checkpoints(repo_id) {
+                    Ok(checkpoints) => {
+                        for checkpoint in checkpoints
+                            .into_iter()
+                            .filter(|checkpoint| checkpoint.operation_id == operation_id)
+                        {
+                            if let Err(cleanup_error) = state.db.delete_checkpoint(&checkpoint.id) {
+                                cleanup_errors.push(format!(
+                                    "failed to delete failed Kitchen checkpoint {}: {}",
+                                    checkpoint.id, cleanup_error
+                                ));
+                            }
+                        }
+                    }
+                    Err(cleanup_error) => cleanup_errors.push(format!(
+                        "failed to enumerate failed Kitchen checkpoints: {}",
+                        cleanup_error
+                    )),
+                }
+                if let Err(cleanup_error) = state.db.delete_repo(repo_id) {
+                    cleanup_errors.push(format!(
+                        "failed to delete failed Kitchen repo state {}: {}",
+                        repo_id, cleanup_error
+                    ));
+                }
+            }
+            let target_path = kitchen::default_kitchen_path(&installation);
+            if target_path.exists() {
+                if let Err(cleanup_error) = remove_path_with_retries(&target_path).await {
+                    cleanup_errors.push(format!(
+                        "failed to remove Kitchen checkout created by the failed operation: {}",
+                        cleanup_error
+                    ));
+                }
+            }
+            if let Some(backup_path) = replaced_backup_path.as_ref() {
+                if !target_path.exists() {
+                    if let Err(cleanup_error) = std::fs::rename(backup_path, &target_path) {
+                        cleanup_errors.push(format!(
+                            "failed to restore retained Kitchen path {}: {}",
+                            backup_path.to_string_lossy(),
+                            cleanup_error
+                        ));
+                    } else {
+                        log_operation(
+                            &state,
+                            &app,
+                            &operation_id,
+                            "rollback",
+                            "warn",
+                            format!(
+                                "restored retained Kitchen path {} after failed source installation",
+                                backup_path.to_string_lossy()
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+
+        let final_error = if cleanup_errors.is_empty() {
+            err
+        } else {
+            AppError::Io(format!(
+                "{}; additionally failed to clean up the failed Kitchen installation: {}",
+                err,
+                cleanup_errors.join("; ")
+            ))
+        };
+        state.db.finish_operation(
+            &operation_id,
+            OperationStatus::Failed,
+            Some(&final_error.to_string()),
+            None,
+        )?;
+        log_operation(
+            &state,
+            &app,
+            &operation_id,
+            "error",
+            "error",
+            final_error.to_string(),
+        );
+        return Err(final_error);
+    }
+    Ok(())
+}
+
+async fn create_kitchen_runtime_checkpoint(
+    state: &AppState,
+    installation: &Installation,
+    repo: &ManagedRepo,
+    operation_id: &str,
+) -> AppResult<RepoCheckpoint> {
+    if repo.kind != RepoKind::Kitchen {
+        return Err(AppError::InvalidInput(
+            "Kitchen runtime checkpoint requires a Kitchen repository".to_string(),
+        ));
+    }
+    let path = Path::new(&repo.local_path);
+    let checkpoint = create_checkpoint_if_needed(
+        state,
+        installation,
+        repo,
+        None,
+        operation_id,
+        &DirtyRepoStrategy::Stash,
+    )
+    .await?;
+
+    // Restore ComfyUI Kitchen does not mutate the source checkout. If the user
+    // has local work, retain an immutable recovery stash in the checkpoint but
+    // immediately put the worktree back exactly where the user left it.
+    if checkpoint.stash_created {
+        let stash_ref = checkpoint.stash_ref.as_deref().ok_or_else(|| {
+            AppError::Git(
+                "Kitchen runtime checkpoint recorded a stash without its recovery reference"
+                    .to_string(),
+            )
+        })?;
+        if let Err(apply_error) = apply_stash_keep(path, stash_ref).await {
+            let compensation = async {
+                reset_hard(path, &checkpoint.old_head_sha).await?;
+                let status = inspect_repo(path).await?;
+                if !status.untracked_files.is_empty() {
+                    clean_untracked_paths(path, &status.untracked_files).await?;
+                }
+                apply_stash_keep(path, stash_ref).await?;
+                Ok::<(), AppError>(())
+            }
+            .await;
+            return match compensation {
+                Ok(()) => Err(apply_error),
+                Err(compensation_error) => Err(AppError::Git(format!(
+                    "{apply_error}; additionally failed to restore the Kitchen worktree from its retained checkpoint stash: {compensation_error}"
+                ))),
+            };
+        }
+    }
+    Ok(checkpoint)
+}
+
+#[tauri::command]
+async fn restore_comfy_managed_kitchen(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: RestoreComfyManagedKitchenInput,
+) -> Result<OperationStart, String> {
+    let repo = state
+        .db
+        .get_repo(&input.repo_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "repo not found".to_string())?;
+    if repo.kind != RepoKind::Kitchen {
+        return Err("selected repo is not Comfy Kitchen".to_string());
+    }
+    let installation = state
+        .db
+        .get_installation(&repo.installation_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "installation not found".to_string())?;
+    let background_work_lock = state.background_work_lock();
+    let _background_work_accept_guard = background_work_lock.lock().await;
+    let op = state
+        .db
+        .create_operation(
+            &installation.id,
+            Some(&repo.id),
+            OperationKind::RestoreComfyManagedKitchen,
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+    let op_id = op.id.clone();
+    let state_handle = app.state::<AppState>().inner().clone();
+    tauri::async_runtime::spawn(async move {
+        let _ =
+            run_restore_comfy_managed_kitchen(app, state_handle, installation, repo, input, op_id)
+                .await;
+    });
+    Ok(OperationStart {
+        operation_id: op.id,
+    })
+}
+
+async fn run_restore_comfy_managed_kitchen(
+    app: AppHandle,
+    state: AppState,
+    installation: Installation,
+    repo: ManagedRepo,
+    input: RestoreComfyManagedKitchenInput,
+    operation_id: String,
+) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
+    state.db.set_operation_running(&operation_id)?;
+    let repo_lock = state.repo_lock(&repo.id).await;
+    let _guard = repo_lock.lock().await;
+    let result = async {
+        let checkpoint = create_kitchen_runtime_checkpoint(
+            &state,
+            &installation,
+            &repo,
+            &operation_id,
+        )
+        .await?;
+        log_operation(
+            &state,
+            &app,
+            &operation_id,
+            "checkpoint",
+            "info",
+            format!(
+                "checkpoint {} created before returning Kitchen runtime ownership to ComfyUI",
+                checkpoint.id
+            ),
+        );
+
+        let mutation = async {
+            restore_comfy_requirement_for_repo(
+                &state,
+                &app,
+                &operation_id,
+                &installation,
+                &repo,
+            )
+            .await?;
+            // Returning runtime ownership to ComfyUI is a durable state transition.
+            // Clear the tracked source target as well as materialization provenance so
+            // Update all cannot silently reactivate the source override later. The
+            // checkout remains on disk and can be explicitly adopted again through
+            // Install / Patch source.
+            state.db.set_repo_tracked_state(&repo.id, None, None)?;
+            refresh_repo_state(&state, &repo.id).await?;
+            Ok::<(), AppError>(())
+        }
+        .await;
+
+        if let Err(error) = mutation {
+            let restore_result = restore_checkpoint_with_kitchen_runtime(
+                &state,
+                &app,
+                &operation_id,
+                &installation,
+                &repo,
+                &checkpoint,
+                true,
+                true,
+                None,
+            )
+            .await;
+            return match restore_result {
+                Ok(()) => Err(error),
+                Err(restore_error) => Err(restore_checkpoint_error(error, restore_error)),
+            };
+        }
+
+        maybe_restart_installation(
+            &state,
+            &app,
+            &operation_id,
+            &installation,
+            input.restart_after_success,
+        )
+        .await?;
+        state.db.finish_operation(
+            &operation_id,
+            OperationStatus::Succeeded,
+            None,
+            Some(&checkpoint.id),
+        )?;
+        log_operation(
+            &state,
+            &app,
+            &operation_id,
+            "done",
+            "info",
+            "restored the ComfyUI-managed comfy-kitchen requirement and deactivated tracked source override management",
+        );
+        Ok::<(), AppError>(())
+    }
+    .await;
+    if let Err(err) = result {
+        state.db.finish_operation(
+            &operation_id,
+            OperationStatus::Failed,
+            Some(&err.to_string()),
+            None,
+        )?;
+        log_operation(
+            &state,
+            &app,
+            &operation_id,
+            "error",
+            "error",
+            err.to_string(),
+        );
+        return Err(err);
+    }
+    Ok(())
+}
+
 struct CustomNodeInstallRunResult {
     checkpoint_id: String,
     done_message: &'static str,
@@ -4704,7 +5965,9 @@ async fn run_install_or_patch_custom_node(
         "installing or patching custom node",
     );
 
-    match execute_install_or_patch_custom_node(&app, &state, &installation, &input, &operation_id).await {
+    match execute_install_or_patch_custom_node(&app, &state, &installation, &input, &operation_id)
+        .await
+    {
         Ok(outcome) => {
             state.db.finish_operation(
                 &operation_id,
@@ -5776,7 +7039,8 @@ async fn run_update_all(
         let mut failures = Vec::new();
 
         for repo in repos {
-            if let Some(tracked_state) = load_repo_tracked_state(&state, &installation, &repo).await?
+            if let Some(tracked_state) =
+                load_repo_tracked_state(&state, &installation, &repo).await?
             {
                 let repo_lock = state.repo_lock(&repo.id).await;
                 let _guard = repo_lock.lock().await;
@@ -5788,7 +7052,7 @@ async fn run_update_all(
                     "info",
                     format!("updating {}", repo.display_name),
                 );
-                match apply_repo_tracking_state(
+                match apply_repo_tracking_state_with_override_mode(
                     &state,
                     &app,
                     &operation_id,
@@ -5798,6 +7062,7 @@ async fn run_update_all(
                     &input.dirty_repo_strategy,
                     input.sync_dependencies,
                     true,
+                    ManagedPythonOverrideMode::Deferred,
                 )
                 .await
                 {
@@ -5813,6 +7078,19 @@ async fn run_update_all(
                     "warn",
                     format!("skipping {}: no tracked target", repo.display_name),
                 );
+            }
+        }
+
+        if input.sync_dependencies {
+            if let Err(error) = reassert_managed_kitchen_override_if_needed(
+                &state,
+                &app,
+                &operation_id,
+                &installation,
+            )
+            .await
+            {
+                failures.push(format!("Comfy Kitchen finalization: {error}"));
             }
         }
 
@@ -5911,7 +7189,8 @@ async fn rematerialize_tracked_repos(
     let op_id = op.id.clone();
     let state_handle = app.state::<AppState>().inner().clone();
     tauri::async_runtime::spawn(async move {
-        let _ = run_rematerialize_tracked_repos(app, state_handle, installation, input, op_id).await;
+        let _ =
+            run_rematerialize_tracked_repos(app, state_handle, installation, input, op_id).await;
     });
     Ok(OperationStart {
         operation_id: op.id,
@@ -5953,7 +7232,10 @@ async fn run_rematerialize_tracked_repos(
                     &operation_id,
                     "preflight",
                     "warn",
-                    format!("skipping {}: repository path no longer exists", repo.display_name),
+                    format!(
+                        "skipping {}: repository path no longer exists",
+                        repo.display_name
+                    ),
                 );
                 continue;
             }
@@ -5997,7 +7279,7 @@ async fn run_rematerialize_tracked_repos(
                 format!("re-materializing {} with hard reset", repo.display_name),
             );
 
-            match apply_repo_tracking_state(
+            match apply_repo_tracking_state_with_override_mode(
                 &state,
                 &app,
                 &operation_id,
@@ -6007,6 +7289,7 @@ async fn run_rematerialize_tracked_repos(
                 &DirtyRepoStrategy::HardReset,
                 input.sync_dependencies,
                 true,
+                ManagedPythonOverrideMode::Deferred,
             )
             .await
             {
@@ -6015,6 +7298,19 @@ async fn run_rematerialize_tracked_repos(
                     checkpoints.push(checkpoint.id);
                 }
                 Err(err) => failures.push(format!("{}: {}", repo.display_name, err)),
+            }
+        }
+
+        if input.sync_dependencies {
+            if let Err(error) = reassert_managed_kitchen_override_if_needed(
+                &state,
+                &app,
+                &operation_id,
+                &installation,
+            )
+            .await
+            {
+                failures.push(format!("Comfy Kitchen finalization: {error}"));
             }
         }
 
@@ -6179,34 +7475,40 @@ async fn run_rollback_repo(
             format!("restoring {}", checkpoint.old_head_sha),
         );
         let path = Path::new(&repo.local_path);
-        restore_checkpoint_state(
-            &state,
-            path,
-            &repo.id,
-            &checkpoint,
-            input.restore_stash,
-        )
-        .await?;
-        let _ = submodule_update(path).await;
-        maybe_sync_dependencies(
+        restore_checkpoint_with_kitchen_runtime(
             &state,
             &app,
             &operation_id,
             &installation,
             &repo,
-            path,
-            input.sync_dependencies,
+            &checkpoint,
+            input.restore_stash,
+            true,
+            None,
         )
         .await?;
-        cleanup_frontend_dependency_artifacts(
-            &state,
-            &app,
-            &operation_id,
-            &repo,
-            path,
-            input.sync_dependencies,
-        )
-        .await?;
+        if repo.kind != RepoKind::Kitchen {
+            let _ = submodule_update(path).await;
+            maybe_sync_dependencies(
+                &state,
+                &app,
+                &operation_id,
+                &installation,
+                &repo,
+                path,
+                input.sync_dependencies,
+            )
+            .await?;
+            cleanup_frontend_dependency_artifacts(
+                &state,
+                &app,
+                &operation_id,
+                &repo,
+                path,
+                input.sync_dependencies,
+            )
+            .await?;
+        }
         if !(input.restore_stash && checkpoint.stash_created) {
             ensure_repo_clean_after_patcher_mutation(path, "patcher-controlled rollback restore")
                 .await?;
@@ -6353,27 +7655,40 @@ async fn run_restore_checkpoint(
                 checkpoint.old_head_sha
             ),
         );
-        restore_checkpoint_state(&state, path, &repo.id, &checkpoint, input.restore_stash).await?;
-        let _ = submodule_update(path).await;
-        maybe_sync_dependencies(
+        restore_checkpoint_with_kitchen_runtime(
             &state,
             &app,
             &operation_id,
             &installation,
             &repo,
-            path,
-            input.sync_dependencies,
+            &checkpoint,
+            input.restore_stash,
+            true,
+            None,
         )
         .await?;
-        cleanup_frontend_dependency_artifacts(
-            &state,
-            &app,
-            &operation_id,
-            &repo,
-            path,
-            input.sync_dependencies,
-        )
-        .await?;
+        if repo.kind != RepoKind::Kitchen {
+            let _ = submodule_update(path).await;
+            maybe_sync_dependencies(
+                &state,
+                &app,
+                &operation_id,
+                &installation,
+                &repo,
+                path,
+                input.sync_dependencies,
+            )
+            .await?;
+            cleanup_frontend_dependency_artifacts(
+                &state,
+                &app,
+                &operation_id,
+                &repo,
+                path,
+                input.sync_dependencies,
+            )
+            .await?;
+        }
         if !(input.restore_stash && checkpoint.stash_created) {
             ensure_repo_clean_after_patcher_mutation(path, "patcher-controlled checkpoint restore")
                 .await?;
@@ -6456,7 +7771,10 @@ async fn compare_checkpoint(
     let mut commits = Vec::new();
     let mut file_changes = Vec::new();
     let mut warnings = live_repo.live_warnings.clone();
-    if matches!(live_repo.live_status, RepoLiveStatus::Missing | RepoLiveStatus::NotGit) {
+    if matches!(
+        live_repo.live_status,
+        RepoLiveStatus::Missing | RepoLiveStatus::NotGit
+    ) {
         warnings.push(
             "Checkpoint comparison is unavailable because this repo is not currently a valid git worktree."
                 .to_string(),
@@ -6560,9 +7878,147 @@ async fn remove_path_with_retries(path: &Path) -> AppResult<()> {
             )));
         }
     }
-    Err(last_error.unwrap_or_else(|| {
-        AppError::Io(format!("failed to remove {}", path.to_string_lossy()))
-    }))
+    Err(last_error
+        .unwrap_or_else(|| AppError::Io(format!("failed to remove {}", path.to_string_lossy()))))
+}
+
+fn kitchen_lifecycle_requires_comfy_restore(
+    kind: &RepoKind,
+    has_materialization: bool,
+    operation_kind: &OperationKind,
+) -> bool {
+    *kind == RepoKind::Kitchen
+        && has_materialization
+        && matches!(
+            operation_kind,
+            OperationKind::UninstallRepo | OperationKind::DisableRepo
+        )
+}
+
+async fn ensure_kitchen_lifecycle_source_recoverable(repo: &ManagedRepo) -> AppResult<()> {
+    let saved_materialization = repo.materialization_state.as_ref().ok_or_else(|| {
+        AppError::Conflict(
+            "Kitchen source recovery requires saved materialization state".to_string(),
+        )
+    })?;
+    let path = Path::new(&repo.local_path);
+    if !path.exists() || !has_git_marker(path) || !is_git_repo(path).await {
+        return Err(AppError::Conflict(
+            "cannot Disable/Uninstall an active Comfy Kitchen source override because its checkout is missing or invalid; use Restore ComfyUI Kitchen after repairing the checkout, or Untrack to leave the current runtime untouched"
+                .to_string(),
+        ));
+    }
+    let status = inspect_repo(path).await?;
+    if status.head_sha.as_deref() != saved_materialization.materialized_head_sha.as_deref() {
+        return Err(AppError::Conflict(
+            "cannot Disable/Uninstall an active Comfy Kitchen source override while the checkout HEAD differs from the deployed source revision; update/repair Kitchen or use Restore ComfyUI Kitchen first"
+                .to_string(),
+        ));
+    }
+    if status.is_dirty {
+        return Err(AppError::Conflict(
+            "cannot Disable/Uninstall an active Comfy Kitchen source override from a dirty checkout because a failed lifecycle transition could not safely rebuild the previous runtime; clean/stash the checkout or Untrack instead"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn combine_kitchen_lifecycle_recovery_error(original: AppError, recovery: AppError) -> AppError {
+    AppError::Process(format!(
+        "{original}; additionally failed to restore the previous managed Comfy Kitchen source runtime after the lifecycle failure: {recovery}"
+    ))
+}
+
+async fn recover_kitchen_source_after_lifecycle_failure(
+    state: &AppState,
+    app: &AppHandle,
+    operation_id: &str,
+    installation: &Installation,
+    repo: &ManagedRepo,
+) -> AppResult<()> {
+    let saved_materialization = repo.materialization_state.clone().ok_or_else(|| {
+        AppError::Conflict(
+            "Kitchen lifecycle recovery has no saved source materialization".to_string(),
+        )
+    })?;
+    let path = Path::new(&repo.local_path);
+    if !path.exists() || !has_git_marker(path) || !is_git_repo(path).await {
+        return Err(AppError::Conflict(
+            "Kitchen lifecycle recovery cannot find the original managed source checkout"
+                .to_string(),
+        ));
+    }
+    let status = inspect_repo(path).await?;
+    if status.head_sha.as_deref() != saved_materialization.materialized_head_sha.as_deref() {
+        return Err(AppError::Conflict(format!(
+            "Kitchen lifecycle recovery source HEAD {} differs from the previous materialized HEAD {}",
+            status.head_sha.as_deref().unwrap_or("unknown"),
+            saved_materialization
+                .materialized_head_sha
+                .as_deref()
+                .unwrap_or("unknown")
+        )));
+    }
+
+    let mut recovered_repo = repo.clone();
+    recovered_repo.current_head_sha = status.head_sha;
+    recovered_repo.current_branch = status.branch;
+    recovered_repo.is_detached = status.is_detached;
+    recovered_repo.is_dirty = status.is_dirty;
+    recovered_repo.materialization_state = Some(saved_materialization.clone());
+
+    let runtime = kitchen::probe_kitchen_runtime(installation).await?;
+    state.db.set_kitchen_runtime(&installation.id, &runtime)?;
+    if kitchen::evaluate_materialization(&recovered_repo, &runtime).status
+        == MaterializationStatus::Current
+    {
+        state
+            .db
+            .set_repo_materialization_state(&repo.id, Some(&saved_materialization))?;
+        log_operation(
+            state,
+            app,
+            operation_id,
+            "rollback",
+            "info",
+            "Kitchen lifecycle mutation failed before changing the source runtime; restored its materialization ownership without rebuilding",
+        );
+        return Ok(());
+    }
+
+    if status.is_dirty {
+        return Err(AppError::Conflict(
+            "Kitchen lifecycle mutation changed the runtime, but the restored source checkout is dirty and cannot be rebuilt safely"
+                .to_string(),
+        ));
+    }
+    log_operation(
+        state,
+        app,
+        operation_id,
+        "rollback",
+        "warn",
+        "Kitchen lifecycle mutation failed after changing runtime ownership; rebuilding the previous managed source revision",
+    );
+    materialize_kitchen_override(state, app, operation_id, installation, &recovered_repo)
+        .await
+        .map(|_| ())
+}
+
+fn restore_moved_kitchen_checkout(original: &Path, moved: &Path) -> AppResult<()> {
+    if !moved.exists() {
+        return Ok(());
+    }
+    if original.exists() {
+        return Err(AppError::Conflict(format!(
+            "cannot restore retained Kitchen checkout {} because the original path {} is already occupied",
+            moved.to_string_lossy(),
+            original.to_string_lossy()
+        )));
+    }
+    std::fs::rename(moved, original)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -6596,7 +8052,7 @@ async fn uninstall_repo(
     let op_id = op.id.clone();
     let state_handle = app.state::<AppState>().inner().clone();
     tauri::async_runtime::spawn(async move {
-        let _ = run_uninstall_repo(app, state_handle, repo, op_id).await;
+        let _ = run_uninstall_repo(app, state_handle, installation, repo, op_id).await;
     });
     Ok(OperationStart {
         operation_id: op.id,
@@ -6606,6 +8062,7 @@ async fn uninstall_repo(
 async fn run_uninstall_repo(
     app: AppHandle,
     state: AppState,
+    installation: Installation,
     repo: ManagedRepo,
     operation_id: String,
 ) -> AppResult<()> {
@@ -6615,6 +8072,11 @@ async fn run_uninstall_repo(
     let _guard = repo_lock.lock().await;
     let result = async {
         let path = PathBuf::from(&repo.local_path);
+        let source_active = kitchen_lifecycle_requires_comfy_restore(
+            &repo.kind,
+            repo.materialization_state.is_some(),
+            &OperationKind::UninstallRepo,
+        );
         log_operation(
             &state,
             &app,
@@ -6623,11 +8085,69 @@ async fn run_uninstall_repo(
             "info",
             format!("uninstalling {}", repo.display_name),
         );
-        if path.exists() {
-            remove_path_with_retries(&path).await?;
+
+        if source_active {
+            ensure_kitchen_lifecycle_source_recoverable(&repo).await?;
+            let retained_root = installation_retained_backup_root(&installation, "uninstalling");
+            std::fs::create_dir_all(&retained_root)?;
+            let retained_path = choose_tracking_backup_path(&path, &retained_root);
+            let mutation_result = async {
+                restore_comfy_requirement_for_repo(
+                    &state,
+                    &app,
+                    &operation_id,
+                    &installation,
+                    &repo,
+                )
+                .await?;
+                if path.exists() {
+                    std::fs::rename(&path, &retained_path)?;
+                }
+                state.db.delete_repo(&repo.id)?;
+                Ok::<(), AppError>(())
+            }
+            .await;
+
+            if let Err(original_error) = mutation_result {
+                let recovery_result = async {
+                    restore_moved_kitchen_checkout(&path, &retained_path)?;
+                    recover_kitchen_source_after_lifecycle_failure(
+                        &state,
+                        &app,
+                        &operation_id,
+                        &installation,
+                        &repo,
+                    )
+                    .await
+                }
+                .await;
+                return Err(match recovery_result {
+                    Ok(()) => original_error,
+                    Err(recovery_error) => combine_kitchen_lifecycle_recovery_error(
+                        original_error,
+                        recovery_error,
+                    ),
+                });
+            }
+
+            if retained_path.exists() {
+                if let Err(cleanup_error) = remove_path_with_retries(&retained_path).await {
+                    return Err(AppError::Io(format!(
+                        "Kitchen runtime was restored to ComfyUI ownership and Patcher source management was removed, but the retained source checkout could not be deleted from {}: {cleanup_error}",
+                        retained_path.to_string_lossy()
+                    )));
+                }
+            }
+        } else {
+            if path.exists() {
+                remove_path_with_retries(&path).await?;
+            }
+            state.db.delete_repo(&repo.id)?;
         }
-        state.db.delete_repo(&repo.id)?;
-        state.db.finish_operation(&operation_id, OperationStatus::Succeeded, None, None)?;
+
+        state
+            .db
+            .finish_operation(&operation_id, OperationStatus::Succeeded, None, None)?;
         log_operation(
             &state,
             &app,
@@ -6713,6 +8233,11 @@ async fn run_disable_repo(
         let disabled_root = installation_retained_backup_root(&installation, "disabled");
         std::fs::create_dir_all(&disabled_root)?;
         let disabled_path = choose_tracking_backup_path(&path, &disabled_root);
+        let source_active = kitchen_lifecycle_requires_comfy_restore(
+            &repo.kind,
+            repo.materialization_state.is_some(),
+            &OperationKind::DisableRepo,
+        );
         log_operation(
             &state,
             &app,
@@ -6725,11 +8250,56 @@ async fn run_disable_repo(
                 disabled_path.to_string_lossy()
             ),
         );
-        if path.exists() {
-            std::fs::rename(&path, &disabled_path)?;
+
+        if source_active {
+            ensure_kitchen_lifecycle_source_recoverable(&repo).await?;
+            let mutation_result = async {
+                restore_comfy_requirement_for_repo(
+                    &state,
+                    &app,
+                    &operation_id,
+                    &installation,
+                    &repo,
+                )
+                .await?;
+                if path.exists() {
+                    std::fs::rename(&path, &disabled_path)?;
+                }
+                state.db.delete_repo(&repo.id)?;
+                Ok::<(), AppError>(())
+            }
+            .await;
+
+            if let Err(original_error) = mutation_result {
+                let recovery_result = async {
+                    restore_moved_kitchen_checkout(&path, &disabled_path)?;
+                    recover_kitchen_source_after_lifecycle_failure(
+                        &state,
+                        &app,
+                        &operation_id,
+                        &installation,
+                        &repo,
+                    )
+                    .await
+                }
+                .await;
+                return Err(match recovery_result {
+                    Ok(()) => original_error,
+                    Err(recovery_error) => {
+                        combine_kitchen_lifecycle_recovery_error(original_error, recovery_error)
+                    }
+                });
+            }
+        } else {
+            if path.exists() {
+                std::fs::rename(&path, &disabled_path)?;
+            }
+            state.db.delete_repo(&repo.id)?;
         }
-        state.db.delete_repo(&repo.id)?;
-        state.db.finish_operation(&operation_id, OperationStatus::Succeeded, None, None)?;
+
+        state
+            .db
+            .finish_operation(&operation_id, OperationStatus::Succeeded, None, None)?;
         log_operation(
             &state,
             &app,
@@ -6818,6 +8388,16 @@ async fn run_untrack_repo(
             "info",
             format!("stopping management for {}", repo.display_name),
         );
+        if repo.kind == RepoKind::Kitchen && repo.materialization_state.is_some() {
+            log_operation(
+                &state,
+                &app,
+                &operation_id,
+                "materialization",
+                "warn",
+                "stopping Kitchen source management without changing the currently installed comfy-kitchen runtime; Patcher will no longer reassert this source build",
+            );
+        }
         state
             .db
             .ignore_repo_path(&repo.installation_id, &repo.kind, &repo.local_path)?;
@@ -6892,12 +8472,14 @@ async fn run_start_installation(
     installation: Installation,
     operation_id: String,
 ) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
     state.db.set_operation_running(&operation_id)?;
     let lock = state.installation_lock(&installation.id).await;
     let _guard = lock.lock().await;
     let lifecycle_lock = state.lifecycle_lock();
     let _lifecycle_guard = lifecycle_lock.lock().await;
     let result = async {
+        ensure_kitchen_runtime_ready_for_launch(&state, &installation).await?;
         let require_managed_frontend_dist = state
             .db
             .get_installation_detail(&installation.id)?
@@ -7086,12 +8668,14 @@ async fn run_restart_installation(
     installation: Installation,
     operation_id: String,
 ) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
     state.db.set_operation_running(&operation_id)?;
     let lock = state.installation_lock(&installation.id).await;
     let _guard = lock.lock().await;
     let lifecycle_lock = state.lifecycle_lock();
     let _lifecycle_guard = lifecycle_lock.lock().await;
     let result = async {
+        ensure_kitchen_runtime_ready_for_launch(&state, &installation).await?;
         let require_managed_frontend_dist = state
             .db
             .get_installation_detail(&installation.id)?
@@ -7235,11 +8819,9 @@ mod app_updates {
         let update = app
             .updater_builder()
             .pubkey(&pubkey)
-            .endpoints(vec![
-                UPDATE_ENDPOINT
-                    .parse()
-                    .map_err(|e: url::ParseError| e.to_string())?,
-            ])
+            .endpoints(vec![UPDATE_ENDPOINT
+                .parse()
+                .map_err(|e: url::ParseError| e.to_string())?])
             .map_err(|e| e.to_string())?
             .build()
             .map_err(|e| e.to_string())?
@@ -7271,9 +8853,9 @@ mod app_updates {
         let lifecycle_lock = state.lifecycle_lock();
         let _lifecycle_guard = lifecycle_lock.lock().await;
         let background_work_lock = state.background_work_lock();
-        let _background_work_guard = background_work_lock.try_lock().map_err(|_| {
-            "cannot install update while operations are running".to_string()
-        })?;
+        let _background_work_guard = background_work_lock
+            .try_lock()
+            .map_err(|_| "cannot install update while operations are running".to_string())?;
         if state
             .db
             .has_in_flight_background_operations()
@@ -7394,7 +8976,12 @@ async fn shutdown_managed_installations(state: AppState) -> AppResult<()> {
 
     for installation in installations {
         if let Some(profile) = installation.launch_profile.as_ref() {
-            if state.processes.stop(&installation.id, profile).await.is_err() {
+            if state
+                .processes
+                .stop(&installation.id, profile)
+                .await
+                .is_err()
+            {
                 if let Err(force_stop_error) = state.processes.force_stop(&installation.id).await {
                     return Err(AppError::Process(format!(
                         "failed to stop managed installation '{}' during app update handoff: {}",
@@ -7403,15 +8990,128 @@ async fn shutdown_managed_installations(state: AppState) -> AppResult<()> {
                 }
             }
         } else {
-            state.processes.force_stop(&installation.id).await.map_err(|error| {
-                AppError::Process(format!(
+            state
+                .processes
+                .force_stop(&installation.id)
+                .await
+                .map_err(|error| {
+                    AppError::Process(format!(
                     "failed to force-stop managed installation '{}' during app update handoff: {}",
                     installation.name, error
                 ))
-            })?;
+                })?;
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod kitchen_management_tests {
+    use super::*;
+
+    #[test]
+    fn kitchen_uses_official_upstream_before_a_checkout_exists() {
+        assert_eq!(
+            default_remote_for_repo_kind(&RepoKind::Kitchen),
+            Some(kitchen::DEFAULT_KITCHEN_REPO_URL)
+        );
+        assert_eq!(default_remote_for_repo_kind(&RepoKind::Core), None);
+        assert_eq!(default_remote_for_repo_kind(&RepoKind::Frontend), None);
+        assert_eq!(default_remote_for_repo_kind(&RepoKind::CustomNode), None);
+    }
+
+    #[test]
+    fn installation_wide_order_keeps_kitchen_after_python_dependency_repos() {
+        assert!(
+            installation_repo_priority(&RepoKind::Kitchen)
+                > installation_repo_priority(&RepoKind::CustomNode)
+        );
+        assert!(
+            installation_repo_priority(&RepoKind::Kitchen)
+                > installation_repo_priority(&RepoKind::Core)
+        );
+    }
+
+    #[test]
+    fn managed_python_override_policy_is_immediate_only_for_single_python_repo_ops() {
+        assert!(should_reassert_managed_kitchen_override(
+            &RepoKind::Core,
+            ManagedPythonOverrideMode::Immediate
+        ));
+        assert!(should_reassert_managed_kitchen_override(
+            &RepoKind::CustomNode,
+            ManagedPythonOverrideMode::Immediate
+        ));
+        assert!(!should_reassert_managed_kitchen_override(
+            &RepoKind::Core,
+            ManagedPythonOverrideMode::Deferred
+        ));
+        assert!(!should_reassert_managed_kitchen_override(
+            &RepoKind::Kitchen,
+            ManagedPythonOverrideMode::Immediate
+        ));
+    }
+
+    #[test]
+    fn failed_first_source_build_preserves_unchanged_unmanaged_runtime() {
+        let previous = KitchenRuntimeProbe {
+            distribution_present: true,
+            installed_version: Some("0.2.33".to_string()),
+            record_sha256: Some("record-a".to_string()),
+            import_ok: true,
+            ..Default::default()
+        };
+        let current = KitchenRuntimeProbe {
+            probed_at: Some("later".to_string()),
+            ..previous.clone()
+        };
+        assert!(should_preserve_unmanaged_kitchen_runtime(
+            false,
+            Some(&previous),
+            &current
+        ));
+        assert!(!should_preserve_unmanaged_kitchen_runtime(
+            true,
+            Some(&previous),
+            &current
+        ));
+        assert!(!should_preserve_unmanaged_kitchen_runtime(
+            false, None, &current
+        ));
+        let changed = KitchenRuntimeProbe {
+            record_sha256: Some("record-b".to_string()),
+            ..current
+        };
+        assert!(!should_preserve_unmanaged_kitchen_runtime(
+            false,
+            Some(&previous),
+            &changed
+        ));
+    }
+
+    #[test]
+    fn kitchen_untrack_preserves_runtime_but_remove_and_disable_restore_comfyui_requirement() {
+        assert!(kitchen_lifecycle_requires_comfy_restore(
+            &RepoKind::Kitchen,
+            true,
+            &OperationKind::UninstallRepo
+        ));
+        assert!(kitchen_lifecycle_requires_comfy_restore(
+            &RepoKind::Kitchen,
+            true,
+            &OperationKind::DisableRepo
+        ));
+        assert!(!kitchen_lifecycle_requires_comfy_restore(
+            &RepoKind::Kitchen,
+            true,
+            &OperationKind::UntrackRepo
+        ));
+        assert!(!kitchen_lifecycle_requires_comfy_restore(
+            &RepoKind::Kitchen,
+            false,
+            &OperationKind::UninstallRepo
+        ));
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -7443,6 +9143,8 @@ pub fn run() {
             preview_tracked_repo_update,
             patch_core,
             install_or_patch_frontend,
+            install_or_patch_kitchen,
+            restore_comfy_managed_kitchen,
             install_or_patch_custom_node,
             set_repo_base_target,
             add_repo_overlay,

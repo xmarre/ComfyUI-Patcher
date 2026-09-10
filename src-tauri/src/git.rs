@@ -107,6 +107,8 @@ fn is_ignorable_generated_untracked_path(path: &str) -> bool {
     }
 
     trimmed == "__pycache__"
+        || trimmed == ".patcher-build"
+        || trimmed.starts_with(".patcher-build/")
         || trimmed.starts_with("__pycache__/")
         || trimmed.contains("/__pycache__/")
         || trimmed.ends_with("/__pycache__")
@@ -870,6 +872,20 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn ignores_patcher_build_artifacts_but_not_similar_user_paths() {
+        assert!(is_ignorable_generated_untracked_path(".patcher-build"));
+        assert!(is_ignorable_generated_untracked_path(
+            ".patcher-build/operation-123/comfy_kitchen.whl"
+        ));
+        assert!(!is_ignorable_generated_untracked_path(
+            ".patcher-builder/user-file.txt"
+        ));
+        assert!(!is_ignorable_generated_untracked_path(
+            "nested/.patcher-build/user-file.txt"
+        ));
     }
 
     #[test]
