@@ -1,11 +1,14 @@
 export type DirtyRepoStrategy = "abort" | "stash" | "hard_reset";
 export type ExistingRepoConflictStrategy = "abort" | "replace" | "install_with_suffix";
-export type RepoKind = "core" | "frontend" | "custom_node";
+export type RepoKind = "core" | "frontend" | "kitchen" | "custom_node";
 export type OperationStatus = "queued" | "running" | "succeeded" | "failed";
 export type OperationKind =
   | "patch_core"
   | "install_frontend"
   | "patch_frontend"
+  | "install_kitchen"
+  | "patch_kitchen"
+  | "restore_comfy_managed_kitchen"
   | "install_custom_node"
   | "patch_custom_node"
   | "manage_repo_stack"
@@ -56,6 +59,38 @@ export type RepoDependencyState = {
   relevantChangedFiles: string[];
 };
 
+export type MaterializationStatus =
+  | "current"
+  | "stale"
+  | "missing"
+  | "import_failed"
+  | "replaced"
+  | "failed";
+
+export type KitchenRuntimeProbe = {
+  distributionPresent: boolean;
+  installedVersion: string | null;
+  distributionLocation: string | null;
+  directUrl: string | null;
+  directUrlSha256: string | null;
+  recordSha256: string | null;
+  importOk: boolean;
+  importError: string | null;
+  moduleLocation: string | null;
+  probedAt: string | null;
+};
+
+export type RepoMaterializationState = {
+  materializedHeadSha: string | null;
+  installedVersion: string | null;
+  installedOrigin: string | null;
+  artifactSha256: string | null;
+  installedRecordSha256: string | null;
+  status: MaterializationStatus;
+  lastMaterializedAt: string | null;
+  lastError: string | null;
+};
+
 export type LaunchProfile = {
   mode: "managed_child" | "custom_command";
   command: string;
@@ -103,6 +138,7 @@ export type ManagedRepo = {
   liveWarnings: string[];
   changedFiles: string[];
   dependencyState: RepoDependencyState | null;
+  materializationState: RepoMaterializationState | null;
   lastScannedAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -112,6 +148,8 @@ export type InstallationDetail = {
   installation: Installation;
   coreRepo: ManagedRepo | null;
   frontendRepo: ManagedRepo | null;
+  kitchenRepo: ManagedRepo | null;
+  kitchenRuntime: KitchenRuntimeProbe | null;
   customNodeRepos: ManagedRepo[];
   warnings: string[];
   lastReconciledAt: string | null;
@@ -226,6 +264,7 @@ export type RepoCheckpoint = {
   label: string | null;
   reason: string | null;
   dependencyState: RepoDependencyState | null;
+  materializationState: RepoMaterializationState | null;
   createdAt: string;
 };
 
@@ -285,6 +324,7 @@ export type OperationEvent = {
     | "submodules"
     | "dependency_plan"
     | "dependency_sync"
+    | "materialization"
     | "state_refresh"
     | "start"
     | "stop"
@@ -308,6 +348,8 @@ export type RegisterInstallationResult = {
   installation: Installation;
   coreRepo: ManagedRepo | null;
   frontendRepo: ManagedRepo | null;
+  kitchenRepo: ManagedRepo | null;
+  kitchenRuntime: KitchenRuntimeProbe | null;
   discoveredCustomNodes: ManagedRepo[];
   warnings: string[];
 };
@@ -340,6 +382,20 @@ export type PatchFrontendInput = {
   dirtyRepoStrategy: DirtyRepoStrategy;
   setTrackedTarget: boolean;
   syncDependencies: boolean;
+  restartAfterSuccess: boolean;
+};
+
+export type PatchKitchenInput = {
+  installationId: string;
+  input: string;
+  existingRepoConflictStrategy: ExistingRepoConflictStrategy;
+  dirtyRepoStrategy: DirtyRepoStrategy;
+  setTrackedTarget: boolean;
+  restartAfterSuccess: boolean;
+};
+
+export type RestoreComfyManagedKitchenInput = {
+  repoId: string;
   restartAfterSuccess: boolean;
 };
 
