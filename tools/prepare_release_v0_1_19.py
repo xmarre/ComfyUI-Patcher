@@ -4,13 +4,20 @@ from pathlib import Path
 def replace_bytes(path: str, old: str, new: str, expected: int = 1) -> None:
     target = Path(path)
     data = target.read_bytes()
-    old_bytes = old.encode("utf-8")
+    newline = "\r\n" if b"\r\n" in data else "\n"
+
+    def encode_pattern(value: str) -> bytes:
+        normalized = value.replace("\r\n", "\n")
+        return normalized.replace("\n", newline).encode("utf-8")
+
+    old_bytes = encode_pattern(old)
+    new_bytes = encode_pattern(new)
     count = data.count(old_bytes)
     if count != expected:
         raise SystemExit(
             f"{path}: expected {expected} occurrence(s) of {old!r}, found {count}"
         )
-    target.write_bytes(data.replace(old_bytes, new.encode("utf-8")))
+    target.write_bytes(data.replace(old_bytes, new_bytes))
 
 
 replace_bytes(
@@ -35,8 +42,8 @@ replace_bytes(
 )
 replace_bytes(
     "src-tauri/Cargo.lock",
-    'name = "comfyui-patcher"\r\nversion = "0.1.18"\r\n',
-    'name = "comfyui-patcher"\r\nversion = "0.1.19"\r\n',
+    'name = "comfyui-patcher"\nversion = "0.1.18"\n',
+    'name = "comfyui-patcher"\nversion = "0.1.19"\n',
 )
 replace_bytes(
     "src-tauri/tauri.conf.json",
@@ -51,8 +58,9 @@ replace_bytes(
 
 changelog_path = Path("CHANGELOG.md")
 changelog = changelog_path.read_bytes().decode("utf-8")
-start = changelog.index("## Unreleased\n")
-end = changelog.index("## [0.1.18] - 2026-08-30\n")
+newline = "\r\n" if "\r\n" in changelog else "\n"
+start = changelog.index(f"## Unreleased{newline}")
+end = changelog.index(f"## [0.1.18] - 2026-08-30{newline}")
 release_section = """## [0.1.19] - 2026-09-10
 
 This release adds first-class management for the official `Comfy-Org/comfy-kitchen` source project, keeping its Git checkout and the compiled Python runtime coherent under the same patch/update/rollback lifecycle as the rest of ComfyUI Patcher.
@@ -75,7 +83,7 @@ This release adds first-class management for the official `Comfy-Org/comfy-kitch
 - Kitchen rollback/checkpoint restore includes runtime materialization state; Restore ComfyUI Kitchen retains dirty-worktree recovery data without leaving the user's checkout stashed, and inactive source checkouts no longer expose tracked Update actions. Failed fresh source installs clean up only operation-owned state and preserve/restore retained pre-existing paths.
 - A failed first Kitchen source build preserves an unchanged pre-existing unmanaged runtime; ComfyUI requirement restoration is reserved for failed attempts that changed or could not verify that runtime.
 
-"""
+""".replace("\n", newline)
 changelog = changelog[:start] + release_section + changelog[end:]
 compare_anchor = (
     "[0.1.18]: https://github.com/xmarre/ComfyUI-Patcher/compare/"
@@ -86,7 +94,7 @@ if compare_anchor not in changelog:
 changelog = changelog.replace(
     compare_anchor,
     "[0.1.19]: https://github.com/xmarre/ComfyUI-Patcher/compare/"
-    "v0.1.18...v0.1.19\n"
+    f"v0.1.18...v0.1.19{newline}"
     + compare_anchor,
     1,
 )
