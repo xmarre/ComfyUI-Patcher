@@ -64,7 +64,9 @@ fn parse_status_entries(output: &str) -> Vec<StatusEntry> {
 }
 
 fn normalize_status_path(path: &str) -> String {
-    path.replace('\\', "/").trim_start_matches("./").to_string()
+    path.replace('\\', "/")
+        .trim_start_matches("./")
+        .to_string()
 }
 
 fn parse_status_branch_metadata(output: &str) -> StatusBranchMetadata {
@@ -104,9 +106,9 @@ fn is_ignorable_generated_untracked_path(path: &str) -> bool {
         return false;
     }
 
-    trimmed == ".patcher-build"
+    trimmed == "__pycache__"
+        || trimmed == ".patcher-build"
         || trimmed.starts_with(".patcher-build/")
-        || trimmed == "__pycache__"
         || trimmed.starts_with("__pycache__/")
         || trimmed.contains("/__pycache__/")
         || trimmed.ends_with("/__pycache__")
@@ -262,7 +264,11 @@ pub async fn commits_between(
     }
     let limit_flag = format!("--max-count={limit}");
     let range = format!("{base}..{head}");
-    let output = run_git(path, &["log", "--format=%H%x09%s", &limit_flag, &range]).await?;
+    let output = run_git(
+        path,
+        &["log", "--format=%H%x09%s", &limit_flag, &range],
+    )
+    .await?;
     Ok(output
         .lines()
         .filter_map(|line| {
@@ -326,10 +332,7 @@ pub async fn preview_merge_conflicts(
     let output = String::from_utf8_lossy(&output.stdout).to_string();
     let mut conflicts = Vec::new();
     for line in output.lines() {
-        if let Some(path) = line
-            .trim()
-            .strip_prefix("CONFLICT (contents): Merge conflict in ")
-        {
+        if let Some(path) = line.trim().strip_prefix("CONFLICT (contents): Merge conflict in ") {
             conflicts.push(path.trim().to_string());
         }
     }
@@ -366,10 +369,11 @@ async fn remove_temporary_worktree(
     Ok(())
 }
 
-fn combine_preview_cleanup_error(primary: AppError, cleanup: AppError) -> AppError {
-    AppError::Git(format!(
-        "{primary}; temporary preflight cleanup also failed: {cleanup}"
-    ))
+fn combine_preview_cleanup_error(
+    primary: AppError,
+    cleanup: AppError,
+) -> AppError {
+    AppError::Git(format!("{primary}; temporary preflight cleanup also failed: {cleanup}"))
 }
 
 pub async fn preview_sequential_merge(
@@ -425,7 +429,8 @@ pub async fn preview_sequential_merge(
         },
     };
 
-    let cleanup = remove_temporary_worktree(path, &relative_worktree, &absolute_worktree).await;
+    let cleanup =
+        remove_temporary_worktree(path, &relative_worktree, &absolute_worktree).await;
     match (result, cleanup) {
         (Ok(result), Ok(())) => Ok(result),
         (Err(error), Ok(())) => Err(error),
@@ -526,9 +531,7 @@ pub async fn clone_repo(url: &str, dest: &Path) -> AppResult<()> {
     let dir_name = dest
         .file_name()
         .and_then(|value| value.to_str())
-        .ok_or_else(|| {
-            AppError::InvalidInput("destination has no final directory name".to_string())
-        })?;
+        .ok_or_else(|| AppError::InvalidInput("destination has no final directory name".to_string()))?;
     let args = vec!["clone".to_string(), url.to_string(), dir_name.to_string()];
     let output = output_command("git", &args, Some(parent)).await?;
     if !output.status.success() {
@@ -837,8 +840,10 @@ mod tests {
 
     impl TestRepo {
         fn new() -> Self {
-            let path = std::env::temp_dir()
-                .join(format!("comfyui-patcher-git-test-{}", uuid::Uuid::new_v4()));
+            let path = std::env::temp_dir().join(format!(
+                "comfyui-patcher-git-test-{}",
+                uuid::Uuid::new_v4()
+            ));
             std::fs::create_dir_all(&path).unwrap();
             Self(path)
         }
@@ -1093,8 +1098,9 @@ mod tests {
 
     #[test]
     fn status_entries_ignore_branch_header_lines() {
-        let entries =
-            parse_status_entries("## main...origin/main\n M src/lib.rs\n?? __pycache__/mod.pyc\n");
+        let entries = parse_status_entries(
+            "## main...origin/main\n M src/lib.rs\n?? __pycache__/mod.pyc\n",
+        );
 
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].paths, vec!["src/lib.rs".to_string()]);
@@ -1103,8 +1109,7 @@ mod tests {
 
     #[test]
     fn parse_status_entries_splits_rename_and_copy_only() {
-        let output =
-            "R  old/path.py -> new/path.py\nC  src/a.py -> src/b.py\n?? literal -> arrow.py";
+        let output = "R  old/path.py -> new/path.py\nC  src/a.py -> src/b.py\n?? literal -> arrow.py";
         let entries = parse_status_entries(output);
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].code, "R ");
