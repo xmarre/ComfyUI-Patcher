@@ -1,0 +1,63 @@
+name: Validate minimal Kitchen git review fix
+
+on:
+  push:
+    branches:
+      - feature/comfy-kitchen-management
+
+permissions:
+  contents: write
+
+jobs:
+  validate-and-commit:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/comfy-kitchen-management
+          fetch-depth: 0
+
+      - name: Reconstruct minimal git.rs fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=dc296638b963a5b43c4cd058f3498a16d3e6c008
+          git checkout "$BASE" -- src-tauri/src/git.rs
+          python tools/minimize_kitchen_git_review_fix.py
+          grep -Fq 'trimmed == ".patcher-build"' src-tauri/src/git.rs
+          grep -Fq 'nested/.patcher-build/user-file.txt' src-tauri/src/git.rs
+          read -r additions deletions path <<< "$(git diff --numstat "$BASE" -- src-tauri/src/git.rs)"
+          test "$additions" = "16"
+          test "$deletions" = "0"
+          test "$path" = "src-tauri/src/git.rs"
+          git diff --check -- src-tauri/src/git.rs
+
+      - name: Validate permanent CI command path
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+          lock_before="$(git hash-object src-tauri/Cargo.lock)"
+          cargo test --manifest-path src-tauri/Cargo.toml
+          cargo build --manifest-path src-tauri/Cargo.toml
+          git checkout -- src-tauri/Cargo.lock
+          test "$(git hash-object src-tauri/Cargo.lock)" = "$lock_before"
+          git diff --exit-code -- src-tauri/Cargo.lock
+
+      - name: Commit validated minimal source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/minimize-kitchen-git-review-fix.yml
+          git rm tools/minimize_kitchen_git_review_fix.py
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src-tauri/src/git.rs
+          expected=$'.github/workflows/minimize-kitchen-git-review-fix.yml\nsrc-tauri/src/git.rs\ntools/minimize_kitchen_git_review_fix.py'
+          actual="$(git diff --cached --name-only | sort)"
+          test "$actual" = "$(printf '%s\n' "$expected" | sort)"
+          git diff --cached --check
+          git commit -m "Keep Kitchen build-artifact ignore diff minimal"
+          git push origin HEAD:feature/comfy-kitchen-management
