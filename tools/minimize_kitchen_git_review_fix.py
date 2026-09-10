@@ -4,7 +4,7 @@ p = Path("src-tauri/src/git.rs")
 text = p.read_text(encoding="utf-8")
 
 old = '''    trimmed == "__pycache__"\n        || trimmed.starts_with("__pycache__/")\n'''
-new = '''    trimmed == ".patcher-build"\n        || trimmed.starts_with(".patcher-build/")\n        || trimmed == "__pycache__"\n        || trimmed.starts_with("__pycache__/")\n'''
+new = '''    trimmed == "__pycache__"\n        || trimmed == ".patcher-build"\n        || trimmed.starts_with(".patcher-build/")\n        || trimmed.starts_with("__pycache__/")\n'''
 if text.count(old) != 1:
     raise SystemExit(f"ignore insertion: expected 1 match, found {text.count(old)}")
 text = text.replace(old, new, 1)
