@@ -5,6 +5,10 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 
+const OVERLAY_BASE_REF_ROOT: &str = "refs/patcher/overlay-bases";
+const OVERLAY_HEAD_REF_ROOT: &str = "refs/patcher/overlay-heads";
+const OVERLAY_MERGE_REF_ROOT: &str = "refs/patcher/overlay-merges";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoStatus {
     pub head_sha: Option<String>,
@@ -133,8 +137,7 @@ async fn run_git_owned(path: &Path, args: &[String]) -> AppResult<String> {
     let output = output_command("git", args, Some(path)).await?;
     if !output.status.success() {
         return Err(AppError::Git(format!(
-            "{}
-{}",
+            "{}\n{}",
             args.join(" "),
             String::from_utf8_lossy(&output.stderr)
         )));
@@ -253,6 +256,129 @@ pub async fn merge_base(path: &Path, left: &str, right: &str) -> AppResult<Optio
     run_git_allow_fail(path, &["merge-base", left, right]).await
 }
 
+fn parse_overlay_pr_number(reference: &str) -> Option<u64> {
+    let trimmed = reference.trim();
+    for prefix in [
+        "patcher/pr-",
+        "refs/heads/patcher/pr-",
+        "refs/patcher/previews/pr-",
+    ] {
+        if let Some(number) = trimmed.strip_prefix(prefix) {
+            if !number.is_empty() && number.chars().all(|char| char.is_ascii_digit()) {
+                return number.parse().ok();
+            }
+        }
+    }
+    None
+}
+
+fn parse_pull_head_refspec(refspec: &str) -> Option<(u64, &str)> {
+    let (source, destination) = refspec.split_once(':')?;
+    let number = source
+        .strip_prefix("pull/")?
+        .strip_suffix("/head")?
+        .parse()
+        .ok()?;
+    (!destination.trim().is_empty()).then_some((number, destination))
+}
+
+fn overlay_base_ref(pr_number: u64) -> String {
+    format!("{OVERLAY_BASE_REF_ROOT}/{pr_number}")
+}
+
+fn overlay_head_ref(pr_number: u64) -> String {
+    format!("{OVERLAY_HEAD_REF_ROOT}/{pr_number}")
+}
+
+fn overlay_merge_ref(pr_number: u64) -> String {
+    format!("{OVERLAY_MERGE_REF_ROOT}/{pr_number}")
+}
+
+async fn clear_overlay_snapshot(path: &Path, pr_number: u64) -> AppResult<()> {
+    for reference in [overlay_base_ref(pr_number), overlay_head_ref(pr_number)] {
+        let _ = run_git_allow_fail(path, &["update-ref", "-d", &reference]).await?;
+    }
+    Ok(())
+}
+
+async fn capture_overlay_snapshot(
+    path: &Path,
+    remote: &str,
+    pr_number: u64,
+    fetched_head_ref: &str,
+) -> AppResult<()> {
+    let Some(fetched_head_sha) = rev_parse(path, fetched_head_ref).await? else {
+        clear_overlay_snapshot(path, pr_number).await?;
+        return Ok(());
+    };
+
+    let merge_ref = overlay_merge_ref(pr_number);
+    let merge_refspec = format!("pull/{pr_number}/merge:{merge_ref}");
+    if run_git(path, &["fetch", "--force", remote, &merge_refspec])
+        .await
+        .is_err()
+    {
+        clear_overlay_snapshot(path, pr_number).await?;
+        return Ok(());
+    }
+
+    let merge_head_expr = format!("{merge_ref}^2");
+    let merge_base_expr = format!("{merge_ref}^1");
+    let Some(merge_head_sha) = rev_parse(path, &merge_head_expr).await? else {
+        clear_overlay_snapshot(path, pr_number).await?;
+        return Ok(());
+    };
+    let Some(base_head_sha) = rev_parse(path, &merge_base_expr).await? else {
+        clear_overlay_snapshot(path, pr_number).await?;
+        return Ok(());
+    };
+    if merge_head_sha != fetched_head_sha {
+        clear_overlay_snapshot(path, pr_number).await?;
+        return Ok(());
+    }
+
+    let base_ref = overlay_base_ref(pr_number);
+    let head_ref = overlay_head_ref(pr_number);
+    run_git(path, &["update-ref", &base_ref, &base_head_sha]).await?;
+    run_git(path, &["update-ref", &head_ref, &fetched_head_sha]).await?;
+    Ok(())
+}
+
+async fn validated_overlay_base_head(path: &Path, incoming_head: &str) -> AppResult<Option<String>> {
+    let Some(pr_number) = parse_overlay_pr_number(incoming_head) else {
+        return Ok(None);
+    };
+    let incoming_sha = rev_parse(path, incoming_head).await?.ok_or_else(|| {
+        AppError::Conflict(format!(
+            "cannot resolve PR #{pr_number} overlay head {incoming_head}"
+        ))
+    })?;
+    let snapshot_head_ref = overlay_head_ref(pr_number);
+    let snapshot_base_ref = overlay_base_ref(pr_number);
+    let snapshot_head_sha = rev_parse(path, &snapshot_head_ref).await?;
+    let snapshot_base_sha = rev_parse(path, &snapshot_base_ref).await?;
+
+    match (snapshot_head_sha, snapshot_base_sha) {
+        (Some(snapshot_head_sha), Some(snapshot_base_sha)) if snapshot_head_sha == incoming_sha => {
+            Ok(Some(snapshot_base_sha))
+        }
+        _ => Err(AppError::Conflict(format!(
+            "cannot safely apply PR #{pr_number} as an overlay because its exact base snapshot is unavailable or stale for head {incoming_sha}; refusing to merge the PR head ancestry into the tracked base"
+        ))),
+    }
+}
+
+async fn overlay_diff_base(path: &Path, head: &str) -> AppResult<Option<String>> {
+    let Some(base_head) = validated_overlay_base_head(path, head).await? else {
+        return Ok(None);
+    };
+    merge_base(path, &base_head, head).await?.map(Some).ok_or_else(|| {
+        AppError::Conflict(format!(
+            "overlay head {head} has no merge base with its captured declared-base snapshot {base_head}"
+        ))
+    })
+}
+
 pub async fn commits_between(
     path: &Path,
     base: &str,
@@ -289,7 +415,11 @@ pub async fn diff_name_status(
     if base == head {
         return Ok(Vec::new());
     }
-    let range = format!("{base}..{head}");
+    let effective_base = match overlay_diff_base(path, head).await? {
+        Some(branch_point) => branch_point,
+        None => base.to_string(),
+    };
+    let range = format!("{effective_base}..{head}");
     let output = run_git(path, &["diff", "--name-status", &range]).await?;
     Ok(output
         .lines()
@@ -369,18 +499,21 @@ async fn remove_temporary_worktree(
     Ok(())
 }
 
-fn combine_preview_cleanup_error(
-    primary: AppError,
-    cleanup: AppError,
-) -> AppError {
-    AppError::Git(format!("{primary}; temporary preflight cleanup also failed: {cleanup}"))
+fn combine_preview_cleanup_error(primary: AppError, cleanup: AppError) -> AppError {
+    AppError::Git(format!(
+        "{primary}; temporary preflight cleanup also failed: {cleanup}"
+    ))
 }
 
-pub async fn preview_sequential_merge(
+async fn with_temporary_preview_worktree<F, Fut>(
     path: &Path,
     current_head: &str,
-    incoming_head: &str,
-) -> AppResult<SequentialMergePreview> {
+    operation: F,
+) -> AppResult<SequentialMergePreview>
+where
+    F: FnOnce(PathBuf) -> Fut,
+    Fut: std::future::Future<Output = AppResult<()>>,
+{
     let parent = path.parent().ok_or_else(|| {
         AppError::Git("repository path has no parent for temporary preflight worktree".to_string())
     })?;
@@ -409,22 +542,16 @@ pub async fn preview_sequential_merge(
         return Err(error);
     }
 
-    let merge_result = merge_no_ff(
-        &absolute_worktree,
-        incoming_head,
-        "comfyui-patcher sequential merge preview",
-    )
-    .await;
-
-    let result = match merge_result {
+    let operation_result = operation(absolute_worktree.clone()).await;
+    let result = match operation_result {
         Ok(()) => run_git(&absolute_worktree, &["rev-parse", "HEAD"])
             .await
             .map(|synthetic_commit| SequentialMergePreview::Clean { synthetic_commit }),
-        Err(merge_error) => match unmerged_paths(&absolute_worktree).await {
+        Err(operation_error) => match unmerged_paths(&absolute_worktree).await {
             Ok(files) if !files.is_empty() => Ok(SequentialMergePreview::Conflicts { files }),
-            Ok(_) => Err(merge_error),
+            Ok(_) => Err(operation_error),
             Err(paths_error) => Err(AppError::Git(format!(
-                "{merge_error}; additionally failed to inspect unmerged paths: {paths_error}"
+                "{operation_error}; additionally failed to inspect unmerged paths: {paths_error}"
             ))),
         },
     };
@@ -439,6 +566,125 @@ pub async fn preview_sequential_merge(
             Err(combine_preview_cleanup_error(error, cleanup_error))
         }
     }
+}
+
+pub async fn preview_sequential_merge(
+    path: &Path,
+    current_head: &str,
+    incoming_head: &str,
+) -> AppResult<SequentialMergePreview> {
+    let incoming_head = incoming_head.to_string();
+    with_temporary_preview_worktree(path, current_head, move |worktree| async move {
+        merge_no_ff(
+            &worktree,
+            &incoming_head,
+            "comfyui-patcher sequential merge preview",
+        )
+        .await
+    })
+    .await
+}
+
+/// Applies only the changes introduced by an overlay branch relative to its
+/// declared base snapshot, then records those changes as a single-parent
+/// synthetic commit on the current stack.
+///
+/// This intentionally does not merge `incoming_head`. Merging a PR head would
+/// make every upstream commit reachable from that PR a parent of `patcher/stack`,
+/// which can silently advance a pinned/tracked base to newer upstream code.
+pub async fn apply_overlay_delta(
+    path: &Path,
+    declared_base_head: &str,
+    incoming_head: &str,
+    message: &str,
+) -> AppResult<()> {
+    let Some(branch_point) = merge_base(path, declared_base_head, incoming_head).await? else {
+        return Err(AppError::Conflict(format!(
+            "overlay head {incoming_head} has no merge base with its declared base {declared_base_head}"
+        )));
+    };
+
+    let patch = run_git_raw(
+        path,
+        &[
+            "diff",
+            "--binary",
+            "--full-index",
+            "--find-renames",
+            &branch_point,
+            incoming_head,
+            "--",
+        ],
+    )
+    .await?;
+
+    if !patch.is_empty() {
+        let patch_name = format!(
+            ".comfyui-patcher-overlay-{}.patch",
+            uuid::Uuid::new_v4().simple()
+        );
+        let patch_path = path.join(&patch_name);
+        std::fs::write(&patch_path, patch.as_bytes())?;
+        let apply_result = run_git(
+            path,
+            &["apply", "--3way", "--index", "--", &patch_name],
+        )
+        .await;
+        let cleanup_result = std::fs::remove_file(&patch_path);
+
+        if let Err(apply_error) = apply_result {
+            return match cleanup_result {
+                Ok(()) => Err(apply_error),
+                Err(cleanup_error) => Err(AppError::Git(format!(
+                    "{apply_error}; additionally failed to remove temporary overlay patch {}: {cleanup_error}",
+                    patch_path.to_string_lossy()
+                ))),
+            };
+        }
+        if let Err(cleanup_error) = cleanup_result {
+            return Err(AppError::Io(format!(
+                "failed to remove temporary overlay patch {}: {cleanup_error}",
+                patch_path.to_string_lossy()
+            )));
+        }
+    }
+
+    run_git(
+        path,
+        &[
+            "-c",
+            "user.name=ComfyUI Patcher",
+            "-c",
+            "user.email=patcher@local.invalid",
+            "commit",
+            "--no-verify",
+            "--allow-empty",
+            "-m",
+            message,
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn preview_sequential_overlay(
+    path: &Path,
+    current_head: &str,
+    declared_base_head: &str,
+    incoming_head: &str,
+) -> AppResult<SequentialMergePreview> {
+    let declared_base_head = declared_base_head.to_string();
+    let incoming_head = incoming_head.to_string();
+    with_temporary_preview_worktree(path, current_head, move |worktree| async move {
+        apply_overlay_delta(
+            &worktree,
+            &declared_base_head,
+            &incoming_head,
+            "comfyui-patcher sequential overlay preview",
+        )
+        .await
+    })
+    .await
 }
 
 pub async fn unmerged_paths(path: &Path) -> AppResult<Vec<String>> {
@@ -557,8 +803,17 @@ pub async fn fetch_refspec(path: &Path, remote: &str, refspec: &str) -> AppResul
 /// This must only be used for patcher-owned generated refs. Pull request heads
 /// can be force-pushed, so their cached preview/overlay refs are not guaranteed
 /// to advance by fast-forward.
+///
+/// When the refspec is a GitHub pull-request head, Patcher also snapshots the
+/// current GitHub test-merge parents. The first parent records the PR's declared
+/// base branch state and the second parent must exactly match the fetched PR
+/// head. Overlay materialization consumes that snapshot to derive only the PR
+/// delta and fails closed if it cannot prove the snapshot matches the head.
 pub async fn force_fetch_refspec(path: &Path, remote: &str, refspec: &str) -> AppResult<()> {
     run_git(path, &["fetch", "--force", remote, refspec]).await?;
+    if let Some((pr_number, fetched_head_ref)) = parse_pull_head_refspec(refspec) {
+        capture_overlay_snapshot(path, remote, pr_number, fetched_head_ref).await?;
+    }
     Ok(())
 }
 
@@ -591,7 +846,32 @@ pub async fn remote_branches_pointing_at(
     Ok(branches)
 }
 
+/// Applies an incoming target to the current checkout without fast-forwarding.
+///
+/// For Patcher-owned PR refs this is deliberately *not* a Git merge. The PR's
+/// exact captured declared-base snapshot is used to compute its branch-point
+/// delta, which is applied to the current stack and committed as a single-parent
+/// synthetic commit. That keeps the tracked base authoritative even when the PR
+/// branch itself contains newer upstream commits. Non-PR callers retain the
+/// legacy `git merge --no-ff` behavior.
 pub async fn merge_no_ff(path: &Path, target: &str, message: &str) -> AppResult<()> {
+    if let Some(pr_number) = parse_overlay_pr_number(target) {
+        let base_head = validated_overlay_base_head(path, target)
+            .await?
+            .ok_or_else(|| {
+                AppError::Conflict(format!(
+                    "cannot resolve captured base snapshot for PR #{pr_number}"
+                ))
+            })?;
+        let incoming_sha = rev_parse(path, target).await?.ok_or_else(|| {
+            AppError::Conflict(format!("cannot resolve PR #{pr_number} overlay head {target}"))
+        })?;
+        let provenance_message = format!(
+            "{message}\n\nPatcher-Overlay-PR: {pr_number}\nPatcher-Overlay-Base-Snapshot: {base_head}\nPatcher-Overlay-Head: {incoming_sha}"
+        );
+        return apply_overlay_delta(path, &base_head, target, &provenance_message).await;
+    }
+
     run_git(
         path,
         &[
@@ -866,6 +1146,15 @@ mod tests {
             );
             String::from_utf8_lossy(&output.stdout).trim().to_string()
         }
+
+        fn git_succeeds(&self, args: &[&str]) -> bool {
+            Command::new("git")
+                .args(args)
+                .current_dir(&self.0)
+                .status()
+                .unwrap()
+                .success()
+        }
     }
 
     impl Drop for TestRepo {
@@ -1065,6 +1354,184 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn overlay_delta_does_not_import_newer_base_ancestry() {
+        let repo = TestRepo::new();
+        repo.git(&["init"]);
+        repo.git(&["config", "user.name", "ComfyUI Patcher Test"]);
+        repo.git(&["config", "user.email", "patcher-test@local.invalid"]);
+
+        std::fs::write(repo.path().join("base.txt"), "base\n").unwrap();
+        repo.git(&["add", "base.txt"]);
+        repo.git(&["commit", "-m", "tracked base"]);
+        let tracked_base = repo.git(&["rev-parse", "HEAD"]);
+
+        std::fs::write(repo.path().join("upstream-only.txt"), "new upstream\n").unwrap();
+        repo.git(&["add", "upstream-only.txt"]);
+        repo.git(&["commit", "-m", "newer upstream"]);
+        let live_base = repo.git(&["rev-parse", "HEAD"]);
+
+        repo.git(&["switch", "-c", "feature"]);
+        std::fs::write(repo.path().join("feature.txt"), "feature\n").unwrap();
+        repo.git(&["add", "feature.txt"]);
+        repo.git(&["commit", "-m", "feature change"]);
+        let feature = repo.git(&["rev-parse", "HEAD"]);
+
+        repo.git(&["switch", "--detach", &tracked_base]);
+        apply_overlay_delta(repo.path(), &live_base, &feature, "apply feature delta")
+            .await
+            .unwrap();
+        let materialized = repo.git(&["rev-parse", "HEAD"]);
+
+        assert!(repo.path().join("feature.txt").is_file());
+        assert!(!repo.path().join("upstream-only.txt").exists());
+        assert!(!repo.git_succeeds(&[
+            "merge-base",
+            "--is-ancestor",
+            &live_base,
+            &materialized,
+        ]));
+    }
+
+    #[tokio::test]
+    async fn pr_merge_dispatch_uses_captured_base_snapshot_and_stays_single_parent() {
+        let repo = TestRepo::new();
+        repo.git(&["init"]);
+        repo.git(&["config", "user.name", "ComfyUI Patcher Test"]);
+        repo.git(&["config", "user.email", "patcher-test@local.invalid"]);
+
+        std::fs::write(repo.path().join("base.txt"), "base\n").unwrap();
+        repo.git(&["add", "base.txt"]);
+        repo.git(&["commit", "-m", "tracked base"]);
+        let tracked_base = repo.git(&["rev-parse", "HEAD"]);
+
+        std::fs::write(repo.path().join("upstream-only.txt"), "new upstream\n").unwrap();
+        repo.git(&["add", "upstream-only.txt"]);
+        repo.git(&["commit", "-m", "newer upstream"]);
+        let live_base = repo.git(&["rev-parse", "HEAD"]);
+
+        repo.git(&["switch", "-c", "feature"]);
+        std::fs::write(repo.path().join("feature.txt"), "feature\n").unwrap();
+        repo.git(&["add", "feature.txt"]);
+        repo.git(&["commit", "-m", "feature change"]);
+        let feature = repo.git(&["rev-parse", "HEAD"]);
+        repo.git(&["update-ref", "refs/patcher/previews/pr-7", &feature]);
+        repo.git(&["update-ref", &overlay_head_ref(7), &feature]);
+        repo.git(&["update-ref", &overlay_base_ref(7), &live_base]);
+
+        repo.git(&["switch", "--detach", &tracked_base]);
+        merge_no_ff(repo.path(), "refs/patcher/previews/pr-7", "apply PR #7")
+            .await
+            .unwrap();
+        let materialized = repo.git(&["rev-parse", "HEAD"]);
+
+        assert!(repo.path().join("feature.txt").is_file());
+        assert!(!repo.path().join("upstream-only.txt").exists());
+        assert_eq!(repo.git(&["rev-list", "--parents", "-n", "1", &materialized]).split_whitespace().count(), 2);
+        assert!(!repo.git_succeeds(&[
+            "merge-base",
+            "--is-ancestor",
+            &live_base,
+            &materialized,
+        ]));
+        let message = repo.git(&["log", "-1", "--format=%B"]);
+        assert!(message.contains("Patcher-Overlay-PR: 7"));
+        assert!(message.contains(&format!("Patcher-Overlay-Head: {feature}")));
+    }
+
+    #[tokio::test]
+    async fn pr_merge_dispatch_fails_closed_without_matching_base_snapshot() {
+        let repo = TestRepo::new();
+        repo.git(&["init"]);
+        repo.git(&["config", "user.name", "ComfyUI Patcher Test"]);
+        repo.git(&["config", "user.email", "patcher-test@local.invalid"]);
+        std::fs::write(repo.path().join("file.txt"), "base\n").unwrap();
+        repo.git(&["add", "file.txt"]);
+        repo.git(&["commit", "-m", "base"]);
+        let base = repo.git(&["rev-parse", "HEAD"]);
+        repo.git(&["switch", "-c", "feature"]);
+        std::fs::write(repo.path().join("feature.txt"), "feature\n").unwrap();
+        repo.git(&["add", "feature.txt"]);
+        repo.git(&["commit", "-m", "feature"]);
+        let feature = repo.git(&["rev-parse", "HEAD"]);
+        repo.git(&["update-ref", "refs/patcher/previews/pr-8", &feature]);
+        repo.git(&["switch", "--detach", &base]);
+
+        let error = merge_no_ff(repo.path(), "refs/patcher/previews/pr-8", "apply PR #8")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("refusing to merge the PR head ancestry"));
+        assert_eq!(repo.git(&["rev-parse", "HEAD"]), base);
+        assert!(!repo.path().join("feature.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn overlay_diff_name_status_uses_branch_point_not_declared_base_tip() {
+        let repo = TestRepo::new();
+        repo.git(&["init"]);
+        repo.git(&["config", "user.name", "ComfyUI Patcher Test"]);
+        repo.git(&["config", "user.email", "patcher-test@local.invalid"]);
+        std::fs::write(repo.path().join("base.txt"), "base\n").unwrap();
+        repo.git(&["add", "base.txt"]);
+        repo.git(&["commit", "-m", "base"]);
+        std::fs::write(repo.path().join("upstream-only.txt"), "upstream\n").unwrap();
+        repo.git(&["add", "upstream-only.txt"]);
+        repo.git(&["commit", "-m", "upstream"]);
+        let live_base = repo.git(&["rev-parse", "HEAD"]);
+        repo.git(&["switch", "-c", "feature"]);
+        std::fs::write(repo.path().join("feature.txt"), "feature\n").unwrap();
+        repo.git(&["add", "feature.txt"]);
+        repo.git(&["commit", "-m", "feature"]);
+        let feature = repo.git(&["rev-parse", "HEAD"]);
+        repo.git(&["update-ref", "refs/patcher/previews/pr-9", &feature]);
+        repo.git(&["update-ref", &overlay_head_ref(9), &feature]);
+        repo.git(&["update-ref", &overlay_base_ref(9), &live_base]);
+
+        let changes = diff_name_status(repo.path(), &live_base, "refs/patcher/previews/pr-9")
+            .await
+            .unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, "feature.txt");
+    }
+
+    #[tokio::test]
+    async fn sequential_overlay_preview_detects_conflict_without_touching_managed_worktree() {
+        let repo = TestRepo::new();
+        repo.git(&["init"]);
+        repo.git(&["config", "user.name", "ComfyUI Patcher Test"]);
+        repo.git(&["config", "user.email", "patcher-test@local.invalid"]);
+
+        std::fs::write(repo.path().join("file.txt"), "base\n").unwrap();
+        repo.git(&["add", "file.txt"]);
+        repo.git(&["commit", "-m", "base"]);
+        let base = repo.git(&["rev-parse", "HEAD"]);
+
+        repo.git(&["switch", "-c", "feature"]);
+        std::fs::write(repo.path().join("file.txt"), "feature\n").unwrap();
+        repo.git(&["add", "file.txt"]);
+        repo.git(&["commit", "-m", "feature"]);
+        let feature = repo.git(&["rev-parse", "HEAD"]);
+
+        repo.git(&["switch", "--detach", &base]);
+        std::fs::write(repo.path().join("file.txt"), "earlier-overlay\n").unwrap();
+        repo.git(&["add", "file.txt"]);
+        repo.git(&["commit", "-m", "earlier overlay"]);
+        let accumulated = repo.git(&["rev-parse", "HEAD"]);
+        let original_head = accumulated.clone();
+
+        let preview = preview_sequential_overlay(repo.path(), &accumulated, &base, &feature)
+            .await
+            .unwrap();
+        assert_eq!(
+            preview,
+            SequentialMergePreview::Conflicts {
+                files: vec!["file.txt".to_string()]
+            }
+        );
+        assert_eq!(repo.git(&["rev-parse", "HEAD"]), original_head);
+        assert!(repo.git(&["status", "--porcelain"]).is_empty());
     }
 
     #[test]
