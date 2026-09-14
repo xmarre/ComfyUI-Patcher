@@ -3,6 +3,21 @@
 All notable changes to ComfyUI Patcher are documented here. Earlier release notes
 remain available on the [GitHub Releases](https://github.com/xmarre/ComfyUI-Patcher/releases) page.
 
+## [0.1.20] - 2026-09-14
+
+This hotfix makes stacked PR overlays preserve the explicitly tracked base revision instead of inheriting unrelated newer upstream ancestry from a PR head.
+
+### Fixed
+
+- PR overlay materialization now applies only the branch-point delta against a validated GitHub test-merge base snapshot, rather than merging the entire PR head ancestry into `patcher/stack`.
+- Overlay changed-file preflight uses the same branch-point semantics as materialization.
+
+### Safety
+
+- Patcher verifies that the captured test-merge head exactly matches the fetched PR head and fails closed when the base snapshot is missing or stale.
+- Synthetic overlay commits are single-parent commits rooted in the tracked stack and record the PR number, captured base snapshot, and PR head for provenance.
+- Regression coverage proves that a PR based on newer upstream can contribute its intended feature changes without silently advancing the tracked base, and that sequential conflict preflight leaves the managed worktree untouched.
+
 ## [0.1.19] - 2026-09-10
 
 This release adds first-class management for the official `Comfy-Org/comfy-kitchen` source project, keeping its Git checkout and the compiled Python runtime coherent under the same patch/update/rollback lifecycle as the rest of ComfyUI Patcher.
@@ -202,6 +217,7 @@ This cumulative maintenance release contains every merged change since v0.1.9.
 - Fixed transient Windows directory deletion failures during uninstall with retry and safe staging behavior.
 - Fixed force-pushed pull requests failing to refresh cached PR overlay and preview refs with a non-fast-forward fetch rejection. Forced updates are restricted to disposable refs owned by ComfyUI Patcher.
 
+[0.1.20]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.19...v0.1.20
 [0.1.19]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.18...v0.1.19
 [0.1.18]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.17...v0.1.18
 [0.1.17]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.16...v0.1.17
