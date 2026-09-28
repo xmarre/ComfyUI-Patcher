@@ -3,6 +3,22 @@
 All notable changes to ComfyUI Patcher are documented here. Earlier release notes
 remain available on the [GitHub Releases](https://github.com/xmarre/ComfyUI-Patcher/releases) page.
 
+## [0.1.21] - 2026-09-28
+
+This hotfix makes managed pnpm frontend rebuilds recover from stale or incomplete virtual-store dependency links without masking real source or type errors.
+
+### Fixed
+
+- Frontend dependency sync now recognizes build failures where a missing-package diagnostic originates from inside pnpm's installed `node_modules/.pnpm/` graph.
+- When that narrow integrity failure occurs after an apparently successful install, Patcher performs one forced frozen-lockfile reinstall and retries the build exactly once.
+- Source/config missing imports, TypeScript failures, and unrelated build errors continue to fail immediately instead of entering dependency recovery.
+
+### Safety
+
+- Recovery retains frozen-lockfile semantics, so the managed frontend's dependency graph is repaired without rewriting its lockfile.
+- The recovery path is bounded to one reinstall and one build retry; it cannot loop indefinitely.
+- Regression coverage includes the observed WSL `@vue/compiler-sfc` / `local-pkg` failure, Windows-style pnpm paths, misleading pnpm stack frames on source-level errors, and unrelated TypeScript failures.
+
 ## [0.1.20] - 2026-09-14
 
 This hotfix makes stacked PR overlays preserve the explicitly tracked base revision instead of inheriting unrelated newer upstream ancestry from a PR head.
@@ -217,6 +233,7 @@ This cumulative maintenance release contains every merged change since v0.1.9.
 - Fixed transient Windows directory deletion failures during uninstall with retry and safe staging behavior.
 - Fixed force-pushed pull requests failing to refresh cached PR overlay and preview refs with a non-fast-forward fetch rejection. Forced updates are restricted to disposable refs owned by ComfyUI Patcher.
 
+[0.1.21]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.20...v0.1.21
 [0.1.20]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.19...v0.1.20
 [0.1.19]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.18...v0.1.19
 [0.1.18]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.17...v0.1.18
