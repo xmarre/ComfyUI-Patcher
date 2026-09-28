@@ -1,0 +1,49 @@
+name: pnpm-layout-repro
+
+on:
+  push:
+    branches:
+      - experiment/pnpm-layout-repro-20260928
+
+jobs:
+  reproduce:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out ComfyUI Frontend
+        uses: actions/checkout@v4
+        with:
+          repository: Comfy-Org/ComfyUI_frontend
+          ref: main
+          path: frontend
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
+        with:
+          version: 11.13.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 26
+
+      - name: Reproduce strict-layout failure
+        shell: bash
+        run: |
+          cd frontend
+          pnpm install --frozen-lockfile --hoist=false
+          set +e
+          pnpm build > ../strict-build.log 2>&1
+          rc=$?
+          set -e
+          cat ../strict-build.log
+          test "$rc" -ne 0
+          grep -F "Cannot find package '@vue/compiler-sfc'" ../strict-build.log
+          grep -F "node_modules/.pnpm/local-pkg@1.2.1/node_modules/local-pkg/dist/index.mjs" ../strict-build.log
+
+      - name: Validate clean hoisted recovery
+        shell: bash
+        run: |
+          cd frontend
+          rm -rf node_modules
+          pnpm install --frozen-lockfile --node-linker=hoisted
+          pnpm build
