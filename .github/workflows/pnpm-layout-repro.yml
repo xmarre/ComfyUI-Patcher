@@ -27,24 +27,55 @@ jobs:
         with:
           node-version: 26
 
-      - name: Reproduce strict-layout failure
+      - name: Materialize known-good dependency graph
         shell: bash
         run: |
           cd frontend
-          pnpm install --frozen-lockfile --hoist=false
+          node --version
+          pnpm --version
+          pnpm install --frozen-lockfile
+          node --input-type=module <<'NODE'
+          import { createRequire } from 'node:module'
+          import { pathToFileURL } from 'node:url'
+          const localPkg = pathToFileURL(process.cwd() + '/node_modules/.pnpm/local-pkg@1.2.1/node_modules/local-pkg/dist/index.mjs')
+          const req = createRequire(localPkg)
+          console.log('compiler-sfc resolves to:', req.resolve('@vue/compiler-sfc/package.json'))
+          NODE
+
+      - name: Reproduce missing hidden peer link
+        shell: bash
+        run: |
+          cd frontend
+          rm -rf node_modules/.pnpm/node_modules/@vue/compiler-sfc
           set +e
-          pnpm build > ../strict-build.log 2>&1
+          pnpm build > ../broken-build.log 2>&1
           rc=$?
           set -e
-          cat ../strict-build.log
+          cat ../broken-build.log
           test "$rc" -ne 0
-          grep -F "Cannot find package '@vue/compiler-sfc'" ../strict-build.log
-          grep -F "node_modules/.pnpm/local-pkg@1.2.1/node_modules/local-pkg/dist/index.mjs" ../strict-build.log
+          grep -F "Cannot find package '@vue/compiler-sfc'" ../broken-build.log
+          grep -F "node_modules/.pnpm/local-pkg@1.2.1/node_modules/local-pkg/dist/index.mjs" ../broken-build.log
 
-      - name: Validate clean hoisted recovery
+      - name: Test v0.1.21 force recovery
+        shell: bash
+        run: |
+          cd frontend
+          pnpm install --frozen-lockfile --force
+          set +e
+          pnpm build > ../force-build.log 2>&1
+          rc=$?
+          set -e
+          cat ../force-build.log
+          echo "force_build_exit=$rc"
+          if [ "$rc" -ne 0 ]; then
+            grep -F "Cannot find package '@vue/compiler-sfc'" ../force-build.log
+          fi
+
+      - name: Validate clean frozen reinstall
+        if: always()
         shell: bash
         run: |
           cd frontend
           rm -rf node_modules
-          pnpm install --frozen-lockfile --node-linker=hoisted
+          pnpm install --frozen-lockfile
           pnpm build
