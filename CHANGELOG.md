@@ -3,6 +3,22 @@
 All notable changes to ComfyUI Patcher are documented here. Earlier release notes
 remain available on the [GitHub Releases](https://github.com/xmarre/ComfyUI-Patcher/releases) page.
 
+## [0.1.22] - 2026-09-28
+
+This hotfix completes pnpm dependency-graph recovery for stale link states that v0.1.21's forced reinstall could detect but could not repair.
+
+### Fixed
+
+- If a forced frozen-lockfile reinstall is followed by the same missing-package failure from inside `node_modules/.pnpm/`, Patcher now removes the generated frontend `node_modules` tree, performs one clean frozen-lockfile install, and retries the build once.
+- WSL-backed frontend dependency trees are removed inside the owning Linux distribution, avoiding Windows-side traversal of pnpm's Linux symlink graph.
+- A terminal clean-recovery failure now reports the observed Node version, pnpm version, and repository `packageManager` declaration.
+
+### Validation
+
+- A controlled current-ComfyUI-Frontend reproduction removed the hidden `@vue/compiler-sfc` peer link and produced the same `local-pkg@1.2.1` module-resolution failure reported in production.
+- `pnpm install --frozen-lockfile --force` reproduced v0.1.21's failure to repair that state; deleting `node_modules` and reinstalling from the unchanged frozen lockfile restored the full frontend build.
+- Patcher's Windows frontend build, Rust test suite, and Rust backend build pass with the new bounded clean-reinstall escalation.
+
 ## [0.1.21] - 2026-09-28
 
 This hotfix makes managed pnpm frontend rebuilds recover from stale or incomplete virtual-store dependency links without masking real source or type errors.
@@ -233,6 +249,7 @@ This cumulative maintenance release contains every merged change since v0.1.9.
 - Fixed transient Windows directory deletion failures during uninstall with retry and safe staging behavior.
 - Fixed force-pushed pull requests failing to refresh cached PR overlay and preview refs with a non-fast-forward fetch rejection. Forced updates are restricted to disposable refs owned by ComfyUI Patcher.
 
+[0.1.22]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.21...v0.1.22
 [0.1.21]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.20...v0.1.21
 [0.1.20]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.19...v0.1.20
 [0.1.19]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.18...v0.1.19
