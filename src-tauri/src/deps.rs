@@ -1,5 +1,5 @@
 use crate::errors::{AppError, AppResult};
-use crate::execution::output_command;
+use crate::execution::{output_command, parse_wsl_unc_path};
 use crate::models::{
     DependencyPlan, DependencyStep, FrontendPackageManager, Installation, ManagedRepo, RepoKind,
 };
@@ -273,6 +273,43 @@ pub async fn execute_dependency_sync(plan: &DependencyPlan) -> AppResult<()> {
             if retry_output.status.success() {
                 continue;
             }
+
+            if looks_like_broken_pnpm_dependency_graph(
+                &retry_output.stdout,
+                &retry_output.stderr,
+            ) {
+                eprintln!(
+                    "dependency sync: forced pnpm reinstall left the dependency graph unresolved; removing generated node_modules and performing one clean frozen-lockfile reinstall"
+                );
+                let clean_install_output = clean_reinstall_pnpm_dependencies(step).await?;
+                if !clean_install_output.status.success() {
+                    return Err(AppError::Dependency(format!(
+                        "{} step failed ({}) after forced pnpm reinstall: {}\n{}\nclean pnpm dependency reinstall also failed: {}\n{}\n{}",
+                        step.phase,
+                        step.strategy,
+                        retry_output.status,
+                        String::from_utf8_lossy(&retry_output.stderr),
+                        clean_install_output.status,
+                        String::from_utf8_lossy(&clean_install_output.stderr),
+                        pnpm_runtime_summary(step).await
+                    )));
+                }
+
+                let clean_retry_output =
+                    output_command(&step.command, &step.args, Some(Path::new(&step.cwd))).await?;
+                if clean_retry_output.status.success() {
+                    continue;
+                }
+                return Err(AppError::Dependency(format!(
+                    "{} step failed ({}) after clean pnpm dependency reinstall: {}\n{}\n{}",
+                    step.phase,
+                    step.strategy,
+                    clean_retry_output.status,
+                    String::from_utf8_lossy(&clean_retry_output.stderr),
+                    pnpm_runtime_summary(step).await
+                )));
+            }
+
             return Err(AppError::Dependency(format!(
                 "{} step failed ({}) after pnpm dependency self-heal: {}\n{}",
                 step.phase,
@@ -302,6 +339,93 @@ async fn force_reinstall_pnpm_dependencies(step: &DependencyStep) -> AppResult<O
     output_command(&step.command, &args, Some(Path::new(&step.cwd)))
         .await
         .map_err(AppError::from)
+}
+
+async fn clean_reinstall_pnpm_dependencies(step: &DependencyStep) -> AppResult<Output> {
+    let cwd = Path::new(&step.cwd);
+    remove_frontend_node_modules(cwd).await?;
+    let args = vec!["install".to_string(), "--frozen-lockfile".to_string()];
+    output_command(&step.command, &args, Some(cwd))
+        .await
+        .map_err(AppError::from)
+}
+
+async fn remove_frontend_node_modules(cwd: &Path) -> AppResult<()> {
+    if parse_wsl_unc_path(cwd).is_some() {
+        let args = vec![
+            "-rf".to_string(),
+            "--".to_string(),
+            "node_modules".to_string(),
+        ];
+        let output = output_command("rm", &args, Some(cwd)).await?;
+        if !output.status.success() {
+            return Err(AppError::Dependency(format!(
+                "failed to remove generated frontend node_modules in WSL: {}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        return Ok(());
+    }
+
+    let node_modules = cwd.join("node_modules");
+    if !node_modules.exists() {
+        return Ok(());
+    }
+
+    let mut last_error = None;
+    for attempt in 0..3 {
+        match std::fs::remove_dir_all(&node_modules) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < 2 {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+            }
+        }
+    }
+
+    Err(AppError::Dependency(format!(
+        "failed to remove generated frontend node_modules before clean pnpm reinstall: {}",
+        last_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "unknown removal error".to_string())
+    )))
+}
+
+async fn command_version(command: &str, cwd: &Path) -> String {
+    let args = vec!["--version".to_string()];
+    match output_command(command, &args, Some(cwd)).await {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if version.is_empty() {
+                "<empty>".to_string()
+            } else {
+                version
+            }
+        }
+        Ok(output) => format!("<failed: {}>", output.status),
+        Err(error) => format!("<unavailable: {error}>"),
+    }
+}
+
+async fn pnpm_runtime_summary(step: &DependencyStep) -> String {
+    let cwd = Path::new(&step.cwd);
+    let package_manager = read_package_json(cwd)
+        .ok()
+        .and_then(|package_json| {
+            package_json
+                .get("packageManager")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "<not declared>".to_string());
+    let node = command_version("node", cwd).await;
+    let pnpm = command_version("pnpm", cwd).await;
+    format!(
+        "frontend toolchain: node={node}; pnpm={pnpm}; packageManager={package_manager}"
+    )
 }
 
 fn should_retry_pnpm_build_after_forced_install(
@@ -392,6 +516,22 @@ Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@vue/compiler-sfc'"#;
     fn does_not_repair_unrelated_build_failures() {
         let stderr = b"src/App.tsx(10,4): error TS2322: Type 'string' is not assignable to type 'number'.";
         assert!(!looks_like_broken_pnpm_dependency_graph(b"", stderr));
+    }
+
+    #[tokio::test]
+    async fn clean_pnpm_reinstall_removes_generated_node_modules() {
+        let root = std::env::temp_dir().join(format!(
+            "comfyui-patcher-pnpm-clean-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let nested = root.join("node_modules").join(".pnpm").join("broken");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("marker"), b"broken").unwrap();
+
+        remove_frontend_node_modules(&root).await.unwrap();
+
+        assert!(!root.join("node_modules").exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
