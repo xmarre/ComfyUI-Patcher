@@ -1,9 +1,6 @@
 name: pnpm-layout-repro
 
 on:
-  push:
-    branches:
-      - experiment/pnpm-layout-repro-20260928
   pull_request:
 
 jobs:
@@ -27,55 +24,66 @@ jobs:
         with:
           node-version: 26
 
-      - name: Materialize known-good dependency graph
+      - name: Establish known-good install
         shell: bash
         run: |
           cd frontend
-          node --version
-          pnpm --version
           pnpm install --frozen-lockfile
-          node --input-type=module <<'NODE'
-          import { createRequire } from 'node:module'
-          import { pathToFileURL } from 'node:url'
-          const localPkg = pathToFileURL(process.cwd() + '/node_modules/.pnpm/local-pkg@1.2.1/node_modules/local-pkg/dist/index.mjs')
-          const req = createRequire(localPkg)
-          console.log('compiler-sfc resolves to:', req.resolve('@vue/compiler-sfc/package.json'))
-          NODE
+          pnpm build
 
-      - name: Reproduce missing hidden peer link
+      - name: Inspect compiler peer topology
+        shell: bash
+        run: |
+          cd frontend
+          echo "pnpm=$(pnpm --version)"
+          echo "node=$(node --version)"
+          find node_modules/.pnpm -path '*/@vue/compiler-sfc' -maxdepth 5 -print -exec ls -ld {} \; | head -100
+          echo "--- fallback entry ---"
+          ls -ld node_modules/.pnpm/node_modules/@vue/compiler-sfc
+          readlink -f node_modules/.pnpm/node_modules/@vue/compiler-sfc
+
+      - name: Corrupt only pnpm fallback compiler link and reproduce
         shell: bash
         run: |
           cd frontend
           rm -rf node_modules/.pnpm/node_modules/@vue/compiler-sfc
+          test ! -e node_modules/.pnpm/node_modules/@vue/compiler-sfc
           set +e
-          pnpm build > ../broken-build.log 2>&1
+          pnpm build > ../corrupt-build.log 2>&1
           rc=$?
           set -e
-          cat ../broken-build.log
+          cat ../corrupt-build.log
           test "$rc" -ne 0
-          grep -F "Cannot find package '@vue/compiler-sfc'" ../broken-build.log
-          grep -F "node_modules/.pnpm/local-pkg@1.2.1/node_modules/local-pkg/dist/index.mjs" ../broken-build.log
+          grep -F "Cannot find package '@vue/compiler-sfc'" ../corrupt-build.log
+          grep -F "node_modules/.pnpm/local-pkg@1.2.1/node_modules/local-pkg/dist/index.mjs" ../corrupt-build.log
 
-      - name: Test v0.1.21 force recovery
+      - name: Test v0.1.21 forced reinstall
         shell: bash
         run: |
           cd frontend
           pnpm install --frozen-lockfile --force
+          if [ -e node_modules/.pnpm/node_modules/@vue/compiler-sfc ]; then
+            echo "force reinstall restored fallback compiler link"
+          else
+            echo "force reinstall DID NOT restore fallback compiler link"
+          fi
           set +e
-          pnpm build > ../force-build.log 2>&1
+          pnpm build > ../forced-build.log 2>&1
           rc=$?
           set -e
-          cat ../force-build.log
-          echo "force_build_exit=$rc"
-          if [ "$rc" -ne 0 ]; then
-            grep -F "Cannot find package '@vue/compiler-sfc'" ../force-build.log
+          cat ../forced-build.log
+          echo "forced_build_rc=$rc"
+          if [ "$rc" -eq 0 ]; then
+            echo "FORCE_RECOVERED=1"
+          else
+            echo "FORCE_RECOVERED=0"
           fi
 
-      - name: Validate clean frozen reinstall
-        if: always()
+      - name: Validate clean node_modules recovery
         shell: bash
         run: |
           cd frontend
           rm -rf node_modules
           pnpm install --frozen-lockfile
+          test -e node_modules/.pnpm/node_modules/@vue/compiler-sfc
           pnpm build
