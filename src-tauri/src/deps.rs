@@ -247,17 +247,84 @@ pub fn plan_dependency_sync(
 pub async fn execute_dependency_sync(plan: &DependencyPlan) -> AppResult<()> {
     for step in &plan.steps {
         let output = execute_dependency_step(step).await?;
-        if !output.status.success() {
+        if output.status.success() {
+            continue;
+        }
+
+        if should_retry_pnpm_build_after_forced_install(step, &output) {
+            eprintln!(
+                "dependency sync: pnpm build could not resolve an installed dependency; forcing one frozen-lockfile reinstall before retrying the build"
+            );
+            let repair_output = force_reinstall_pnpm_dependencies(step).await?;
+            if !repair_output.status.success() {
+                return Err(AppError::Dependency(format!(
+                    "{} step failed ({}): {}\n{}\npnpm dependency self-heal also failed during forced frozen-lockfile install: {}\n{}",
+                    step.phase,
+                    step.strategy,
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr),
+                    repair_output.status,
+                    String::from_utf8_lossy(&repair_output.stderr)
+                )));
+            }
+
+            let retry_output =
+                output_command(&step.command, &step.args, Some(Path::new(&step.cwd))).await?;
+            if retry_output.status.success() {
+                continue;
+            }
             return Err(AppError::Dependency(format!(
-                "{} step failed ({}): {}\n{}",
+                "{} step failed ({}) after pnpm dependency self-heal: {}\n{}",
                 step.phase,
                 step.strategy,
-                output.status,
-                String::from_utf8_lossy(&output.stderr)
+                retry_output.status,
+                String::from_utf8_lossy(&retry_output.stderr)
             )));
         }
+
+        return Err(AppError::Dependency(format!(
+            "{} step failed ({}): {}\n{}",
+            step.phase,
+            step.strategy,
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        )));
     }
     Ok(())
+}
+
+async fn force_reinstall_pnpm_dependencies(step: &DependencyStep) -> AppResult<Output> {
+    let args = vec![
+        "install".to_string(),
+        "--frozen-lockfile".to_string(),
+        "--force".to_string(),
+    ];
+    output_command(&step.command, &args, Some(Path::new(&step.cwd)))
+        .await
+        .map_err(AppError::from)
+}
+
+fn should_retry_pnpm_build_after_forced_install(
+    step: &DependencyStep,
+    output: &Output,
+) -> bool {
+    step.command == "pnpm"
+        && step.phase == "build"
+        && step.strategy == "pnpm_build"
+        && !output.status.success()
+        && looks_like_broken_pnpm_dependency_graph(&output.stdout, &output.stderr)
+}
+
+fn looks_like_broken_pnpm_dependency_graph(stdout: &[u8], stderr: &[u8]) -> bool {
+    let stdout = String::from_utf8_lossy(stdout);
+    let stderr = String::from_utf8_lossy(stderr);
+    format!("{stderr}\n{stdout}").lines().any(|line| {
+        let line = line.to_lowercase().replace('\\', "/");
+        let reports_missing_module = line.contains("cannot find package")
+            || line.contains("cannot find module")
+            || line.contains("err_module_not_found");
+        reports_missing_module && line.contains("node_modules/.pnpm/")
+    })
 }
 
 async fn execute_dependency_step(step: &DependencyStep) -> AppResult<Output> {
@@ -300,6 +367,32 @@ fn should_retry_pnpm_without_frozen_lockfile(step: &DependencyStep, output: &Out
 mod tests {
     use super::*;
     use crate::models::{RepoLiveStatus, TargetKind};
+
+    #[test]
+    fn recognizes_missing_package_from_pnpm_dependency_graph() {
+        let stderr = br#"[plugin unplugin-icons] Error: Cannot find package '@vue/compiler-sfc' imported from /home/toor/ComfyUI_frontend/node_modules/.pnpm/local-pkg@1.2.1/node_modules/local-pkg/dist/index.mjs
+Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@vue/compiler-sfc'"#;
+        assert!(looks_like_broken_pnpm_dependency_graph(b"", stderr));
+    }
+
+    #[test]
+    fn recognizes_windows_style_pnpm_dependency_graph_paths() {
+        let stderr = br#"Error: Cannot find module 'dep' imported from C:\repo\node_modules\.pnpm\local-pkg@1.2.1\node_modules\local-pkg\dist\index.mjs"#;
+        assert!(looks_like_broken_pnpm_dependency_graph(b"", stderr));
+    }
+
+    #[test]
+    fn does_not_repair_source_level_missing_package_errors() {
+        let stderr = br#"Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'missing' imported from /repo/vite.config.mts
+    at resolvePackage (/repo/node_modules/.pnpm/vite@8.2.2/node_modules/vite/dist/node/chunks/node.js:100:1)"#;
+        assert!(!looks_like_broken_pnpm_dependency_graph(b"", stderr));
+    }
+
+    #[test]
+    fn does_not_repair_unrelated_build_failures() {
+        let stderr = b"src/App.tsx(10,4): error TS2322: Type 'string' is not assignable to type 'number'.";
+        assert!(!looks_like_broken_pnpm_dependency_graph(b"", stderr));
+    }
 
     #[test]
     fn kitchen_is_not_routed_through_generic_pyproject_dependency_sync() {
