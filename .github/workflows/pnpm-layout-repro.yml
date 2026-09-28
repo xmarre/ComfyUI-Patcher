@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - experiment/pnpm-layout-repro-20260928
+  pull_request:
 
 jobs:
   reproduce:
