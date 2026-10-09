@@ -597,6 +597,7 @@ When a managed frontend is configured, **Start / Restart** inject the frontend d
 * toggle overlay enabled / disabled state
 * reorder overlays
 * update the repo and confirm the stack is re-materialized correctly
+* after a PR is merged upstream, remove its overlay and update the base without reinstalling the repository. If the PR head is already an ancestor of the selected base, its overlay is a no-op; the current base remains authoritative. The GitHub test-merge ref may disappear on merge, so Patcher retains a matching previously captured snapshot. Other overlays still require a verified base snapshot; missing proof is reported as a conflict, not guessed.
 
 ### Rollback
 
