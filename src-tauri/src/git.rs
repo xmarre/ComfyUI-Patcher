@@ -256,6 +256,22 @@ pub async fn merge_base(path: &Path, left: &str, right: &str) -> AppResult<Optio
     run_git_allow_fail(path, &["merge-base", left, right]).await
 }
 
+/// Checks ancestry against the selected integration base, not against a PR's
+/// historical declared base branch (which can be an older, merged PR head).
+pub async fn ref_is_ancestor_of(
+    path: &Path,
+    ancestor_ref: &str,
+    descendant_ref: &str,
+) -> AppResult<bool> {
+    let ancestor_sha = rev_parse(path, ancestor_ref).await?.ok_or_else(|| {
+        AppError::Conflict(format!("cannot resolve overlay head {ancestor_ref}"))
+    })?;
+    Ok(merge_base(path, descendant_ref, &ancestor_sha)
+        .await?
+        .as_deref()
+        == Some(ancestor_sha.as_str()))
+}
+
 fn parse_overlay_pr_number(reference: &str) -> Option<u64> {
     let trimmed = reference.trim();
     for prefix in [
@@ -1644,6 +1660,44 @@ mod tests {
             .unwrap();
         assert!(repo.path().join("open.txt").is_file());
         assert!(repo.git(&["status", "--porcelain"]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn merged_child_is_integrated_even_when_not_in_historical_parent_branch() {
+        let repo = TestRepo::new();
+        repo.git(&["init"]);
+        repo.git(&["config", "user.name", "ComfyUI Patcher Test"]);
+        repo.git(&["config", "user.email", "patcher-test@local.invalid"]);
+        std::fs::write(repo.path().join("file.txt"), "base\n").unwrap();
+        repo.git(&["add", "file.txt"]);
+        repo.git(&["commit", "-m", "base"]);
+
+        repo.git(&["switch", "-c", "parent"]);
+        std::fs::write(repo.path().join("parent.txt"), "parent\n").unwrap();
+        repo.git(&["add", "parent.txt"]);
+        repo.git(&["commit", "-m", "parent"]);
+        let parent = repo.git(&["rev-parse", "HEAD"]);
+
+        repo.git(&["switch", "-c", "child"]);
+        std::fs::write(repo.path().join("child.txt"), "child\n").unwrap();
+        repo.git(&["add", "child.txt"]);
+        repo.git(&["commit", "-m", "child"]);
+        let child = repo.git(&["rev-parse", "HEAD"]);
+        repo.git(&["update-ref", "refs/heads/patcher/pr-41", &child]);
+
+        // Current main has absorbed the child, but its declared parent tip
+        // remains behind. GitHub's test-merge snapshot is no longer available.
+        repo.git(&["switch", "-c", "updated-main"]);
+        assert!(!ref_is_ancestor_of(repo.path(), "patcher/pr-41", &parent)
+            .await
+            .unwrap());
+        assert!(ref_is_ancestor_of(repo.path(), "patcher/pr-41", "HEAD")
+            .await
+            .unwrap());
+        assert!(rev_parse(repo.path(), &overlay_base_ref(41))
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
