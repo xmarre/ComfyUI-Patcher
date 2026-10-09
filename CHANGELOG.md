@@ -3,6 +3,14 @@
 All notable changes to ComfyUI Patcher are documented here. Earlier release notes
 remain available on the [GitHub Releases](https://github.com/xmarre/ComfyUI-Patcher/releases) page.
 
+## Unreleased
+
+### Fixed
+
+- Removing or updating a stack after PRs are merged no longer requires GitHub's retired temporary test-merge ref for an overlay whose exact head commit is already contained in the selected base.
+- Previously captured PR base snapshots are retained when the test-merge ref disappears, but only while their recorded head still matches the fetched PR head. Missing or changed snapshots remain a conflict for overlays not proved to be integrated.
+- Overlay changed-path checks and sequential preflight agree with the no-op materialization of already-integrated PR heads.
+
 ## [0.1.22] - 2026-09-28
 
 This hotfix completes pnpm dependency-graph recovery for stale link states that v0.1.21's forced reinstall could detect but could not repair.

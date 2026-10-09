@@ -18,7 +18,8 @@ use crate::git::{
     apply_stash, apply_stash_keep, canonicalize_remote, checkout_paths, clean_untracked_paths,
     clone_repo, commits_between, diff_name_status, ensure_clean_or_apply_strategy, fetch_origin,
     fetch_refspec, force_fetch_refspec, inspect_repo, is_git_repo, join_custom_node_path,
-    merge_abort, merge_no_ff, preview_sequential_merge, remote_branches_pointing_at, reset_hard,
+    merge_abort, merge_no_ff, preview_sequential_merge, ref_is_ancestor_of,
+    remote_branches_pointing_at, reset_hard,
     rev_parse, run_git_allow_fail, submodule_update, switch_branch, switch_detached,
     unmerged_paths, validate_custom_node_dir_name, RepoStatus, SequentialMergePreview,
 };
@@ -1046,6 +1047,14 @@ async fn incoming_write_paths_for_tracked_state(
 
         ensure_remote_matches(repo.canonical_remote.as_deref(), &overlay_resolved)?;
 
+        let overlay_ref = ensure_preview_target_available(path, &overlay_resolved).await?;
+        // For a merged child PR, its old parent branch can be behind main.
+        // Check integration against the selected stack base before asking for
+        // the historical PR delta or treating untracked paths as collisions.
+        if ref_is_ancestor_of(path, &overlay_ref, &base_ref).await? {
+            continue;
+        }
+
         let declared_base_ref = match overlay_dependency_index(tracked_state, index)? {
             Some(parent_index) => {
                 let parent = &tracked_state.overlays[parent_index];
@@ -1054,7 +1063,6 @@ async fn incoming_write_paths_for_tracked_state(
             }
             None => base_ref.clone(),
         };
-        let overlay_ref = ensure_preview_target_available(path, &overlay_resolved).await?;
         for file_change in diff_name_status(path, &declared_base_ref, &overlay_ref).await? {
             if file_change_writes_path(&file_change.status) {
                 write_paths.insert(normalize_repo_relative_path(&file_change.path));
