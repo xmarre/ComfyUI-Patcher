@@ -1610,6 +1610,40 @@ mod tests {
             .unwrap();
         assert_eq!(repo.git(&["rev-parse", "HEAD"]), merged_main);
         assert!(repo.git(&["status", "--porcelain"]).is_empty());
+
+        // Retiring one merged overlay must still allow a different, open PR
+        // to be previewed and applied in the same stack.
+        repo.git(&["switch", "-c", "unmerged-feature"]);
+        std::fs::write(repo.path().join("open.txt"), "still-open change\n").unwrap();
+        repo.git(&["add", "open.txt"]);
+        repo.git(&["commit", "-m", "still open"]);
+        let open_head = repo.git(&["rev-parse", "HEAD"]);
+        repo.git(&["update-ref", "refs/heads/patcher/pr-41", &open_head]);
+        repo.git(&["update-ref", &overlay_head_ref(41), &open_head]);
+        repo.git(&["update-ref", &overlay_base_ref(41), &merged_main]);
+        repo.git(&["switch", "--detach", &merged_main]);
+
+        let after_merged = match preview_sequential_merge(repo.path(), &merged_main, "patcher/pr-39")
+            .await
+            .unwrap()
+        {
+            SequentialMergePreview::Clean { synthetic_commit } => synthetic_commit,
+            other => panic!("merged PR unexpectedly conflicted: {other:?}"),
+        };
+        assert!(matches!(
+            preview_sequential_merge(repo.path(), &after_merged, "patcher/pr-41")
+                .await
+                .unwrap(),
+            SequentialMergePreview::Clean { .. }
+        ));
+        merge_no_ff(repo.path(), "patcher/pr-39", "redundant merged overlay")
+            .await
+            .unwrap();
+        merge_no_ff(repo.path(), "patcher/pr-41", "apply open overlay")
+            .await
+            .unwrap();
+        assert!(repo.path().join("open.txt").is_file());
+        assert!(repo.git(&["status", "--porcelain"]).is_empty());
     }
 
     #[tokio::test]
