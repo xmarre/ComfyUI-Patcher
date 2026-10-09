@@ -3,13 +3,22 @@
 All notable changes to ComfyUI Patcher are documented here. Earlier release notes
 remain available on the [GitHub Releases](https://github.com/xmarre/ComfyUI-Patcher/releases) page.
 
-## Unreleased
+## [0.1.23] - 2026-10-09
+
+This maintenance release fixes managed PR overlay retirement after pull requests are merged into an advancing upstream branch. It prevents redundant overlays from blocking stack updates when GitHub retires temporary pull-request test-merge references.
 
 ### Fixed
 
-- Removing or updating a stack after PRs are merged no longer requires GitHub's retired temporary test-merge ref for an overlay whose exact head commit is already contained in the selected base.
-- Previously captured PR base snapshots are retained when the test-merge ref disappears, but only while their recorded head still matches the fetched PR head. Missing or changed snapshots remain a conflict for overlays not proved to be integrated.
-- Overlay changed-path checks and sequential preflight agree with the no-op materialization of already-integrated PR heads.
+- A PR overlay whose exact head is already reachable from the selected base is treated as integrated. Rebuilding the stack does not reapply that PR, depend on its retired test-merge reference, or import unrelated ancestry.
+- Already captured, matching PR base snapshots survive disappearance of GitHub's test-merge ref. A changed PR head invalidates a mismatching snapshot.
+- Sequential previews and changed-path preflight agree with materialization for integrated overlays. Merged child PRs are checked against the selected repository base rather than an outdated parent PR branch, avoiding false conflicts with untracked files.
+
+### Safety and validation
+
+- Unmerged or divergent PRs still require verifiable provenance; missing or mismatching snapshots fail closed. A squash merge is not necessarily detectable through PR-head ancestry alone.
+- Regression coverage covers merged-PR retirement, a mixed merged/open overlay stack, merged child PRs, and stale snapshot invalidation.
+- [PR #64](https://github.com/xmarre/ComfyUI-Patcher/pull/64): Windows CI passed at the exact merged commit (70 Rust tests, frontend build, backend build). Real installed-node verification remains outstanding.
+
 
 ## [0.1.22] - 2026-09-28
 
@@ -257,6 +266,7 @@ This cumulative maintenance release contains every merged change since v0.1.9.
 - Fixed transient Windows directory deletion failures during uninstall with retry and safe staging behavior.
 - Fixed force-pushed pull requests failing to refresh cached PR overlay and preview refs with a non-fast-forward fetch rejection. Forced updates are restricted to disposable refs owned by ComfyUI Patcher.
 
+[0.1.23]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.22...v0.1.23
 [0.1.22]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.21...v0.1.22
 [0.1.21]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.20...v0.1.21
 [0.1.20]: https://github.com/xmarre/ComfyUI-Patcher/compare/v0.1.19...v0.1.20
