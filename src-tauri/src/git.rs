@@ -301,6 +301,21 @@ async fn clear_overlay_snapshot(path: &Path, pr_number: u64) -> AppResult<()> {
     Ok(())
 }
 
+/// GitHub removes pull/N/merge after a PR closes. A previously captured
+/// snapshot is still authoritative if it names the exact fetched head.
+async fn preserve_matching_overlay_snapshot(
+    path: &Path,
+    pr_number: u64,
+    fetched_head_sha: &str,
+) -> AppResult<()> {
+    let head = rev_parse(path, &overlay_head_ref(pr_number)).await?;
+    let base = rev_parse(path, &overlay_base_ref(pr_number)).await?;
+    if head.as_deref() != Some(fetched_head_sha) || base.is_none() {
+        clear_overlay_snapshot(path, pr_number).await?;
+    }
+    Ok(())
+}
+
 async fn capture_overlay_snapshot(
     path: &Path,
     remote: &str,
@@ -318,22 +333,22 @@ async fn capture_overlay_snapshot(
         .await
         .is_err()
     {
-        clear_overlay_snapshot(path, pr_number).await?;
+        preserve_matching_overlay_snapshot(path, pr_number, &fetched_head_sha).await?;
         return Ok(());
     }
 
     let merge_head_expr = format!("{merge_ref}^2");
     let merge_base_expr = format!("{merge_ref}^1");
     let Some(merge_head_sha) = rev_parse(path, &merge_head_expr).await? else {
-        clear_overlay_snapshot(path, pr_number).await?;
+        preserve_matching_overlay_snapshot(path, pr_number, &fetched_head_sha).await?;
         return Ok(());
     };
     let Some(base_head_sha) = rev_parse(path, &merge_base_expr).await? else {
-        clear_overlay_snapshot(path, pr_number).await?;
+        preserve_matching_overlay_snapshot(path, pr_number, &fetched_head_sha).await?;
         return Ok(());
     };
     if merge_head_sha != fetched_head_sha {
-        clear_overlay_snapshot(path, pr_number).await?;
+        preserve_matching_overlay_snapshot(path, pr_number, &fetched_head_sha).await?;
         return Ok(());
     }
 
@@ -414,6 +429,15 @@ pub async fn diff_name_status(
 ) -> AppResult<Vec<RepoActionPreviewFile>> {
     if base == head {
         return Ok(Vec::new());
+    }
+    // A merged PR head already reachable from the selected base writes no
+    // additional paths. This remains provable without GitHub's test-merge ref.
+    if parse_overlay_pr_number(head).is_some() {
+        if let Some(head_sha) = rev_parse(path, head).await? {
+            if merge_base(path, base, &head_sha).await?.as_deref() == Some(head_sha.as_str()) {
+                return Ok(Vec::new());
+            }
+        }
     }
     let effective_base = match overlay_diff_base(path, head).await? {
         Some(branch_point) => branch_point,
@@ -856,6 +880,17 @@ pub async fn remote_branches_pointing_at(
 /// legacy `git merge --no-ff` behavior.
 pub async fn merge_no_ff(path: &Path, target: &str, message: &str) -> AppResult<()> {
     if let Some(pr_number) = parse_overlay_pr_number(target) {
+        let incoming_sha = rev_parse(path, target).await?.ok_or_else(|| {
+            AppError::Conflict(format!("cannot resolve PR #{pr_number} overlay head {target}"))
+        })?;
+        // When the selected base already contains the exact PR head, the
+        // overlay is redundant. Do not demand an ephemeral test-merge snapshot
+        // or synthesize a commit that could resurrect reverted changes.
+        if merge_base(path, "HEAD", &incoming_sha).await?.as_deref()
+            == Some(incoming_sha.as_str())
+        {
+            return Ok(());
+        }
         let base_head = validated_overlay_base_head(path, target)
             .await?
             .ok_or_else(|| {
@@ -863,9 +898,6 @@ pub async fn merge_no_ff(path: &Path, target: &str, message: &str) -> AppResult<
                     "cannot resolve captured base snapshot for PR #{pr_number}"
                 ))
             })?;
-        let incoming_sha = rev_parse(path, target).await?.ok_or_else(|| {
-            AppError::Conflict(format!("cannot resolve PR #{pr_number} overlay head {target}"))
-        })?;
         let provenance_message = format!(
             "{message}\n\nPatcher-Overlay-PR: {pr_number}\nPatcher-Overlay-Base-Snapshot: {base_head}\nPatcher-Overlay-Head: {incoming_sha}"
         );
@@ -1532,6 +1564,131 @@ mod tests {
         );
         assert_eq!(repo.git(&["rev-parse", "HEAD"]), original_head);
         assert!(repo.git(&["status", "--porcelain"]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn merged_pr_without_test_merge_snapshot_is_noop_in_preview_and_materialization() {
+        let repo = TestRepo::new();
+        repo.git(&["init"]);
+        repo.git(&["config", "user.name", "ComfyUI Patcher Test"]);
+        repo.git(&["config", "user.email", "patcher-test@local.invalid"]);
+        std::fs::write(repo.path().join("base.txt"), "base\n").unwrap();
+        repo.git(&["add", "base.txt"]);
+        repo.git(&["commit", "-m", "base"]);
+        let base = repo.git(&["rev-parse", "HEAD"]);
+
+        repo.git(&["switch", "-c", "feature"]);
+        std::fs::write(repo.path().join("feature.txt"), "merged change\n").unwrap();
+        repo.git(&["add", "feature.txt"]);
+        repo.git(&["commit", "-m", "feature"]);
+        let feature = repo.git(&["rev-parse", "HEAD"]);
+        repo.git(&["update-ref", "refs/heads/patcher/pr-39", &feature]);
+
+        repo.git(&["switch", "--detach", &base]);
+        repo.git(&["switch", "-c", "upstream-after-merge"]);
+        repo.git(&["merge", "--no-ff", "-m", "merge PR #39", &feature]);
+        let merged_main = repo.git(&["rev-parse", "HEAD"]);
+
+        // GitHub no longer offers pull/39/merge; no overlay snapshot exists.
+        assert!(rev_parse(repo.path(), &overlay_base_ref(39)).await.unwrap().is_none());
+        let preview = preview_sequential_merge(repo.path(), &merged_main, "patcher/pr-39")
+            .await
+            .unwrap();
+        assert_eq!(
+            preview,
+            SequentialMergePreview::Clean {
+                synthetic_commit: merged_main.clone()
+            }
+        );
+        assert!(diff_name_status(repo.path(), &merged_main, "patcher/pr-39")
+            .await
+            .unwrap()
+            .is_empty());
+
+        merge_no_ff(repo.path(), "patcher/pr-39", "redundant merged overlay")
+            .await
+            .unwrap();
+        assert_eq!(repo.git(&["rev-parse", "HEAD"]), merged_main);
+        assert!(repo.git(&["status", "--porcelain"]).is_empty());
+
+        // Retiring one merged overlay must still allow a different, open PR
+        // to be previewed and applied in the same stack.
+        repo.git(&["switch", "-c", "unmerged-feature"]);
+        std::fs::write(repo.path().join("open.txt"), "still-open change\n").unwrap();
+        repo.git(&["add", "open.txt"]);
+        repo.git(&["commit", "-m", "still open"]);
+        let open_head = repo.git(&["rev-parse", "HEAD"]);
+        repo.git(&["update-ref", "refs/heads/patcher/pr-41", &open_head]);
+        repo.git(&["update-ref", &overlay_head_ref(41), &open_head]);
+        repo.git(&["update-ref", &overlay_base_ref(41), &merged_main]);
+        repo.git(&["switch", "--detach", &merged_main]);
+
+        let after_merged = match preview_sequential_merge(repo.path(), &merged_main, "patcher/pr-39")
+            .await
+            .unwrap()
+        {
+            SequentialMergePreview::Clean { synthetic_commit } => synthetic_commit,
+            other => panic!("merged PR unexpectedly conflicted: {other:?}"),
+        };
+        assert!(matches!(
+            preview_sequential_merge(repo.path(), &after_merged, "patcher/pr-41")
+                .await
+                .unwrap(),
+            SequentialMergePreview::Clean { .. }
+        ));
+        merge_no_ff(repo.path(), "patcher/pr-39", "redundant merged overlay")
+            .await
+            .unwrap();
+        merge_no_ff(repo.path(), "patcher/pr-41", "apply open overlay")
+            .await
+            .unwrap();
+        assert!(repo.path().join("open.txt").is_file());
+        assert!(repo.git(&["status", "--porcelain"]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn closed_pr_keeps_only_snapshot_matching_fetched_head() {
+        let repo = TestRepo::new();
+        repo.git(&["init"]);
+        repo.git(&["config", "user.name", "ComfyUI Patcher Test"]);
+        repo.git(&["config", "user.email", "patcher-test@local.invalid"]);
+        std::fs::write(repo.path().join("base.txt"), "base\n").unwrap();
+        repo.git(&["add", "base.txt"]);
+        repo.git(&["commit", "-m", "base"]);
+        let base = repo.git(&["rev-parse", "HEAD"]);
+        repo.git(&["switch", "-c", "feature"]);
+        std::fs::write(repo.path().join("feature.txt"), "feature\n").unwrap();
+        repo.git(&["add", "feature.txt"]);
+        repo.git(&["commit", "-m", "feature"]);
+        let head = repo.git(&["rev-parse", "HEAD"]);
+
+        let fetched_head_ref = "refs/patcher/previews/pr-39";
+        repo.git(&["update-ref", fetched_head_ref, &head]);
+        repo.git(&["update-ref", &overlay_head_ref(39), &head]);
+        repo.git(&["update-ref", &overlay_base_ref(39), &base]);
+        // No remote exists: identical to a vanished GitHub test-merge ref.
+        capture_overlay_snapshot(repo.path(), "missing-origin", 39, fetched_head_ref)
+            .await
+            .unwrap();
+        assert_eq!(
+            rev_parse(repo.path(), &overlay_base_ref(39)).await.unwrap(),
+            Some(base.clone())
+        );
+        assert_eq!(
+            rev_parse(repo.path(), &overlay_head_ref(39)).await.unwrap(),
+            Some(head)
+        );
+
+        std::fs::write(repo.path().join("feature.txt"), "new head\n").unwrap();
+        repo.git(&["add", "feature.txt"]);
+        repo.git(&["commit", "-m", "force-pushed head"]);
+        let changed_head = repo.git(&["rev-parse", "HEAD"]);
+        repo.git(&["update-ref", fetched_head_ref, &changed_head]);
+        capture_overlay_snapshot(repo.path(), "missing-origin", 39, fetched_head_ref)
+            .await
+            .unwrap();
+        assert!(rev_parse(repo.path(), &overlay_base_ref(39)).await.unwrap().is_none());
+        assert!(rev_parse(repo.path(), &overlay_head_ref(39)).await.unwrap().is_none());
     }
 
     #[test]
