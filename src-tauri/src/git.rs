@@ -1585,7 +1585,7 @@ mod tests {
         repo.git(&["update-ref", "refs/heads/patcher/pr-39", &feature]);
 
         repo.git(&["switch", "--detach", &base]);
-        repo.git(&["switch", "-c", "main"]);
+        repo.git(&["switch", "-c", "upstream-after-merge"]);
         repo.git(&["merge", "--no-ff", "-m", "merge PR #39", &feature]);
         let merged_main = repo.git(&["rev-parse", "HEAD"]);
 
