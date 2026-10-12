@@ -9,6 +9,48 @@ use crate::util::now_rfc3339;
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_KITCHEN_REPO_URL: &str = "https://github.com/Comfy-Org/comfy-kitchen";
+
+// pip's isolated PEP 517 subprocesses inherit this environment. WSL --exec
+// bypasses interactive shell initialization, so conda CUDA wheels are otherwise
+// invisible when Ubuntu's /usr/bin/nvcc (often CUDA 11.x) appears first in PATH.
+// Keep execution in the exact installation Python without a shell or git changes.
+const KITCHEN_WHEEL_CUDA_BOOTSTRAP: &str = r#"
+import os
+import pathlib
+import re
+import runpy
+import subprocess
+import sys
+import sysconfig
+
+def select_managed_cuda():
+    if not sys.platform.startswith("linux"):
+        return
+    site_paths = {sysconfig.get_path("purelib"), sysconfig.get_path("platlib")}
+    for site_path in sorted(path for path in site_paths if path):
+        root = pathlib.Path(site_path) / "nvidia" / "cu13"
+        nvcc = root / "bin" / "nvcc"
+        if not nvcc.is_file():
+            continue
+        result = subprocess.run(
+            [str(nvcc), "-V"], capture_output=True, text=True, check=True
+        )
+        match = re.search(r"release\s+(\d+)\.(\d+)", result.stdout)
+        if match is None or tuple(map(int, match.groups())) < (12, 8):
+            continue
+        # The toolkit installed alongside the selected Python takes precedence
+        # over stale system CUDA_HOME/PATH for this one managed wheel build.
+        os.environ["CUDA_HOME"] = str(root)
+        os.environ["CUDACXX"] = str(nvcc)
+        os.environ["PATH"] = str(root / "bin") + os.pathsep + os.environ.get("PATH", "")
+        print(f"Patcher Kitchen CUDA toolkit: {root} ({match.group(0)})", flush=True)
+        return
+
+select_managed_cuda()
+sys.argv = ["pip", *sys.argv[1:]]
+runpy.run_module("pip", run_name="__main__", alter_sys=True)
+"#;
+
 const KITCHEN_DISTRIBUTION_NAME: &str = "comfy-kitchen";
 
 const KITCHEN_PROBE_SCRIPT: &str = r#"
@@ -109,8 +151,8 @@ pub fn plan_kitchen_wheel_build(
         cwd: repo_path.to_string_lossy().to_string(),
         wheel_dir_arg: wheel_dir_arg.to_string(),
         build_args: vec![
-            "-m".to_string(),
-            "pip".to_string(),
+            "-c".to_string(),
+            KITCHEN_WHEEL_CUDA_BOOTSTRAP.to_string(),
             "wheel".to_string(),
             "--no-deps".to_string(),
             "--wheel-dir".to_string(),
@@ -593,8 +635,8 @@ mod tests {
         assert_eq!(
             build.build_args,
             vec![
-                "-m",
-                "pip",
+                "-c",
+                KITCHEN_WHEEL_CUDA_BOOTSTRAP,
                 "wheel",
                 "--no-deps",
                 "--wheel-dir",
