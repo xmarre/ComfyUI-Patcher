@@ -3,6 +3,22 @@
 All notable changes to ComfyUI Patcher are documented here. Earlier release notes
 remain available on the [GitHub Releases](https://github.com/xmarre/ComfyUI-Patcher/releases) page.
 
+## [0.1.24] - 2026-10-12
+
+This maintenance release corrects the CUDA compiler selected when ComfyUI Patcher rebuilds a managed Comfy Kitchen source overlay for a WSL-backed Conda installation. In the reported environment, the managed build found Ubuntu's CUDA 11.5 instead of CUDA 13 already installed in the selected `comfy312` interpreter, and failed before native compilation.
+
+### Fixed
+
+- Managed Kitchen wheel builds now discover the compatible CUDA 13 NVCC packaged in the **selected Python environment** and propagate `CUDA_HOME`, `CUDACXX`, and an NVCC-first `PATH` to the isolated pip/PEP 517 build and CMake subprocesses.
+- `wsl.exe --exec` no longer implicitly relies on interactive Conda activation to select the correct CUDA compiler. On Windows or without a supported environment-local toolkit, the existing compiler resolution behavior is retained.
+- Repository overlays, wheel provenance checking, runtime reinstallation and checkpoint rollback remain unchanged. Other Python dependency builds are unaffected.
+
+### Validation and scope
+
+- [PR #66](https://github.com/xmarre/ComfyUI-Patcher/pull/66): Windows frontend build, Rust backend tests and Rust backend compilation passed before merge.
+- The packaged toolchain bootstrap is covered by the Rust Kitchen wheel-command planning test. The original CUDA 11.5 failure occurred before CUDA source compilation; a successful managed build with the owner's CUDA 13 installation still needs confirmation.
+- This release changes **ComfyUI Patcher only**. It does **not** establish that [comfy-kitchen PR #242](https://github.com/Comfy-Org/comfy-kitchen/pull/242) compiles or corrects native H3 attention.
+
 ## [0.1.23] - 2026-10-09
 
 This maintenance release fixes managed PR overlay retirement after pull requests are merged into an advancing upstream branch. It prevents redundant overlays from blocking stack updates when GitHub retires temporary pull-request test-merge references.
