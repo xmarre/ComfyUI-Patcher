@@ -3,7 +3,7 @@
 All notable changes to ComfyUI Patcher are documented here. Earlier release notes
 remain available on the [GitHub Releases](https://github.com/xmarre/ComfyUI-Patcher/releases) page.
 
-## Unreleased
+## [0.1.25] - 2026-10-15
 
 ### Fixed
 
