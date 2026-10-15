@@ -18,7 +18,8 @@ use crate::git::{
     apply_stash, apply_stash_keep, canonicalize_remote, checkout_paths, clean_untracked_paths,
     clone_repo, commits_between, diff_name_status, ensure_clean_or_apply_strategy, fetch_origin,
     fetch_refspec, force_fetch_refspec, inspect_repo, is_git_repo, join_custom_node_path,
-    merge_abort, merge_no_ff, preview_sequential_merge, ref_is_ancestor_of,
+    merge_abort, merge_no_ff, overlay_snapshot_matches_head, preview_sequential_merge,
+    recover_overlay_snapshot_from_declared_base, ref_is_ancestor_of,
     remote_branches_pointing_at, reset_hard,
     rev_parse, run_git_allow_fail, submodule_update, switch_branch, switch_detached,
     unmerged_paths, validate_custom_node_dir_name, RepoStatus, SequentialMergePreview,
@@ -1054,6 +1055,7 @@ async fn incoming_write_paths_for_tracked_state(
         if ref_is_ancestor_of(path, &overlay_ref, &base_ref).await? {
             continue;
         }
+        refresh_stale_overlay_snapshot(state, path, overlay, &overlay_ref, &base_ref).await?;
 
         let declared_base_ref = match overlay_dependency_index(tracked_state, index)? {
             Some(parent_index) => {
@@ -1172,6 +1174,57 @@ fn sequential_stack_conflict_message(conflict: &SequentialStackConflict) -> Stri
     }
 }
 
+
+async fn refresh_stale_overlay_snapshot(
+    state: &AppState,
+    path: &Path,
+    overlay: &TrackedPrOverlay,
+    incoming_head: &str,
+    current_stack_head: &str,
+) -> AppResult<()> {
+    // An integrated PR is redundant even if GitHub has retired its test-merge
+    // ref and the old parent branch was deleted.
+    if ref_is_ancestor_of(path, incoming_head, current_stack_head).await? {
+        return Ok(());
+    }
+    if !overlay_snapshot_matches_head(path, overlay.pr_number, incoming_head).await? {
+        // A stored branch name can become obsolete when a PR is retargeted.
+        // Verify current GitHub metadata before reconstructing from a remote
+        // branch: the wrong branch can include unrelated upstream changes.
+        let fresh = state
+            .github
+            .resolve_target(&overlay.source_input, Some(&overlay.pr_base_repo_url), Some(path))
+            .await
+            .map_err(|error| AppError::Conflict(format!(
+                "cannot verify the current declared base of PR #{} before recovering its stale snapshot: {error}",
+                overlay.pr_number
+            )))?;
+        let actual_head = rev_parse(path, incoming_head).await?;
+        if fresh.pr_number != Some(overlay.pr_number)
+            || fresh.resolved_sha != actual_head
+            || fresh.pr_base_ref.as_deref() != Some(overlay.pr_base_ref.as_str())
+            || fresh
+                .pr_base_repo_url
+                .as_deref()
+                .and_then(canonicalize_remote)
+                != canonicalize_remote(&overlay.pr_base_repo_url)
+        {
+            return Err(AppError::Conflict(format!(
+                "PR #{} head or declared base has changed during overlay recovery; refresh its metadata and revalidate stack dependencies",
+                overlay.pr_number
+            )));
+        }
+    }
+    recover_overlay_snapshot_from_declared_base(
+        path,
+        "origin",
+        overlay.pr_number,
+        incoming_head,
+        &overlay.pr_base_ref,
+    )
+    .await
+}
+
 async fn probe_sequential_stack_conflicts(
     state: &AppState,
     installation: &Installation,
@@ -1192,6 +1245,8 @@ async fn probe_sequential_stack_conflicts(
     {
         let overlay_resolved = resolve_stored_overlay_target(overlay);
         let incoming_head = ensure_preview_target_available(path, &overlay_resolved).await?;
+        refresh_stale_overlay_snapshot(state, path, overlay, &incoming_head, &accumulated_head)
+            .await?;
         match preview_sequential_merge(path, &accumulated_head, &incoming_head).await? {
             SequentialMergePreview::Clean { synthetic_commit } => {
                 accumulated_head = synthetic_commit;
@@ -2339,6 +2394,23 @@ async fn materialize_tracked_state(
             overlay.last_error = Some(err.to_string());
             return Err((next_state, err));
         }
+        if let Err(err) = refresh_stale_overlay_snapshot(state, path, overlay, &overlay_ref, "HEAD").await {
+            overlay.last_apply_status = Some(OverlayApplyStatus::Conflict);
+            overlay.last_error = Some(err.to_string());
+            return Err((next_state, err));
+        }
+        let current_head_sha = match rev_parse(path, &overlay_ref).await {
+            Ok(Some(sha)) => sha,
+            Ok(None) => {
+                let err = AppError::Conflict(format!("PR #{pr_number} head disappeared after fetch"));
+                overlay.last_apply_status = Some(OverlayApplyStatus::Error);
+                overlay.last_error = Some(err.to_string());
+                return Err((next_state, err));
+            }
+            Err(err) => return Err((next_state, err)),
+        };
+        overlay.resolved_sha = Some(current_head_sha.clone());
+        overlay.summary_label = format!("PR #{pr_number} @ {}", &current_head_sha[..7]);
         log_operation(
             state,
             app,

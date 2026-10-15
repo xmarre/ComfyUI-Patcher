@@ -3,6 +3,19 @@
 All notable changes to ComfyUI Patcher are documented here. Earlier release notes
 remain available on the [GitHub Releases](https://github.com/xmarre/ComfyUI-Patcher/releases) page.
 
+## Unreleased
+
+### Fixed
+
+- A moved or rebased open PR no longer necessarily blocks the entire overlay stack when GitHub's temporary pull-request test-merge ref is missing or stale. Patcher verifies the current PR head and declared base, fetches that declared branch, and reconstructs the PR-only delta.
+- Sequential conflict previews, untracked-path checks, and materialization share the recovered snapshot. PR heads already integrated into the selected stack still remain no-ops even if their old base branch was removed.
+- The stored PR head identity is updated after successful materialization, allowing subsequent unrelated overlays to use the current tracked state.
+
+### Safety
+
+- Recovery never merges PR ancestry into the tracked base. A retargeted PR, unavailable base branch, unverifiable current GitHub metadata, or unrelated commit history is a conflict rather than a guessed patch origin.
+- Regression coverage includes moved heads, sequential unrelated PRs, excluded newer-upstream commits, and missing declared-base branches. Installed-workflow verification remains pending.
+
 ## [0.1.24] - 2026-10-12
 
 This maintenance release corrects the CUDA compiler selected when ComfyUI Patcher rebuilds a managed Comfy Kitchen source overlay for a WSL-backed Conda installation. In the reported environment, the managed build found Ubuntu's CUDA 11.5 instead of CUDA 13 already installed in the selected `comfy312` interpreter, and failed before native compilation.
