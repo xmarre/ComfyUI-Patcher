@@ -375,6 +375,83 @@ async fn capture_overlay_snapshot(
     Ok(())
 }
 
+
+/**
+ * Recover an overlay whose GitHub test-merge ref is absent or stale.
+ *
+ * The declared PR base branch is fetched independently so that the PR's
+ * feature delta can be computed from its merge-base with that branch. Never
+ * use the tracked stack's (potentially older) base as the diff origin: doing
+ * so could import newer upstream commits from the PR head.
+ *
+ * A verified test-merge snapshot remains authoritative when available.
+ * If the declared branch has disappeared or shares no history with the PR
+ * head, retain the existing fail-closed behavior.
+ */
+pub async fn overlay_snapshot_matches_head(
+    path: &Path,
+    pr_number: u64,
+    incoming_head_ref: &str,
+) -> AppResult<bool> {
+    let incoming_sha = rev_parse(path, incoming_head_ref).await?.ok_or_else(|| {
+        AppError::Conflict(format!("cannot resolve PR #{pr_number} head {incoming_head_ref}"))
+    })?;
+    Ok(
+        rev_parse(path, &overlay_head_ref(pr_number)).await?.as_deref()
+            == Some(incoming_sha.as_str())
+            && rev_parse(path, &overlay_base_ref(pr_number)).await?.is_some()
+    )
+}
+
+pub async fn recover_overlay_snapshot_from_declared_base(
+    path: &Path,
+    remote: &str,
+    pr_number: u64,
+    incoming_head_ref: &str,
+    declared_base_ref: &str,
+) -> AppResult<()> {
+    let incoming_sha = rev_parse(path, incoming_head_ref).await?.ok_or_else(|| {
+        AppError::Conflict(format!("cannot resolve PR #{pr_number} head {incoming_head_ref}"))
+    })?;
+    let head_snapshot_ref = overlay_head_ref(pr_number);
+    let base_snapshot_ref = overlay_base_ref(pr_number);
+    if overlay_snapshot_matches_head(path, pr_number, incoming_head_ref).await? {
+        return Ok(());
+    }
+
+    // Use a Patcher-owned ref so an unrelated concurrent fetch cannot change
+    // FETCH_HEAD between the base fetch and the ancestry check.
+    let candidate_ref = format!("refs/patcher/overlay-recovery-bases/{pr_number}");
+    let refspec = format!("refs/heads/{declared_base_ref}:{candidate_ref}");
+    run_git(path, &["fetch", "--force", remote, &refspec])
+        .await
+        .map_err(|error| AppError::Conflict(format!(
+            "cannot recover PR #{pr_number} overlay: its declared base branch '{declared_base_ref}' could not be fetched: {error}"
+        )))?;
+    let base_sha = rev_parse(path, &candidate_ref).await?.ok_or_else(|| {
+        AppError::Conflict(format!(
+            "cannot recover PR #{pr_number} overlay: fetched declared base '{declared_base_ref}' has no commit"
+        ))
+    })?;
+    if merge_base(path, &base_sha, &incoming_sha).await?.is_none() {
+        return Err(AppError::Conflict(format!(
+            "cannot recover PR #{pr_number} overlay: its head shares no history with declared base '{declared_base_ref}'"
+        )));
+    }
+    // Do not store a proof for a head which changed while fetching the base.
+    if rev_parse(path, incoming_head_ref).await?.as_deref() != Some(incoming_sha.as_str()) {
+        return Err(AppError::Conflict(format!(
+            "PR #{pr_number} head changed during base-snapshot recovery; retry the stack operation"
+        )));
+    }
+
+    // Write the base first: an interrupted update cannot leave a matching
+    // head marker paired with a missing base snapshot.
+    run_git(path, &["update-ref", &base_snapshot_ref, &base_sha]).await?;
+    run_git(path, &["update-ref", &head_snapshot_ref, &incoming_sha]).await?;
+    Ok(())
+}
+
 async fn validated_overlay_base_head(path: &Path, incoming_head: &str) -> AppResult<Option<String>> {
     let Some(pr_number) = parse_overlay_pr_number(incoming_head) else {
         return Ok(None);
@@ -1578,6 +1655,138 @@ mod tests {
                 files: vec!["file.txt".to_string()]
             }
         );
+        assert_eq!(repo.git(&["rev-parse", "HEAD"]), original_head);
+        assert!(repo.git(&["status", "--porcelain"]).is_empty());
+    }
+
+
+    #[tokio::test]
+    async fn moved_pr_head_recovers_declared_base_without_importing_newer_upstream() {
+        let repo = TestRepo::new();
+        repo.git(&["init"]);
+        repo.git(&["config", "user.name", "ComfyUI Patcher Test"]);
+        repo.git(&["config", "user.email", "patcher-test@local.invalid"]);
+        std::fs::write(repo.path().join("base.txt"), "base\n").unwrap();
+        repo.git(&["add", "base.txt"]);
+        repo.git(&["commit", "-m", "base"]);
+        repo.git(&["branch", "-M", "main"]);
+        let tracked_base = repo.git(&["rev-parse", "HEAD"]);
+
+        repo.git(&["switch", "-c", "old-feature"]);
+        std::fs::write(repo.path().join("old.txt"), "old\n").unwrap();
+        repo.git(&["add", "old.txt"]);
+        repo.git(&["commit", "-m", "old PR head"]);
+        let old_head = repo.git(&["rev-parse", "HEAD"]);
+
+        repo.git(&["switch", "main"]);
+        std::fs::write(repo.path().join("upstream-only.txt"), "new upstream\n").unwrap();
+        repo.git(&["add", "upstream-only.txt"]);
+        repo.git(&["commit", "-m", "new upstream"]);
+        let newer_base = repo.git(&["rev-parse", "HEAD"]);
+        repo.git(&["switch", "-c", "rebased-feature"]);
+        std::fs::write(repo.path().join("feature.txt"), "new feature\n").unwrap();
+        repo.git(&["add", "feature.txt"]);
+        repo.git(&["commit", "-m", "rebased feature"]);
+        let new_head = repo.git(&["rev-parse", "HEAD"]);
+        repo.git(&["update-ref", "refs/heads/patcher/pr-106", &new_head]);
+        repo.git(&["update-ref", &overlay_base_ref(106), &tracked_base]);
+        repo.git(&["update-ref", &overlay_head_ref(106), &old_head]);
+        repo.git(&["remote", "add", "origin", repo.path().to_str().unwrap()]);
+        repo.git(&["switch", "--detach", &tracked_base]);
+
+        let error = merge_no_ff(repo.path(), "patcher/pr-106", "stale")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("exact base snapshot"));
+        recover_overlay_snapshot_from_declared_base(
+            repo.path(), "origin", 106, "patcher/pr-106", "main",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rev_parse(repo.path(), &overlay_base_ref(106)).await.unwrap(),
+            Some(newer_base)
+        );
+        assert_eq!(
+            rev_parse(repo.path(), &overlay_head_ref(106)).await.unwrap(),
+            Some(new_head)
+        );
+        merge_no_ff(repo.path(), "patcher/pr-106", "recovered overlay")
+            .await
+            .unwrap();
+        assert!(repo.path().join("feature.txt").is_file());
+        assert!(!repo.path().join("upstream-only.txt").exists());
+        assert!(!repo.path().join("old.txt").exists());
+        assert!(repo.git(&["status", "--porcelain"]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn recovered_overlay_allows_unrelated_pr_to_follow_in_stack() {
+        let repo = TestRepo::new();
+        repo.git(&["init"]);
+        repo.git(&["config", "user.name", "ComfyUI Patcher Test"]);
+        repo.git(&["config", "user.email", "patcher-test@local.invalid"]);
+        std::fs::write(repo.path().join("base.txt"), "base\n").unwrap();
+        repo.git(&["add", "base.txt"]);
+        repo.git(&["commit", "-m", "base"]);
+        repo.git(&["branch", "-M", "main"]);
+        let tracked_base = repo.git(&["rev-parse", "HEAD"]);
+        repo.git(&["switch", "-c", "feature-one"]);
+        std::fs::write(repo.path().join("first.txt"), "first\n").unwrap();
+        repo.git(&["add", "first.txt"]);
+        repo.git(&["commit", "-m", "first feature"]);
+        let first_head = repo.git(&["rev-parse", "HEAD"]);
+        repo.git(&["switch", "main"]);
+        std::fs::write(repo.path().join("new-upstream.txt"), "upstream\n").unwrap();
+        repo.git(&["add", "new-upstream.txt"]);
+        repo.git(&["commit", "-m", "new main"]);
+        repo.git(&["switch", "-c", "feature-two"]);
+        std::fs::write(repo.path().join("second.txt"), "second\n").unwrap();
+        repo.git(&["add", "second.txt"]);
+        repo.git(&["commit", "-m", "second feature"]);
+        let second_head = repo.git(&["rev-parse", "HEAD"]);
+        repo.git(&["update-ref", "refs/heads/patcher/pr-106", &first_head]);
+        repo.git(&["update-ref", "refs/heads/patcher/pr-107", &second_head]);
+        repo.git(&["remote", "add", "origin", repo.path().to_str().unwrap()]);
+        repo.git(&["switch", "--detach", &tracked_base]);
+
+        for number in [106, 107] {
+            let head_ref = format!("patcher/pr-{number}");
+            recover_overlay_snapshot_from_declared_base(
+                repo.path(), "origin", number, &head_ref, "main",
+            )
+            .await
+            .unwrap();
+            merge_no_ff(repo.path(), &head_ref, "stack overlay")
+                .await
+                .unwrap();
+        }
+        assert!(repo.path().join("first.txt").is_file());
+        assert!(repo.path().join("second.txt").is_file());
+        assert!(!repo.path().join("new-upstream.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn recovery_fails_closed_when_declared_base_is_gone() {
+        let repo = TestRepo::new();
+        repo.git(&["init"]);
+        repo.git(&["config", "user.name", "ComfyUI Patcher Test"]);
+        repo.git(&["config", "user.email", "patcher-test@local.invalid"]);
+        std::fs::write(repo.path().join("base.txt"), "base\n").unwrap();
+        repo.git(&["add", "base.txt"]);
+        repo.git(&["commit", "-m", "base"]);
+        let original_head = repo.git(&["rev-parse", "HEAD"]);
+        repo.git(&["branch", "-M", "main"]);
+        repo.git(&["update-ref", "refs/heads/patcher/pr-108", &original_head]);
+        repo.git(&["remote", "add", "origin", repo.path().to_str().unwrap()]);
+        let error = recover_overlay_snapshot_from_declared_base(
+            repo.path(), "origin", 108, "patcher/pr-108", "deleted-parent",
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("declared base branch"));
+        assert!(rev_parse(repo.path(), &overlay_head_ref(108)).await.unwrap().is_none());
+        assert!(rev_parse(repo.path(), &overlay_base_ref(108)).await.unwrap().is_none());
         assert_eq!(repo.git(&["rev-parse", "HEAD"]), original_head);
         assert!(repo.git(&["status", "--porcelain"]).is_empty());
     }
