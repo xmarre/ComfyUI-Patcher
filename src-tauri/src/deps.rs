@@ -244,6 +244,40 @@ pub fn plan_dependency_sync(
     }
 }
 
+/// Include both streams: pnpm and TypeScript diagnostics may be printed to stdout.
+fn dependency_failure_output(stdout: &[u8], stderr: &[u8]) -> String {
+    const MAX_CHARS: usize = 24_000;
+    fn tail(bytes: &[u8]) -> Option<String> {
+        let text = String::from_utf8_lossy(bytes);
+        let text = text.trim();
+        if text.is_empty() {
+            return None;
+        }
+        let chars: Vec<char> = text.chars().rev().take(MAX_CHARS + 1).collect();
+        if chars.len() > MAX_CHARS {
+            Some(format!(
+                "[earlier output truncated]\n{}",
+                chars[..MAX_CHARS].iter().rev().collect::<String>()
+            ))
+        } else {
+            Some(text.to_owned())
+        }
+    }
+
+    let mut parts = Vec::new();
+    if let Some(stderr) = tail(stderr) {
+        parts.push(format!("stderr:\n{stderr}"));
+    }
+    if let Some(stdout) = tail(stdout) {
+        parts.push(format!("stdout:\n{stdout}"));
+    }
+    if parts.is_empty() {
+        "command produced no stdout or stderr".to_owned()
+    } else {
+        parts.join("\n")
+    }
+}
+
 pub async fn execute_dependency_sync(plan: &DependencyPlan) -> AppResult<()> {
     for step in &plan.steps {
         let output = execute_dependency_step(step).await?;
@@ -262,9 +296,9 @@ pub async fn execute_dependency_sync(plan: &DependencyPlan) -> AppResult<()> {
                     step.phase,
                     step.strategy,
                     output.status,
-                    String::from_utf8_lossy(&output.stderr),
+                    dependency_failure_output(&output.stdout, &output.stderr),
                     repair_output.status,
-                    String::from_utf8_lossy(&repair_output.stderr)
+                    dependency_failure_output(&repair_output.stdout, &repair_output.stderr)
                 )));
             }
 
@@ -288,9 +322,9 @@ pub async fn execute_dependency_sync(plan: &DependencyPlan) -> AppResult<()> {
                         step.phase,
                         step.strategy,
                         retry_output.status,
-                        String::from_utf8_lossy(&retry_output.stderr),
+                        dependency_failure_output(&retry_output.stdout, &retry_output.stderr),
                         clean_install_output.status,
-                        String::from_utf8_lossy(&clean_install_output.stderr),
+                        dependency_failure_output(&clean_install_output.stdout, &clean_install_output.stderr),
                         pnpm_runtime_summary(step).await
                     )));
                 }
@@ -305,7 +339,7 @@ pub async fn execute_dependency_sync(plan: &DependencyPlan) -> AppResult<()> {
                     step.phase,
                     step.strategy,
                     clean_retry_output.status,
-                    String::from_utf8_lossy(&clean_retry_output.stderr),
+                    dependency_failure_output(&clean_retry_output.stdout, &clean_retry_output.stderr),
                     pnpm_runtime_summary(step).await
                 )));
             }
@@ -516,6 +550,31 @@ Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@vue/compiler-sfc'"#;
     fn does_not_repair_unrelated_build_failures() {
         let stderr = b"src/App.tsx(10,4): error TS2322: Type 'string' is not assignable to type 'number'.";
         assert!(!looks_like_broken_pnpm_dependency_graph(b"", stderr));
+    }
+
+    #[test]
+    fn failed_dependency_step_includes_stdout_only_compiler_diagnostics() {
+        let message = dependency_failure_output(
+            b"src/example.ts(12,4): error TS2322: Type 'string' is not assignable to type 'number'.",
+            b"",
+        );
+        assert!(message.contains("stdout:\n"));
+        assert!(message.contains("TS2322"));
+    }
+
+    #[test]
+    fn failed_dependency_step_retains_both_output_streams() {
+        let message = dependency_failure_output(b"error TS2345", b"TNB ACTIVE");
+        assert!(message.contains("stderr:\nTNB ACTIVE"));
+        assert!(message.contains("stdout:\nerror TS2345"));
+    }
+
+    #[test]
+    fn failed_dependency_step_limits_large_diagnostic_output() {
+        let huge_output = vec![b'x'; 48_000];
+        let message = dependency_failure_output(&huge_output, b"");
+        assert!(message.contains("[earlier output truncated]"));
+        assert!(message.len() < 25_000);
     }
 
     #[tokio::test]
