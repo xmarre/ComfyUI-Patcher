@@ -29,7 +29,7 @@ jobs:
           GIT_COMMITTER_NAME: Overlay diagnostics
           GIT_COMMITTER_EMAIL: diagnostics@localhost
         run: |
-          git -C frontend fetch --no-tags origin refs/pull/14897/head
+          git -C frontend fetch --no-tags https://github.com/xmarre/ComfyUI_frontend.git 3bb5cfdf95580ad7647b3c1f4b4fef22814a4d80
           git -C frontend merge --no-edit --no-ff FETCH_HEAD
           git -C frontend fetch --no-tags origin refs/pull/10841/head
           git -C frontend merge --no-edit --no-ff FETCH_HEAD
