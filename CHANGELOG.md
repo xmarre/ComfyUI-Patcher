@@ -3,6 +3,22 @@
 All notable changes to ComfyUI Patcher are documented here. Earlier release notes
 remain available on the [GitHub Releases](https://github.com/xmarre/ComfyUI-Patcher/releases) page.
 
+## [0.1.26] - 2026-10-18
+
+This maintenance release makes dependency-sync failures diagnosable, including frontend builds that emit TypeScript compiler errors to standard output.
+
+### Fixed
+
+- Failed dependency steps now report **both stdout and stderr**, labeled separately, including failures from pnpm dependency self-heal and build retries.
+- Each captured stream is limited to its most recent 24,000 characters with an explicit truncation marker; large compiler output no longer produces unbounded persisted error messages.
+- Frontend typecheck errors previously hidden behind the TypeScript-native bridge banner and a generic exit code now include the actual `TSxxxx` diagnostics when emitted to stdout.
+
+### Validation and scope
+
+- [PR #71](https://github.com/xmarre/ComfyUI-Patcher/pull/71) was squash-merged after Windows CI passed the frontend build, Rust backend tests and Rust backend build.
+- Regression coverage checks stdout-only TypeScript errors, dual output streams, and truncation of large diagnostic output.
+- The user-reported `main + #14897 + #10841` ComfyUI frontend overlay build failure was separately traced to stale test code in frontend [PR #14897](https://github.com/Comfy-Org/ComfyUI_frontend/pull/14897) and corrected there; this Patcher release improves reporting, not frontend runtime behavior.
+
 ## [0.1.25] - 2026-10-15
 
 ### Fixed
