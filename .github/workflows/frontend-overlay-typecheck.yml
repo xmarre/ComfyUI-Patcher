@@ -1,0 +1,54 @@
+name: temporary frontend overlay typecheck
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/frontend-overlay-typecheck.yml
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact upstream frontend base
+        uses: actions/checkout@v4
+        with:
+          repository: Comfy-Org/ComfyUI_frontend
+          ref: e7fc8af32cb77c88ae5a88ffe782c2b91287093e
+          fetch-depth: 0
+          path: frontend
+
+      - name: Assemble Patcher overlay order
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: Overlay diagnostics
+          GIT_AUTHOR_EMAIL: diagnostics@localhost
+          GIT_COMMITTER_NAME: Overlay diagnostics
+          GIT_COMMITTER_EMAIL: diagnostics@localhost
+        run: |
+          git -C frontend fetch --no-tags origin refs/pull/14897/head
+          git -C frontend merge --no-edit --no-ff FETCH_HEAD
+          git -C frontend fetch --no-tags origin refs/pull/10841/head
+          git -C frontend merge --no-edit --no-ff FETCH_HEAD
+          git -C frontend log -3 --pretty=oneline
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.13.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26.8.2'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install exact frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Reproduce typecheck (include both stdout and stderr)
+        working-directory: frontend
+        run: pnpm typecheck:app
