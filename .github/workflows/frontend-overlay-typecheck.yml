@@ -49,6 +49,26 @@ jobs:
         working-directory: frontend
         run: pnpm install --frozen-lockfile
 
-      - name: Reproduce typecheck (include both stdout and stderr)
+      - name: Focused persistence regression tests
         working-directory: frontend
-        run: pnpm typecheck:app
+        run: |
+          pnpm exec vitest run --maxWorkers=2 \
+            src/platform/workflow/persistence/composables/useWorkflowPersistenceV2.test.ts \
+            src/platform/workflow/persistence/stores/workflowDraftStoreV2.test.ts \
+            src/platform/workflow/persistence/stores/workflowDraftStoreV2.quotaSafety.test.ts \
+            src/platform/workflow/persistence/stores/workflowDraftStoreV2.rollbackSafety.test.ts
+
+      - name: Focused drag and drop regression tests
+        working-directory: frontend
+        run: |
+          pnpm exec vitest run --maxWorkers=2 \
+            src/composables/node/useNodeDragAndDrop.test.ts \
+            src/composables/usePaste.test.ts \
+            src/renderer/extensions/vueNodes/composables/useVueNodeDragAndDrop.test.ts \
+            src/renderer/extensions/vueNodes/components/LGraphNode.test.ts \
+            src/utils/__tests__/eventUtils.test.ts \
+            src/scripts/app.test.ts
+
+      - name: Verify Vite production build
+        working-directory: frontend
+        run: pnpm exec vite build --config vite.config.mts
