@@ -13,7 +13,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: xmarre/ComfyUI_frontend
-          ref: d222df75b0607ff701e43602d4ab12fd0e4b76d0
+          ref: e73177486b78b6d1b225a8a7cc7ff1b701d3d225
           path: frontend
       - uses: pnpm/action-setup@v4
         with:
