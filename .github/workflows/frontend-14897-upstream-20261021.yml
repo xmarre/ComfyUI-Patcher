@@ -26,6 +26,15 @@ jobs:
       - name: Install frontend dependencies
         working-directory: frontend
         run: pnpm install --frozen-lockfile
+      - name: Apply formatter and record exact normalized file blobs
+        working-directory: frontend
+        run: |
+          pnpm exec oxfmt \
+            src/platform/workflow/persistence/base/workflowViewState.test.ts \
+            src/platform/workflow/persistence/composables/useWorkflowPersistenceV2.ts
+          git diff --check
+          git diff -- src/platform/workflow/persistence/base/workflowViewState.test.ts src/platform/workflow/persistence/composables/useWorkflowPersistenceV2.ts
+          git hash-object src/platform/workflow/persistence/base/workflowViewState.test.ts src/platform/workflow/persistence/composables/useWorkflowPersistenceV2.ts
       - name: Typecheck application
         working-directory: frontend
         run: pnpm typecheck:app
