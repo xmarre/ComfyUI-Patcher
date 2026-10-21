@@ -13,7 +13,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: xmarre/ComfyUI_frontend
-          ref: 32859ad36bfe61d24fc68d4e1ce4f1969a34936a
+          ref: f61aca9ef205dea95c80be8961a64c17ade6e32b
           path: frontend
       - uses: pnpm/action-setup@v4
         with:
@@ -30,6 +30,7 @@ jobs:
         working-directory: frontend
         run: pnpm typecheck:app
       - name: Focused workflow persistence regressions
+        if: success() || failure()
         working-directory: frontend
         run: |
           pnpm exec vitest run --maxWorkers=2 \
@@ -43,6 +44,7 @@ jobs:
             src/platform/workflow/persistence/stores/workflowDraftStoreV2.rollbackSafety.test.ts \
             src/platform/workflow/persistence/stores/workflowDraftStoreV2.test.ts
       - name: Formatting of all changed source and tests
+        if: success() || failure()
         working-directory: frontend
         run: |
           pnpm exec oxfmt --check \
@@ -63,8 +65,10 @@ jobs:
             src/platform/workflow/persistence/stores/workflowDraftStoreV2.test.ts \
             src/platform/workflow/persistence/stores/workflowDraftStoreV2.ts
       - name: Lint updated workflow persistence files
+        if: success() || failure()
         working-directory: frontend
         run: pnpm exec oxlint --type-aware src/platform/workflow/persistence
       - name: Production bundle
+        if: success() || failure()
         working-directory: frontend
         run: pnpm build:dist
