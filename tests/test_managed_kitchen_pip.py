@@ -85,6 +85,13 @@ class ManagedKitchenPipTests(unittest.TestCase):
             self.assertIn("numpy>=2", args)
             self.assertFalse(any(guard.is_kitchen_spec(a) for a in args[1:]))
 
+    def test_source_only_pyproject_dependencies_are_noop(self):
+        with contextlib.ExitStack() as stack:
+            args = guard.prepare_install_args(
+                ["install", "comfy-kitchen==0.2.40"], "0.2.40", stack
+            )
+            self.assertEqual(args, [])
+
     def test_fail_closed_on_unknown_source_decl_and_upgrade(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "requirements.txt"
