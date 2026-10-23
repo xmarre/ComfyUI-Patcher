@@ -3,6 +3,23 @@
 All notable changes to ComfyUI Patcher are documented here. Earlier release notes
 remain available on the [GitHub Releases](https://github.com/xmarre/ComfyUI-Patcher/releases) page.
 
+## [0.1.27] - 2026-10-23
+
+This release preserves an active Comfy Kitchen source override during ordinary ComfyUI core and custom-node dependency updates, avoiding repeated CUDA compilation when the managed Kitchen revision is unchanged.
+
+### Fixed
+
+- Core/custom-node Python requirements synchronization removes explicit `comfy-kitchen` dependencies from temporary requirement/constraint copies and constrains the resolver to the source-managed package version. Original ComfyUI and node manifests remain untouched; incompatible transitive requirements fail instead of silently replacing the managed build.
+- **Update all** retains a verified Kitchen wheel when the selected base and enabled PR heads are unchanged, rather than replaying identical merge commits and rebuilding the CUDA extension.
+- Errors in the unchanged-Kitchen preflight are logged and handled through the existing per-repository update path, preserving finalization, aggregated failure reporting and restart ordering.
+- Explicit Kitchen updates, source changes, restore-to-upstream actions, and existing provenance/rollback behavior remain available.
+
+### Validation and limitations
+
+- [PR #76](https://github.com/xmarre/ComfyUI-Patcher/pull/76) includes Python regression tests for direct/nested requirement filtering, constraints, cleanup and error cases, and Rust coverage of protected dependency invocation.
+- Windows CI passed on [PR #76](https://github.com/xmarre/ComfyUI-Patcher/pull/76) at source head `5f1079cc8f6c11d0ad4838350e89f9bb3b2300fe`, including the frontend build, Kitchen Python regression tests, Rust tests, and backend build.
+- Live WSL/Conda/CUDA validation against an installed ComfyUI has not been performed. Independent external package installation can still replace Kitchen; the existing source reassertion path may rebuild it in that situation. The managed wheel is not persistently cached.
+
 ## [0.1.26] - 2026-10-18
 
 This maintenance release makes dependency-sync failures diagnosable, including frontend builds that emit TypeScript compiler errors to standard output.
