@@ -95,8 +95,8 @@ def rewrite_requirements(source, stack, rewritten=None, visiting=None):
                 result.append(kind + " " + shlex.quote(str(child_copy)) + "\n")
             else:
                 # Reject unsupported direct Kitchen declarations rather than clobber it.
-                if "comfy-kitchen" in first.lower().replace("_", "-") and not first.startswith("#"):
-                    if not (first.startswith(("--index-url", "--extra-index-url", "--trusted-host", "--find-links"))):
+                if first.startswith(("git+", "hg+", "svn+", "bzr+", "http://", "https://", "-e ", "--editable ")):
+                    if "comfy-kitchen" in first.lower().replace("_", "-"):
                         raise ValueError("unrecognized Comfy Kitchen dependency declaration: " + first)
                 result.extend(group)
         target.write_text("".join(result), encoding="utf-8")
