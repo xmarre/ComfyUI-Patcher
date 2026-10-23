@@ -680,4 +680,35 @@ Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@vue/compiler-sfc'"#;
         assert_eq!(plan.strategy, "project_materialization");
         assert!(plan.steps.is_empty());
     }
+
+    #[test]
+    fn source_managed_kitchen_wraps_only_python_install_steps() {
+        let plan = DependencyPlan {
+            strategy: "requirements".to_string(),
+            reason: "requirements detected".to_string(),
+            steps: vec![DependencyStep {
+                phase: "install".to_string(),
+                strategy: "requirements".to_string(),
+                command: "/venv/bin/python".to_string(),
+                args: vec![
+                    "-m".to_string(),
+                    "pip".to_string(),
+                    "install".to_string(),
+                    "-r".to_string(),
+                    "requirements.txt".to_string(),
+                ],
+                cwd: "/comfy".to_string(),
+                reason: "requirements detected".to_string(),
+            }],
+        };
+        let protected = protect_managed_kitchen_dependency_plan(&plan, "0.2.40").unwrap();
+        let step = &protected.steps[0];
+        assert_eq!(step.command, "/venv/bin/python");
+        assert_eq!(step.cwd, "/comfy");
+        assert_eq!(step.args[0], "-c");
+        assert_eq!(step.args[1], MANAGED_KITCHEN_PIP_BOOTSTRAP);
+        assert_eq!(&step.args[2..], ["0.2.40", "install", "-r", "requirements.txt"]);
+        assert_eq!(plan.steps[0].args[0], "-m");
+        assert!(step.reason.contains("preserving the source-managed Comfy Kitchen"));
+    }
 }
