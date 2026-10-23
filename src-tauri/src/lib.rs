@@ -7243,14 +7243,30 @@ async fn run_update_all(
             {
                 let repo_lock = state.repo_lock(&repo.id).await;
                 let _guard = repo_lock.lock().await;
-                if kitchen_update_all_is_unchanged(
+                let kitchen_unchanged = match kitchen_update_all_is_unchanged(
                     &state,
                     &installation,
                     &repo,
                     &tracked_state,
                 )
-                .await?
+                .await
                 {
+                    Ok(unchanged) => unchanged,
+                    Err(error) => {
+                        log_operation(
+                            &state,
+                            &app,
+                            &operation_id,
+                            "materialization",
+                            "warn",
+                            format!(
+                                "could not verify that Comfy Kitchen is unchanged; proceeding with its normal update: {error}"
+                            ),
+                        );
+                        false
+                    }
+                };
+                if kitchen_unchanged {
                     log_operation(
                         &state,
                         &app,
