@@ -7174,8 +7174,8 @@ async fn kitchen_update_all_is_unchanged(
             || resolved.pr_number != Some(overlay.pr_number)
             || resolved.resolved_sha.is_none()
             || resolved.resolved_sha != overlay.resolved_sha
-            || resolved.pr_base_repo_url.as_deref() != Some(&overlay.pr_base_repo_url)
-            || resolved.pr_base_ref.as_deref() != Some(&overlay.pr_base_ref)
+            || resolved.pr_base_repo_url.as_deref() != Some(overlay.pr_base_repo_url.as_str())
+            || resolved.pr_base_ref.as_deref() != Some(overlay.pr_base_ref.as_str())
         {
             return Ok(false);
         }
