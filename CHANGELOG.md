@@ -17,7 +17,7 @@ This release preserves an active Comfy Kitchen source override during ordinary C
 ### Validation and limitations
 
 - [PR #76](https://github.com/xmarre/ComfyUI-Patcher/pull/76) includes Python regression tests for direct/nested requirement filtering, constraints, cleanup and error cases, and Rust coverage of protected dependency invocation.
-- The Windows frontend build, Python guard tests, Rust tests and backend build are required before release.
+- Windows CI passed on [PR #76](https://github.com/xmarre/ComfyUI-Patcher/pull/76) at source head `5f1079cc8f6c11d0ad4838350e89f9bb3b2300fe`, including the frontend build, Kitchen Python regression tests, Rust tests, and backend build.
 - Live WSL/Conda/CUDA validation against an installed ComfyUI has not been performed. Independent external package installation can still replace Kitchen; the existing source reassertion path may rebuild it in that situation. The managed wheel is not persistently cached.
 
 ## [0.1.26] - 2026-10-18
