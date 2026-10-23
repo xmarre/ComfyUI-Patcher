@@ -12,7 +12,7 @@ mod stack;
 mod state;
 mod util;
 
-use crate::deps::{execute_dependency_sync, plan_dependency_sync};
+use crate::deps::{execute_dependency_sync, plan_dependency_sync, protect_managed_kitchen_dependency_plan};
 use crate::errors::{AppError, AppResult};
 use crate::git::{
     apply_stash, apply_stash_keep, canonicalize_remote, checkout_paths, clean_untracked_paths,
@@ -3803,10 +3803,35 @@ async fn maybe_sync_dependencies_with_override_mode(
         );
     }
 
-    let dependency_result = if plan.steps.is_empty() {
+    // ComfyUI and custom-node requirements are not permitted to replace a
+    // source-managed Kitchen wheel. Filter explicit requirements in the selected
+    // Python and constrain transitive resolution to the materialized version.
+    // The existing post-sync provenance check remains a recovery safeguard.
+    let protected_plan = if matches!(repo.kind, RepoKind::Core | RepoKind::CustomNode) {
+        let detail = state.db.get_installation_detail(&installation.id)?;
+        if let Some(materialization) = detail
+            .kitchen_repo
+            .as_ref()
+            .and_then(|repo| repo.materialization_state.as_ref())
+        {
+            let version = materialization.installed_version.as_deref().ok_or_else(|| {
+                AppError::Dependency(
+                    "managed Comfy Kitchen has no recorded distribution version; refusing an unprotected Python dependency install"
+                        .to_string(),
+                )
+            })?;
+            protect_managed_kitchen_dependency_plan(&plan, version)?
+        } else {
+            plan.clone()
+        }
+    } else {
+        plan.clone()
+    };
+
+    let dependency_result = if protected_plan.steps.is_empty() {
         Ok(())
     } else {
-        execute_dependency_sync(&plan).await
+        execute_dependency_sync(&protected_plan).await
     };
     let override_result = if should_reassert_managed_kitchen_override(&repo.kind, override_mode) {
         reassert_managed_kitchen_override_if_needed(state, app, operation_id, installation).await
