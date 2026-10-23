@@ -12,7 +12,7 @@ mod stack;
 mod state;
 mod util;
 
-use crate::deps::{execute_dependency_sync, plan_dependency_sync};
+use crate::deps::{execute_dependency_sync, plan_dependency_sync, protect_managed_kitchen_dependency_plan};
 use crate::errors::{AppError, AppResult};
 use crate::git::{
     apply_stash, apply_stash_keep, canonicalize_remote, checkout_paths, clean_untracked_paths,
@@ -3803,10 +3803,35 @@ async fn maybe_sync_dependencies_with_override_mode(
         );
     }
 
-    let dependency_result = if plan.steps.is_empty() {
+    // ComfyUI and custom-node requirements are not permitted to replace a
+    // source-managed Kitchen wheel. Filter explicit requirements in the selected
+    // Python and constrain transitive resolution to the materialized version.
+    // The existing post-sync provenance check remains a recovery safeguard.
+    let protected_plan = if matches!(repo.kind, RepoKind::Core | RepoKind::CustomNode) {
+        let detail = state.db.get_installation_detail(&installation.id)?;
+        if let Some(materialization) = detail
+            .kitchen_repo
+            .as_ref()
+            .and_then(|repo| repo.materialization_state.as_ref())
+        {
+            let version = materialization.installed_version.as_deref().ok_or_else(|| {
+                AppError::Dependency(
+                    "managed Comfy Kitchen has no recorded distribution version; refusing an unprotected Python dependency install"
+                        .to_string(),
+                )
+            })?;
+            protect_managed_kitchen_dependency_plan(&plan, version)?
+        } else {
+            plan.clone()
+        }
+    } else {
+        plan.clone()
+    };
+
+    let dependency_result = if protected_plan.steps.is_empty() {
         Ok(())
     } else {
-        execute_dependency_sync(&plan).await
+        execute_dependency_sync(&protected_plan).await
     };
     let override_result = if should_reassert_managed_kitchen_override(&repo.kind, override_mode) {
         reassert_managed_kitchen_override_if_needed(state, app, operation_id, installation).await
@@ -7095,6 +7120,100 @@ async fn update_all(
     })
 }
 
+/// A tracked Kitchen stack must not be replayed by Update all when every
+/// selected upstream revision and its installed source runtime are unchanged.
+///
+/// In particular, replaying a stack creates fresh no-ff merge commits even if
+/// all PR heads are identical, falsely changing HEAD and forcing a CUDA rebuild.
+/// This check does not apply to an explicit Kitchen update/repair operation.
+async fn kitchen_update_all_is_unchanged(
+    state: &AppState,
+    installation: &Installation,
+    repo: &ManagedRepo,
+    tracked_state: &TrackedRepoState,
+) -> AppResult<bool> {
+    if repo.kind != RepoKind::Kitchen || repo.materialization_state.is_none() {
+        return Ok(false);
+    }
+    let path = Path::new(&repo.local_path);
+    if !path.exists() || !has_git_marker(path) || !is_git_repo(path).await {
+        return Ok(false);
+    }
+    let status = inspect_repo(path).await?;
+    if status.is_dirty {
+        return Ok(false);
+    }
+    let mut current_repo = repo.clone();
+    current_repo.current_head_sha = status.head_sha;
+    let runtime = kitchen::probe_kitchen_runtime(installation).await?;
+    if kitchen::evaluate_materialization(&current_repo, &runtime).status
+        != MaterializationStatus::Current
+    {
+        return Ok(false);
+    }
+    let base = resolve_existing_base_target(state, installation, repo, tracked_state).await?;
+    // Branch and default-branch targets resolve without a commit SHA in the
+    // GitHub resolver. Compare the freshly fetched base ref against the actual
+    // first-parent base commit of the installed stack instead of comparing
+    // two absent stored SHAs.
+    let resolved_base_sha = match base.target_kind {
+        TargetKind::Branch | TargetKind::DefaultBranch => {
+            fetch_origin(path).await?;
+            rev_parse(path, &format!("origin/{}", base.checkout_ref)).await?
+        }
+        TargetKind::Tag => {
+            fetch_origin(path).await?;
+            rev_parse(path, &format!("refs/tags/{}", base.checkout_ref)).await?
+        }
+        TargetKind::Commit => base.resolved_sha.clone(),
+        _ => return Ok(false),
+    };
+    let applied_overlay_count = tracked_state
+        .overlays
+        .iter()
+        .filter(|overlay| overlay.enabled
+            && overlay.last_apply_status == Some(OverlayApplyStatus::Applied))
+        .count();
+    if applied_overlay_count != tracked_state.overlays.iter().filter(|overlay| overlay.enabled).count() {
+        return Ok(false);
+    }
+    let materialized_base_ref = if applied_overlay_count == 0 {
+        "HEAD".to_string()
+    } else {
+        format!("HEAD~{applied_overlay_count}")
+    };
+    let materialized_base_sha = rev_parse(path, &materialized_base_ref).await?;
+    if resolved_base_sha.is_none() || resolved_base_sha != materialized_base_sha {
+        return Ok(false);
+    }
+    for overlay in &tracked_state.overlays {
+        if !overlay.enabled {
+            continue;
+        }
+        if overlay.last_apply_status != Some(OverlayApplyStatus::Applied) {
+            return Ok(false);
+        }
+        let resolved = resolve_target_for_context(
+            state,
+            installation,
+            &repo.kind,
+            Some(&repo.id),
+            &overlay.source_input,
+        )
+        .await?;
+        if resolved.target_kind != TargetKind::Pr
+            || resolved.pr_number != Some(overlay.pr_number)
+            || resolved.resolved_sha.is_none()
+            || resolved.resolved_sha != overlay.resolved_sha
+            || resolved.pr_base_repo_url.as_deref() != Some(overlay.pr_base_repo_url.as_str())
+            || resolved.pr_base_ref.as_deref() != Some(overlay.pr_base_ref.as_str())
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 async fn run_update_all(
     app: AppHandle,
     state: AppState,
@@ -7124,6 +7243,24 @@ async fn run_update_all(
             {
                 let repo_lock = state.repo_lock(&repo.id).await;
                 let _guard = repo_lock.lock().await;
+                if kitchen_update_all_is_unchanged(
+                    &state,
+                    &installation,
+                    &repo,
+                    &tracked_state,
+                )
+                .await?
+                {
+                    log_operation(
+                        &state,
+                        &app,
+                        &operation_id,
+                        "materialization",
+                        "info",
+                        "Comfy Kitchen source refs and installed wheel are unchanged; keeping the verified managed build",
+                    );
+                    continue;
+                }
                 log_operation(
                     &state,
                     &app,

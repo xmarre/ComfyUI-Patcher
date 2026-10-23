@@ -26,6 +26,14 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      - name: Set up Python for dependency-guard regression tests
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Test Kitchen requirement protection
+        run: python -m unittest discover -s tests -p test_managed_kitchen_pip.py -v
+
       - name: Test Rust backend
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
