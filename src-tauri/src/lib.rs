@@ -7152,7 +7152,38 @@ async fn kitchen_update_all_is_unchanged(
         return Ok(false);
     }
     let base = resolve_existing_base_target(state, installation, repo, tracked_state).await?;
-    if base.resolved_sha.is_none() || base.resolved_sha != tracked_state.base.resolved_sha {
+    // Branch and default-branch targets resolve without a commit SHA in the
+    // GitHub resolver. Compare the freshly fetched base ref against the actual
+    // first-parent base commit of the installed stack instead of comparing
+    // two absent stored SHAs.
+    let resolved_base_sha = match base.target_kind {
+        TargetKind::Branch | TargetKind::DefaultBranch => {
+            fetch_origin(path).await?;
+            rev_parse(path, &format!("origin/{}", base.checkout_ref)).await?
+        }
+        TargetKind::Tag => {
+            fetch_origin(path).await?;
+            rev_parse(path, &format!("refs/tags/{}", base.checkout_ref)).await?
+        }
+        TargetKind::Commit => base.resolved_sha.clone(),
+        _ => return Ok(false),
+    };
+    let applied_overlay_count = tracked_state
+        .overlays
+        .iter()
+        .filter(|overlay| overlay.enabled
+            && overlay.last_apply_status == Some(OverlayApplyStatus::Applied))
+        .count();
+    if applied_overlay_count != tracked_state.overlays.iter().filter(|overlay| overlay.enabled).count() {
+        return Ok(false);
+    }
+    let materialized_base_ref = if applied_overlay_count == 0 {
+        "HEAD".to_string()
+    } else {
+        format!("HEAD~{applied_overlay_count}")
+    };
+    let materialized_base_sha = rev_parse(path, &materialized_base_ref).await?;
+    if resolved_base_sha.is_none() || resolved_base_sha != materialized_base_sha {
         return Ok(false);
     }
     for overlay in &tracked_state.overlays {
