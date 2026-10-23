@@ -7120,6 +7120,69 @@ async fn update_all(
     })
 }
 
+/// A tracked Kitchen stack must not be replayed by Update all when every
+/// selected upstream revision and its installed source runtime are unchanged.
+///
+/// In particular, replaying a stack creates fresh no-ff merge commits even if
+/// all PR heads are identical, falsely changing HEAD and forcing a CUDA rebuild.
+/// This check does not apply to an explicit Kitchen update/repair operation.
+async fn kitchen_update_all_is_unchanged(
+    state: &AppState,
+    installation: &Installation,
+    repo: &ManagedRepo,
+    tracked_state: &TrackedRepoState,
+) -> AppResult<bool> {
+    if repo.kind != RepoKind::Kitchen || repo.materialization_state.is_none() {
+        return Ok(false);
+    }
+    let path = Path::new(&repo.local_path);
+    if !path.exists() || !has_git_marker(path) || !is_git_repo(path).await {
+        return Ok(false);
+    }
+    let status = inspect_repo(path).await?;
+    if status.is_dirty {
+        return Ok(false);
+    }
+    let mut current_repo = repo.clone();
+    current_repo.current_head_sha = status.head_sha;
+    let runtime = kitchen::probe_kitchen_runtime(installation).await?;
+    if kitchen::evaluate_materialization(&current_repo, &runtime).status
+        != MaterializationStatus::Current
+    {
+        return Ok(false);
+    }
+    let base = resolve_existing_base_target(state, installation, repo, tracked_state).await?;
+    if base.resolved_sha.is_none() || base.resolved_sha != tracked_state.base.resolved_sha {
+        return Ok(false);
+    }
+    for overlay in &tracked_state.overlays {
+        if !overlay.enabled {
+            continue;
+        }
+        if overlay.last_apply_status != Some(OverlayApplyStatus::Applied) {
+            return Ok(false);
+        }
+        let resolved = resolve_target_for_context(
+            state,
+            installation,
+            &repo.kind,
+            Some(&repo.id),
+            &overlay.source_input,
+        )
+        .await?;
+        if resolved.target_kind != TargetKind::Pr
+            || resolved.pr_number != Some(overlay.pr_number)
+            || resolved.resolved_sha.is_none()
+            || resolved.resolved_sha != overlay.resolved_sha
+            || resolved.pr_base_repo_url.as_deref() != Some(&overlay.pr_base_repo_url)
+            || resolved.pr_base_ref.as_deref() != Some(&overlay.pr_base_ref)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 async fn run_update_all(
     app: AppHandle,
     state: AppState,
@@ -7149,6 +7212,24 @@ async fn run_update_all(
             {
                 let repo_lock = state.repo_lock(&repo.id).await;
                 let _guard = repo_lock.lock().await;
+                if kitchen_update_all_is_unchanged(
+                    &state,
+                    &installation,
+                    &repo,
+                    &tracked_state,
+                )
+                .await?
+                {
+                    log_operation(
+                        &state,
+                        &app,
+                        &operation_id,
+                        "materialization",
+                        "info",
+                        "Comfy Kitchen source refs and installed wheel are unchanged; keeping the verified managed build",
+                    );
+                    continue;
+                }
                 log_operation(
                     &state,
                     &app,
