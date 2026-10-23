@@ -131,6 +131,10 @@ def prepare_install_args(args, version, stack):
         else:
             cleaned.append(arg)
             i += 1
+    # A pyproject can declare only comfy-kitchen. Filtering that sole direct
+    # dependency leaves no work for pip and must be a successful no-op.
+    if cleaned == ["install"]:
+        return []
     fd, constraint_name = tempfile.mkstemp(prefix="patcher-kitchen-", suffix=".txt")
     os.close(fd)
     constraint = Path(constraint_name)
@@ -145,6 +149,8 @@ def main():
         raise ValueError("expected installed Kitchen version and pip install arguments")
     with contextlib.ExitStack() as stack:
         args = prepare_install_args(sys.argv[2:], sys.argv[1], stack)
+        if not args:
+            return
         sys.argv = ["pip", *args]
         runpy.run_module("pip", run_name="__main__", alter_sys=True)
 
