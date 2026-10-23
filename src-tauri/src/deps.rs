@@ -278,6 +278,49 @@ fn dependency_failure_output(stdout: &[u8], stderr: &[u8]) -> String {
     }
 }
 
+const MANAGED_KITCHEN_PIP_BOOTSTRAP: &str = include_str!("managed_kitchen_pip.py");
+
+/// Protect a source-managed Kitchen build without changing tracked requirements.
+///
+/// Python runs in the selected installation interpreter (including WSL), so its
+/// temporary requirements files and constraint are interpreted by the same pip.
+/// The installed source version is a resolver constraint: incompatible third-party
+/// requirements fail instead of silently replacing the managed runtime.
+pub fn protect_managed_kitchen_dependency_plan(
+    plan: &DependencyPlan,
+    installed_version: &str,
+) -> AppResult<DependencyPlan> {
+    let mut guarded = plan.clone();
+    for step in &mut guarded.steps {
+        if !matches!(
+            step.strategy.as_str(),
+            "requirements" | "pyproject_dependencies"
+        ) {
+            continue;
+        }
+        if step.args.len() < 3 || step.args[0] != "-m" || step.args[1] != "pip"
+            || step.args[2] != "install"
+        {
+            return Err(AppError::Dependency(format!(
+                "cannot protect managed Comfy Kitchen during unsupported pip step: {}",
+                step.strategy
+            )));
+        }
+        let mut args = vec![
+            "-c".to_string(),
+            MANAGED_KITCHEN_PIP_BOOTSTRAP.to_string(),
+            installed_version.to_string(),
+        ];
+        args.extend_from_slice(&step.args[2..]);
+        step.args = args;
+        step.reason = format!(
+            "{}; preserving the source-managed Comfy Kitchen distribution",
+            step.reason
+        );
+    }
+    Ok(guarded)
+}
+
 pub async fn execute_dependency_sync(plan: &DependencyPlan) -> AppResult<()> {
     for step in &plan.steps {
         let output = execute_dependency_step(step).await?;
