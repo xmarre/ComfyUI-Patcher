@@ -1,0 +1,121 @@
+name: temporary frontend 14897 upstream verification (2026-10-31)
+on:
+  pull_request:
+    paths:
+      - .github/workflows/frontend-14897-upstream-20261031.yml
+  workflow_dispatch:
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout exact frontend mirror candidate
+        uses: actions/checkout@v4
+        with:
+          repository: xmarre/ComfyUI_frontend
+          ref: bcdbaf485c1ec1119c56b72cff19fd8e43743a95
+          path: frontend
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.13.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26.8.2
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+      - name: Check formatting of unmodified candidate
+        working-directory: frontend
+        continue-on-error: true
+        run: |
+          pnpm exec oxfmt --check \
+            src/platform/workflow/core/services/workflowService.test.ts \
+            src/platform/workflow/core/services/workflowService.ts \
+            src/platform/workflow/management/stores/comfyWorkflow.ts \
+            src/platform/workflow/management/stores/workflowStore.persistence.test.ts \
+            src/platform/workflow/persistence/base/draftTypes.ts \
+            src/platform/workflow/persistence/base/storageIO.test.ts \
+            src/platform/workflow/persistence/base/storageIO.ts \
+            src/platform/workflow/persistence/base/workflowViewState.test.ts \
+            src/platform/workflow/persistence/base/workflowViewState.ts \
+            src/platform/workflow/persistence/composables/useWorkflowPersistenceV2.test.ts \
+            src/platform/workflow/persistence/composables/useWorkflowPersistenceV2.ts \
+            src/platform/workflow/persistence/stores/workflowDraftStoreV2.persistenceControl.test.ts \
+            src/platform/workflow/persistence/stores/workflowDraftStoreV2.quotaSafety.test.ts \
+            src/platform/workflow/persistence/stores/workflowDraftStoreV2.rollbackSafety.test.ts \
+            src/platform/workflow/persistence/stores/workflowDraftStoreV2.test.ts \
+            src/platform/workflow/persistence/stores/workflowDraftStoreV2.ts \
+            browser_tests/tests/workflowPersistenceRecovery.spec.ts
+      - name: Apply formatter and record exact normalized file blobs
+        working-directory: frontend
+        run: |
+          pnpm exec oxfmt \
+            src/platform/workflow/core/services/workflowService.test.ts \
+            src/platform/workflow/core/services/workflowService.ts \
+            src/platform/workflow/management/stores/comfyWorkflow.ts \
+            src/platform/workflow/management/stores/workflowStore.persistence.test.ts \
+            src/platform/workflow/persistence/base/draftTypes.ts \
+            src/platform/workflow/persistence/base/storageIO.test.ts \
+            src/platform/workflow/persistence/base/storageIO.ts \
+            src/platform/workflow/persistence/base/workflowViewState.test.ts \
+            src/platform/workflow/persistence/base/workflowViewState.ts \
+            src/platform/workflow/persistence/composables/useWorkflowPersistenceV2.test.ts \
+            src/platform/workflow/persistence/composables/useWorkflowPersistenceV2.ts \
+            src/platform/workflow/persistence/stores/workflowDraftStoreV2.persistenceControl.test.ts \
+            src/platform/workflow/persistence/stores/workflowDraftStoreV2.quotaSafety.test.ts \
+            src/platform/workflow/persistence/stores/workflowDraftStoreV2.rollbackSafety.test.ts \
+            src/platform/workflow/persistence/stores/workflowDraftStoreV2.test.ts \
+            src/platform/workflow/persistence/stores/workflowDraftStoreV2.ts \
+            browser_tests/tests/workflowPersistenceRecovery.spec.ts
+          git diff --check
+          git diff --stat
+          git diff -- src/platform/workflow/management/stores/comfyWorkflow.ts src/platform/workflow/persistence/composables/useWorkflowPersistenceV2.ts src/platform/workflow/persistence/stores/workflowDraftStoreV2.ts src/platform/workflow/persistence/stores/workflowDraftStoreV2.rollbackSafety.test.ts
+          git hash-object src/platform/workflow/management/stores/comfyWorkflow.ts src/platform/workflow/persistence/composables/useWorkflowPersistenceV2.ts src/platform/workflow/persistence/stores/workflowDraftStoreV2.ts
+      - name: Typecheck application
+        working-directory: frontend
+        run: pnpm typecheck:app
+      - name: Focused workflow persistence regressions
+        if: success() || failure()
+        working-directory: frontend
+        run: |
+          pnpm exec vitest run --maxWorkers=2 \
+            src/platform/workflow/core/services/workflowService.test.ts \
+            src/platform/workflow/management/stores/workflowStore.persistence.test.ts \
+            src/platform/workflow/persistence/base/storageIO.test.ts \
+            src/platform/workflow/persistence/base/workflowViewState.test.ts \
+            src/platform/workflow/persistence/composables/useWorkflowPersistenceV2.test.ts \
+            src/platform/workflow/persistence/stores/workflowDraftStoreV2.persistenceControl.test.ts \
+            src/platform/workflow/persistence/stores/workflowDraftStoreV2.quotaSafety.test.ts \
+            src/platform/workflow/persistence/stores/workflowDraftStoreV2.rollbackSafety.test.ts \
+            src/platform/workflow/persistence/stores/workflowDraftStoreV2.test.ts
+      - name: Formatting of all changed source and tests
+        if: success() || failure()
+        working-directory: frontend
+        run: |
+          pnpm exec oxfmt --check \
+            src/platform/workflow/core/services/workflowService.test.ts \
+            src/platform/workflow/core/services/workflowService.ts \
+            src/platform/workflow/management/stores/comfyWorkflow.ts \
+            src/platform/workflow/management/stores/workflowStore.persistence.test.ts \
+            src/platform/workflow/persistence/base/draftTypes.ts \
+            src/platform/workflow/persistence/base/storageIO.test.ts \
+            src/platform/workflow/persistence/base/storageIO.ts \
+            src/platform/workflow/persistence/base/workflowViewState.test.ts \
+            src/platform/workflow/persistence/base/workflowViewState.ts \
+            src/platform/workflow/persistence/composables/useWorkflowPersistenceV2.test.ts \
+            src/platform/workflow/persistence/composables/useWorkflowPersistenceV2.ts \
+            src/platform/workflow/persistence/stores/workflowDraftStoreV2.persistenceControl.test.ts \
+            src/platform/workflow/persistence/stores/workflowDraftStoreV2.quotaSafety.test.ts \
+            src/platform/workflow/persistence/stores/workflowDraftStoreV2.rollbackSafety.test.ts \
+            src/platform/workflow/persistence/stores/workflowDraftStoreV2.test.ts \
+            src/platform/workflow/persistence/stores/workflowDraftStoreV2.ts
+      - name: Lint updated workflow persistence files
+        if: success() || failure()
+        working-directory: frontend
+        run: pnpm exec oxlint --type-aware src/platform/workflow/persistence
+      - name: Production bundle
+        if: success() || failure()
+        working-directory: frontend
+        run: pnpm build:dist
