@@ -240,7 +240,7 @@ export default function RepoCard({
   const lifecycleSupported = repo.kind !== "core";
 
   async function runStackAction(action: () => Promise<boolean>): Promise<boolean> {
-    if (isSubmitting) {
+    if (isBusy) {
       return false;
     }
     setPanelError(null);
@@ -256,7 +256,7 @@ export default function RepoCard({
   }
 
   async function runLocalAction(action: () => Promise<void>) {
-    if (isSubmitting) {
+    if (isBusy) {
       return;
     }
     setPanelError(null);
@@ -491,7 +491,7 @@ export default function RepoCard({
             </div>
           </div>
           <span className="badge">
-            {hasOverlays ? `${overlays.filter((overlay) => overlay.enabled).length}/${overlays.length} overlays` : "base only"}
+            {selectedOverlays.length ? `${selectedOverlays.filter((overlay) => overlay.enabled).length}/${selectedOverlays.length} selected` : "base only"}
           </span>
         </div>
 
@@ -504,14 +504,14 @@ export default function RepoCard({
         <div className="row gap repo-stack-inputs">
           <input
             className="grow"
-            disabled={isSubmitting}
+            disabled={isBusy}
             placeholder="Branch, tag, commit, or GitHub tree URL"
             value={baseInput}
             onChange={(event) => setBaseInput(event.target.value)}
           />
           <button
             className="secondary"
-            disabled={!baseInput.trim() || isSubmitting}
+            disabled={!baseInput.trim() || isBusy}
             onClick={() => void previewTarget(baseInput, hasOverlays, "base")}
           >
             Preview
@@ -519,7 +519,7 @@ export default function RepoCard({
           {onSetBaseTarget ? (
             <button
               className="secondary"
-              disabled={!baseInput.trim() || isSubmitting}
+              disabled={!baseInput.trim() || isBusy}
               onClick={async () => {
                 if (!onSetBaseTarget || !baseInput.trim() || isSubmitting) {
                   return;
@@ -540,124 +540,177 @@ export default function RepoCard({
         <div className="row gap repo-stack-inputs">
           <input
             className="grow"
-            disabled={isSubmitting}
+            disabled={isBusy}
             placeholder="GitHub PR URL"
             value={overlayInput}
             onChange={(event) => setOverlayInput(event.target.value)}
           />
           <button
             className="secondary"
-            disabled={!overlayInput.trim() || isSubmitting}
+            disabled={!overlayInput.trim() || isBusy}
             onClick={() => void previewTarget(overlayInput, false, "overlay")}
           >
             Preview
           </button>
-          {onAddOverlay ? (
+          {onApplyOverlays ? (
             <button
-              disabled={!overlayInput.trim() || isSubmitting}
-              onClick={async () => {
-                if (!onAddOverlay || !overlayInput.trim() || isSubmitting) {
+              disabled={!overlayInput.trim() || isBusy}
+              onClick={() => {
+                const source = overlayInput.trim();
+                if (!source || isBusy) return;
+                if (selectedOverlays.some((item) => item.sourceInput === source)) {
+                  setPanelError("This PR URL is already staged.");
                   return;
                 }
-                const ok = await runStackAction(() => onAddOverlay(overlayInput));
-                if (ok) {
-                  setOverlayInput("");
-                  setOverlayPreview(null);
-                }
+                setDraftOverlays([...selectedOverlays, {
+                  key: `new:${source}`,
+                  overlayId: null,
+                  sourceInput: source,
+                  enabled: true
+                }]);
+                setOverlayInput("");
+                setOverlayPreview(null);
+                setPanelError(null);
+                setPanelNotice(null);
               }}
             >
-              Add PR overlay
+              Stage PR
             </button>
           ) : null}
         </div>
         {renderPreview(overlayPreview, "Preview a PR overlay to inspect the stack order, introduced commits, and conflict surface.")}
 
-        {hasOverlays ? (
+        {selectedOverlays.length ? (
           <div className="overlay-list">
-            {overlays.map((overlay, index) => {
-              const status = overlayEffectiveStatus(overlay);
+            {selectedOverlays.map((choice, index) => {
+              const overlay = overlays.find((item) => item.id === choice.overlayId);
+              const status = overlay
+                ? choice.enabled === overlay.enabled ? overlayEffectiveStatus(overlay) : "staged"
+                : "new";
               return (
-                <div key={overlay.id} className="overlay-item">
+                <div key={choice.key} className="overlay-item">
                   <div className="row between overlay-row">
                     <label className="overlay-toggle">
                       <input
                         type="checkbox"
-                        disabled={isSubmitting}
-                        checked={overlay.enabled}
-                        onChange={async (event) => {
-                          if (!onSetOverlayEnabled || isSubmitting) {
-                            return;
-                          }
-                          await runStackAction(() =>
-                            onSetOverlayEnabled(overlay.id, event.target.checked)
-                          );
+                        disabled={isBusy || !onApplyOverlays}
+                        checked={choice.enabled}
+                        onChange={(event) => {
+                          setDraftOverlays(selectedOverlays.map((item, i) =>
+                            i === index ? { ...item, enabled: event.target.checked } : item
+                          ));
+                          setPanelNotice(null);
                         }}
                       />
                       <span>
-                        <strong>{overlay.summaryLabel}</strong>
+                        <strong>{overlay?.summaryLabel ?? choice.sourceInput}</strong>
                         <span className="mono small overlay-meta">
-                          PR #{overlay.prNumber} on {overlay.prBaseRef}
+                          {overlay ? `PR #${overlay.prNumber} on ${overlay.prBaseRef}` : "New PR (pending apply)"}
                         </span>
                       </span>
                     </label>
-                    <span className={`badge ${overlayStatusClass(overlay)}`}>{status}</span>
+                    <span className={`badge ${overlay && status === overlayEffectiveStatus(overlay) ? overlayStatusClass(overlay) : "warn"}`}>
+                      {status}
+                    </span>
                   </div>
                   <div className="row between overlay-row">
-                    <div className="mono small overlay-meta">{overlay.resolvedSha ?? overlay.sourceInput}</div>
+                    <div className="mono small overlay-meta">
+                      {overlay?.resolvedSha ?? overlay?.sourceInput ?? choice.sourceInput}
+                    </div>
                     <div className="row gap overlay-actions">
                       <button
                         className="secondary"
-                        disabled={index === 0 || isSubmitting}
-                        onClick={async () => {
-                          if (!onMoveOverlay || isSubmitting) {
-                            return;
-                          }
-                          await runStackAction(() => onMoveOverlay(overlay.id, "up"));
+                        disabled={index === 0 || isBusy || !onApplyOverlays}
+                        onClick={() => {
+                          const next = [...selectedOverlays];
+                          [next[index - 1], next[index]] = [next[index], next[index - 1]];
+                          setDraftOverlays(next);
+                          setPanelNotice(null);
                         }}
                       >
                         Up
                       </button>
                       <button
                         className="secondary"
-                        disabled={index === overlays.length - 1 || isSubmitting}
-                        onClick={async () => {
-                          if (!onMoveOverlay || isSubmitting) {
-                            return;
-                          }
-                          await runStackAction(() => onMoveOverlay(overlay.id, "down"));
+                        disabled={index === selectedOverlays.length - 1 || isBusy || !onApplyOverlays}
+                        onClick={() => {
+                          const next = [...selectedOverlays];
+                          [next[index + 1], next[index]] = [next[index], next[index + 1]];
+                          setDraftOverlays(next);
+                          setPanelNotice(null);
                         }}
                       >
                         Down
                       </button>
                       <button
                         className="secondary"
-                        disabled={isSubmitting}
-                        onClick={async () => {
-                          if (!onRemoveOverlay || isSubmitting) {
-                            return;
-                          }
-                          await runStackAction(() => onRemoveOverlay(overlay.id));
+                        disabled={isBusy || !onApplyOverlays}
+                        onClick={() => {
+                          setDraftOverlays(selectedOverlays.filter((_, i) => i !== index));
+                          setPanelNotice(null);
                         }}
                       >
                         Remove
                       </button>
                     </div>
                   </div>
-                  {overlay.lastError ? <div className="muted small">{overlay.lastError}</div> : null}
+                  {overlay?.lastError ? <div className="muted small">{overlay.lastError}</div> : null}
                 </div>
               );
             })}
           </div>
         ) : (
-          <div className="muted small">No PR overlays are stored for this repo.</div>
+          <div className="muted small">No PR overlays selected.</div>
         )}
+        {onApplyOverlays && trackedState ? (
+          <div className="stack">
+            <div className="muted small">
+              Overlay changes are staged locally. No checkout, download, or dependency build starts until Apply selection.
+              Stacked PR dependencies are checked against the complete selection.
+            </div>
+            <div className="row gap repo-action-wrap">
+              <button
+                className="secondary"
+                disabled={isBusy || selectedOverlays.length === 0}
+                onClick={() => {
+                  setDraftOverlays([]);
+                  setPanelNotice(null);
+                }}
+              >
+                Remove all
+              </button>
+              <button
+                className="secondary"
+                disabled={isBusy || draftOverlays === null}
+                onClick={() => {
+                  setDraftOverlays(null);
+                  setPanelError(null);
+                  setPanelNotice(null);
+                }}
+              >
+                Discard changes
+              </button>
+              <button
+                disabled={isBusy || !selectionChanged}
+                onClick={() => void applySelectedOverlays()}
+              >
+                {pendingOperationId ? "Applying selection..." : "Apply selection"}
+              </button>
+            </div>
+            {selectionChanged ? (
+              <div className="muted small">
+                Pending: {selectedOverlays.length} overlays selected ({overlays.length} currently tracked).
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
       <div className="row gap repo-action-wrap">
         {hasTrackedUpdate ? (
           <button
             className="secondary"
-            disabled={isSubmitting}
+            disabled={isBusy}
             onClick={() =>
               void runLocalAction(async () => {
                 const preview = await api.previewTrackedRepoUpdate(repo.id);
@@ -669,14 +722,14 @@ export default function RepoCard({
           </button>
         ) : null}
         {hasTrackedUpdate && onUpdate ? (
-          <button disabled={isSubmitting} onClick={() => void runLocalAction(onUpdate)}>
+          <button disabled={isBusy} onClick={() => void runLocalAction(onUpdate)}>
             Update
           </button>
         ) : null}
         {onRollback ? (
           <button
             className="secondary"
-            disabled={isSubmitting}
+            disabled={isBusy}
             onClick={() => void runLocalAction(onRollback)}
           >
             Rollback latest
@@ -685,7 +738,7 @@ export default function RepoCard({
         {repo.kind === "kitchen" && repo.materializationState ? (
           <button
             className="secondary"
-            disabled={isSubmitting}
+            disabled={isBusy}
             onClick={() =>
               void runLocalAction(async () => {
                 if (
@@ -705,7 +758,7 @@ export default function RepoCard({
             Restore ComfyUI Kitchen
           </button>
         ) : null}
-        <button className="secondary" disabled={isSubmitting} onClick={() => void toggleHistory()}>
+        <button className="secondary" disabled={isBusy} onClick={() => void toggleHistory()}>
           {historyOpen ? "Hide history" : "History"}
         </button>
       </div>
@@ -722,7 +775,7 @@ export default function RepoCard({
             </div>
             <button
               className="secondary"
-              disabled={isSubmitting}
+              disabled={isBusy}
               onClick={() =>
                 void runLocalAction(async () => {
                   const next = await api.listCheckpoints(repo.id);
@@ -776,7 +829,7 @@ export default function RepoCard({
                   <div className="row gap repo-action-wrap">
                     <button
                       className="secondary"
-                      disabled={isSubmitting}
+                      disabled={isBusy}
                       onClick={() =>
                         void runLocalAction(async () => {
                           const comparison = await api.compareCheckpoint(repo.id, checkpoint.id);
@@ -787,7 +840,7 @@ export default function RepoCard({
                       Compare
                     </button>
                     <button
-                      disabled={isSubmitting}
+                      disabled={isBusy}
                       onClick={() =>
                         void runLocalAction(async () => {
                           await api.restoreCheckpoint({
@@ -879,7 +932,7 @@ export default function RepoCard({
           <div className="row gap repo-action-wrap">
             <button
               className="secondary"
-              disabled={isSubmitting}
+              disabled={isBusy}
               onClick={() =>
                 void runLocalAction(async () => {
                   if (!window.confirm(`Uninstall ${repo.displayName}? This deletes ${repo.localPath}.`)) {
@@ -893,7 +946,7 @@ export default function RepoCard({
             </button>
             <button
               className="secondary"
-              disabled={isSubmitting}
+              disabled={isBusy}
               onClick={() =>
                 void runLocalAction(async () => {
                   if (!window.confirm(`Disable ${repo.displayName}? This moves it out of the active install.`)) {
@@ -907,7 +960,7 @@ export default function RepoCard({
             </button>
             <button
               className="secondary"
-              disabled={isSubmitting}
+              disabled={isBusy}
               onClick={() =>
                 void runLocalAction(async () => {
                   if (!window.confirm(`Untrack ${repo.displayName}? Files stay on disk, but future reconcile passes will ignore this path.`)) {
@@ -923,6 +976,7 @@ export default function RepoCard({
         </div>
       ) : null}
 
+      {panelNotice ? <div className="muted small">{panelNotice}</div> : null}
       {panelError ? <div className="muted small">{panelError}</div> : null}
     </div>
   );
