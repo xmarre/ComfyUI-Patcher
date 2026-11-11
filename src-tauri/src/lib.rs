@@ -2175,6 +2175,7 @@ async fn hydrate_overlay_dependency_metadata(
     state: &AppState,
     repo: &ManagedRepo,
     tracked_state: &mut TrackedRepoState,
+    enabled_only: bool,
 ) -> AppResult<()> {
     let path = Path::new(&repo.local_path);
     let canonical_remote = repo
@@ -2184,7 +2185,9 @@ async fn hydrate_overlay_dependency_metadata(
     let _ = fetch_origin_with_retry(path).await;
 
     for (position, overlay) in tracked_state.overlays.iter_mut().enumerate() {
-        if overlay.pr_head_ref.is_some() && overlay.pr_head_repo_url.is_some() {
+        if (enabled_only && !overlay.enabled)
+            || (overlay.pr_head_ref.is_some() && overlay.pr_head_repo_url.is_some())
+        {
             continue;
         }
 
@@ -2726,7 +2729,7 @@ async fn build_requested_tracked_state_for_input(
                     ));
                 }
                 if existing.base.checkout_ref != base_ref {
-                    hydrate_overlay_dependency_metadata(state, repo, &mut existing).await?;
+                    hydrate_overlay_dependency_metadata(state, repo, &mut existing, false).await?;
                 }
                 existing
             }
@@ -6698,8 +6701,13 @@ async fn build_repo_overlay_selection(
             overlay
         } else {
             let source = choice.source_input.as_deref().expect("validated PR URL");
-            let resolved = resolve_target_for_context(
-                state, installation, &repo.kind, Some(&repo.id), source.trim(),
+            // New PRs must retain their GitHub-declared base. The ordinary same-repo
+            // shortcut infers the tracked base for an empty persisted stack,
+            // which is wrong when a parent and child are staged together.
+            let resolved = state.github.resolve_target(
+                source.trim(),
+                repo.canonical_remote.as_deref(),
+                Some(Path::new(&repo.local_path)),
             ).await?;
             if !matches!(resolved.target_kind, TargetKind::Pr) {
                 return Err(AppError::InvalidInput(
@@ -6721,12 +6729,12 @@ async fn build_repo_overlay_selection(
         next.overlays.push(overlay);
     }
     next.materialized_branch = (!next.overlays.is_empty()).then(|| STACK_BRANCH_NAME.to_string());
-    // Older tracked PRs may lack the head-repo/branch metadata needed to prove
-    // a stacked dependency. Hydrate only when an enabled PR declares a non-base parent.
+    // Legacy parent metadata is hydrated only for enabled overlays. Unrelated
+    // disabled entries must not require GitHub access to apply a valid stack.
     if next.overlays.iter().any(|overlay| {
         overlay.enabled && overlay.pr_base_ref != next.base.checkout_ref
     }) {
-        hydrate_overlay_dependency_metadata(state, repo, &mut next).await?;
+        hydrate_overlay_dependency_metadata(state, repo, &mut next, true).await?;
     }
     validate_overlay_stack(&next)?;
     Ok(next)
