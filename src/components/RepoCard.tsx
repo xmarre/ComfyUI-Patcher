@@ -549,6 +549,8 @@ export default function RepoCard({
                 if (ok) {
                   setBaseInput("");
                   setBasePreview(null);
+                  setDraftOverlays(null);
+                  setDraftBaseline(null);
                 }
               }}
             >
