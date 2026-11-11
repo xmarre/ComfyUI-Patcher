@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type {
   ManagedRepo,
@@ -18,6 +18,7 @@ type Props = {
   onRollback?: () => Promise<void>;
   onSetBaseTarget?: (input: string, clearOverlays: boolean) => Promise<boolean>;
   onApplyOverlays?: (selection: OverlaySelectionRequest) => Promise<OperationStart>;
+  onRefresh?: () => Promise<void>;
 };
 
 type DraftOverlay = SelectedRepoOverlay & { key: string };
@@ -204,7 +205,8 @@ export default function RepoCard({
   onUpdate,
   onRollback,
   onSetBaseTarget,
-  onApplyOverlays
+  onApplyOverlays,
+  onRefresh
 }: Props) {
   const trackedState = repo.trackedState;
   const overlays = trackedState?.overlays ?? [];
@@ -213,6 +215,9 @@ export default function RepoCard({
   const [draftOverlays, setDraftOverlays] = useState<DraftOverlay[] | null>(null);
   const [draftBaseline, setDraftBaseline] = useState<Pick<OverlaySelectionRequest, "expectedBaseInput" | "expectedOverlays"> | null>(null);
   const [pendingOperationId, setPendingOperationId] = useState<string | null>(null);
+  const [refreshRequired, setRefreshRequired] = useState(false);
+  const refreshCallback = useRef(onRefresh);
+  refreshCallback.current = onRefresh;
   const [panelNotice, setPanelNotice] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [panelError, setPanelError] = useState<string | null>(null);
@@ -238,7 +243,7 @@ export default function RepoCard({
       choice.overlayId !== baselineOverlays[index]?.overlayId || choice.enabled !== baselineOverlays[index]?.enabled
     )
   );
-  const isBusy = isSubmitting || pendingOperationId !== null;
+  const isBusy = isSubmitting || pendingOperationId !== null || refreshRequired;
   const hasTrackedUpdate =
     trackedState !== null || (repo.trackedTargetKind !== null && repo.trackedTargetInput !== null);
   const lifecycleSupported = repo.kind !== "core";
@@ -309,13 +314,34 @@ export default function RepoCard({
     const finish = (success: boolean, error?: string | null) => {
       if (cancelled || finished) return;
       finished = true;
-      setPendingOperationId(null);
       if (success) {
-        setDraftOverlays(null);
-        setDraftBaseline(null);
-        setPanelError(null);
-        setPanelNotice("Overlay selection applied. Repository state is refreshing.");
+        // Polling can observe completion even if App missed the event entirely.
+        // Keep editing locked until fresh tracked state replaces the old snapshot.
+        setPanelNotice("Overlay selection applied. Refreshing repository state.");
+        const refresh = refreshCallback.current;
+        if (!refresh) {
+          setRefreshRequired(true);
+          setPendingOperationId(null);
+          setPanelError("Repository refresh is unavailable. Reopen this repository before editing again.");
+          return;
+        }
+        void refresh().then(() => {
+          if (cancelled) return;
+          setDraftOverlays(null);
+          setDraftBaseline(null);
+          setRefreshRequired(false);
+          setPanelError(null);
+          setPanelNotice("Overlay selection applied.");
+        }).catch((refreshError) => {
+          if (cancelled) return;
+          setRefreshRequired(true);
+          setPanelError(`Overlay selection applied, but refreshing failed: ${toErrorMessage(refreshError)}`);
+          setPanelNotice(null);
+        }).finally(() => {
+          if (!cancelled) setPendingOperationId(null);
+        });
       } else {
+        setPendingOperationId(null);
         setPanelError(error || "Overlay selection failed. The draft is retained; inspect the operation log.");
         setPanelNotice(null);
       }
@@ -695,6 +721,28 @@ export default function RepoCard({
         {onApplyOverlays && !editableBaseInput ? (
           <div className="muted small">
             This legacy PR target has no editable base selection. Replace the base target to migrate it before staging overlays.
+          </div>
+        ) : null}
+        {refreshRequired && onRefresh ? (
+          <div className="row gap">
+            <button
+              className="secondary"
+              disabled={isSubmitting || pendingOperationId !== null}
+              onClick={() => {
+                setIsSubmitting(true);
+                void onRefresh().then(() => {
+                  setDraftOverlays(null);
+                  setDraftBaseline(null);
+                  setRefreshRequired(false);
+                  setPanelError(null);
+                  setPanelNotice("Repository state refreshed.");
+                }).catch((error) => {
+                  setPanelError(`Repository refresh failed: ${toErrorMessage(error)}`);
+                }).finally(() => setIsSubmitting(false));
+              }}
+            >
+              Retry repository refresh
+            </button>
           </div>
         ) : null}
         {onApplyOverlays && editableBaseInput ? (
