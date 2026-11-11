@@ -304,9 +304,11 @@ export default function RepoCard({
   useEffect(() => {
     if (!pendingOperationId) return;
     let cancelled = false;
+    let finished = false;
     let unlisten: (() => void) | null = null;
     const finish = (success: boolean, error?: string | null) => {
-      if (cancelled) return;
+      if (cancelled || finished) return;
+      finished = true;
       setPendingOperationId(null);
       if (success) {
         setDraftOverlays(null);
@@ -318,34 +320,39 @@ export default function RepoCard({
         setPanelNotice(null);
       }
     };
-    void api.subscribeOperationEvents((event) => {
-      if (event.operationId !== pendingOperationId) return;
-      if (event.phase === "done") finish(true);
-      if (event.phase === "error") finish(false, event.message);
-    }).then(async (unsubscribe) => {
-      if (cancelled) {
-        unsubscribe();
-        return;
-      }
-      unlisten = unsubscribe;
-      // A fast operation may finish before the event listener is registered.
+    const checkStatus = async () => {
       try {
         const operations = await api.listOperations(repo.installationId);
+        if (cancelled || finished) return;
         const operation = operations.find((item) => item.id === pendingOperationId);
         if (operation?.status === "succeeded") finish(true);
         if (operation?.status === "failed") finish(false, operation.errorMessage);
       } catch (error) {
-        // Keep the event subscription active if the status lookup fails temporarily.
-        if (!cancelled) setPanelError(`Could not query operation status: ${toErrorMessage(error)}`);
+        if (!cancelled && !finished) {
+          setPanelError(`Could not query operation status: ${toErrorMessage(error)}`);
+        }
       }
+    };
+    void api.subscribeOperationEvents((event) => {
+      if (event.operationId !== pendingOperationId) return;
+      if (event.phase === "done") finish(true);
+      if (event.phase === "error") finish(false, event.message);
+    }).then((unsubscribe) => {
+      if (cancelled) unsubscribe();
+      else unlisten = unsubscribe;
     }).catch((error) => {
-      if (cancelled) return;
-      setPendingOperationId(null);
-      setPanelError(`Could not subscribe to operation updates; check Activity before retrying: ${toErrorMessage(error)}`);
+      if (!cancelled && !finished) {
+        setPanelError(`Operation event subscription unavailable; checking status directly: ${toErrorMessage(error)}`);
+      }
     });
+    // Check immediately in case the event was emitted before subscribing.
+    // Polling also covers temporary event-channel failures without enabling duplicate applies.
+    void checkStatus();
+    const poll = setInterval(() => void checkStatus(), 1500);
     return () => {
       cancelled = true;
       unlisten?.();
+      clearInterval(poll);
     };
   }, [pendingOperationId, repo.installationId]);
 
