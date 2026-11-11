@@ -459,6 +459,29 @@ export type MoveRepoOverlayInput = {
   syncDependencies: boolean;
 };
 
+export type ExpectedRepoOverlay = {
+  overlayId: string;
+  enabled: boolean;
+};
+
+export type SelectedRepoOverlay = {
+  overlayId: string | null;
+  sourceInput: string | null;
+  enabled: boolean;
+};
+
+export type OverlaySelectionRequest = {
+  expectedBaseInput: string;
+  expectedOverlays: ExpectedRepoOverlay[];
+  overlays: SelectedRepoOverlay[];
+};
+
+export type ApplyRepoOverlaySelectionInput = OverlaySelectionRequest & {
+  repoId: string;
+  dirtyRepoStrategy: DirtyRepoStrategy;
+  syncDependencies: boolean;
+};
+
 export type UpdateAllInput = {
   installationId: string;
   dirtyRepoStrategy: DirtyRepoStrategy;
