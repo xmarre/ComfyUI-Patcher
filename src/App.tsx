@@ -1626,6 +1626,8 @@ export default function App() {
                       syncDependencies: false
                     })
                   }
+
+                  onRefresh={() => refreshDetail(coreRepo.installationId)}
                   onRollback={() =>
                     runAction(async () => {
                       await api.rollbackRepo({
@@ -1734,6 +1736,8 @@ export default function App() {
                       syncDependencies: true
                     })
                   }
+
+                  onRefresh={() => refreshDetail(frontendRepo.installationId)}
                   onRollback={() =>
                     runAction(async () => {
                       await api.rollbackRepo({
@@ -1863,6 +1867,8 @@ export default function App() {
                       syncDependencies: false
                     })
                   }
+
+                  onRefresh={() => refreshDetail(kitchenRepo.installationId)}
                   onRollback={() =>
                     runAction(async () => {
                       await api.rollbackRepo({
@@ -2022,6 +2028,8 @@ export default function App() {
                               syncDependencies: false
                             })
                           }
+
+                          onRefresh={() => refreshDetail(repo.installationId)}
                           onUpdate={() =>
                             runAction(async () => {
                               await api.updateRepo({
