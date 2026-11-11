@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AddRepoOverlayInput,
+  ApplyRepoOverlaySelectionInput,
   AdoptTrackedCustomNodesInput,
   InstallationDetail,
   ListManagerCustomNodesInput,
@@ -74,6 +75,8 @@ export const api = {
     invoke<OperationStart>("set_repo_base_target", { input }),
   addRepoOverlay: (input: AddRepoOverlayInput) =>
     invoke<OperationStart>("add_repo_overlay", { input }),
+  applyRepoOverlaySelection: (input: ApplyRepoOverlaySelectionInput) =>
+    invoke<OperationStart>("apply_repo_overlay_selection", { input }),
   setRepoOverlayEnabled: (input: SetRepoOverlayEnabledInput) =>
     invoke<OperationStart>("set_repo_overlay_enabled", { input }),
   removeRepoOverlay: (input: RemoveRepoOverlayInput) =>
