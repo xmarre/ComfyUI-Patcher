@@ -9512,6 +9512,35 @@ mod overlay_selection_tests {
     }
 
     #[test]
+    fn newly_staged_child_preserves_declared_parent_from_resolved_pr_metadata() {
+        let remote = "https://github.com/example/repo";
+        let resolved = |number: u64, base: &str, head: &str| ResolvedTarget {
+            source_input: format!("{remote}/pull/{number}"),
+            target_kind: TargetKind::Pr,
+            canonical_repo_url: remote.to_string(),
+            fetch_url: format!("{remote}.git"),
+            checkout_ref: format!("patcher/pr-{number}"),
+            resolved_sha: Some(format!("{number:040x}")),
+            pr_number: Some(number),
+            pr_base_repo_url: Some(remote.to_string()),
+            pr_base_ref: Some(base.to_string()),
+            pr_head_repo_url: Some(remote.to_string()),
+            pr_head_ref: Some(head.to_string()),
+            summary_label: format!("PR #{number}"),
+            suggested_local_dir_name: "repo".to_string(),
+        };
+        let mut selected = state();
+        selected.overlays = vec![
+            make_tracked_overlay(&resolved(15, "main", "feature/parent"), 0).unwrap(),
+            make_tracked_overlay(&resolved(16, "feature/parent", "feature/child"), 1).unwrap(),
+        ];
+        assert_eq!(selected.overlays[1].pr_base_ref, "feature/parent");
+        validate_overlay_stack(&selected).unwrap();
+        selected.overlays.remove(0);
+        assert!(validate_overlay_stack(&selected).is_err());
+    }
+
+    #[test]
     fn stacked_dependency_can_be_removed_in_one_final_selection() {
         let mut current = state();
         current.overlays[1].pr_head_ref = Some("feature/parent".to_string());
