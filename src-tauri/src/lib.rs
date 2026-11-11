@@ -9497,6 +9497,50 @@ mod overlay_selection_tests {
     }
 
     #[test]
+    fn stacked_dependency_can_be_removed_in_one_final_selection() {
+        let mut current = state();
+        current.overlays[1].pr_head_ref = Some("feature/parent".to_string());
+        current.overlays[2].pr_base_ref = "feature/parent".to_string();
+        validate_overlay_stack(&current).unwrap();
+
+        let choose = |id: &str, enabled| SelectedRepoOverlay {
+            overlay_id: Some(id.to_string()),
+            source_input: None,
+            enabled,
+        };
+        let mut intermediate = current.clone();
+        intermediate.overlays = select_existing_repo_overlays(
+            &current,
+            &[choose("pr-14", true), choose("pr-15", false), choose("pr-16", true)],
+        ).unwrap().into_iter().map(Option::unwrap).collect();
+        assert!(validate_overlay_stack(&intermediate).is_err());
+
+        let mut final_state = current.clone();
+        final_state.overlays = select_existing_repo_overlays(
+            &current, &[choose("pr-14", true)],
+        ).unwrap().into_iter().map(Option::unwrap).collect();
+        validate_overlay_stack(&final_state).unwrap();
+        final_state.overlays.clear();
+        validate_overlay_stack(&final_state).unwrap();
+    }
+
+    #[test]
+    fn selection_input_uses_frontend_camel_case_shape() {
+        let payload = serde_json::json!({
+            "repoId": "repo",
+            "expectedBaseInput": "main",
+            "expectedOverlays": [{"overlayId": "pr-14", "enabled": true}],
+            "overlays": [{"overlayId": null, "sourceInput": "https://github.com/example/repo/pull/20", "enabled": true}],
+            "dirtyRepoStrategy": "stash",
+            "syncDependencies": false
+        });
+        let input: ApplyRepoOverlaySelectionInput = serde_json::from_value(payload).unwrap();
+        assert_eq!(input.expected_overlays[0].overlay_id, "pr-14");
+        assert_eq!(input.overlays[0].overlay_id, None);
+        assert_eq!(input.overlays[0].enabled, true);
+    }
+
+    #[test]
     fn malformed_unknown_and_duplicate_overlay_ids_are_rejected() {
         let current = state();
         let choice = |id: &str| SelectedRepoOverlay {
