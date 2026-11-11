@@ -223,7 +223,9 @@ export default function RepoCard({
   const [basePreview, setBasePreview] = useState<RepoActionPreview | null>(null);
   const [overlayPreview, setOverlayPreview] = useState<RepoActionPreview | null>(null);
   const integrationBranch = trackedState?.materializedBranch ?? repo.currentBranch ?? "detached";
-  const hasOverlays = overlays.length > 0;
+  const hasOverlays = overlays.length > 0 || (!trackedState && repo.trackedTargetKind === "pr");
+  const editableBaseInput = trackedState?.base.sourceInput ??
+    (repo.trackedTargetKind !== "pr" ? repo.trackedTargetInput : null);
   const selectedOverlays = draftOverlays ?? overlays.map((overlay) => ({
     key: overlay.id,
     overlayId: overlay.id,
@@ -274,9 +276,9 @@ export default function RepoCard({
 
   // Capture the original selection on the first edit, not the latest refreshed props.
   function stageOverlayDraft(next: DraftOverlay[]) {
-    if (!draftBaseline && trackedState) {
+    if (!draftBaseline && editableBaseInput) {
       setDraftBaseline({
-        expectedBaseInput: trackedState.base.sourceInput,
+        expectedBaseInput: editableBaseInput,
         expectedOverlays: overlays.map((overlay) => ({ overlayId: overlay.id, enabled: overlay.enabled }))
       });
     }
@@ -294,7 +296,7 @@ export default function RepoCard({
         }))
       });
       setPendingOperationId(started.operationId);
-      setPanelNotice("Applying overlay selection. The current checkout remains unchanged until materialization succeeds.");
+      setPanelNotice("Applying the complete overlay selection with checkpointed recovery if materialization fails.");
       return true;
     });
   }
@@ -562,7 +564,7 @@ export default function RepoCard({
           >
             Preview
           </button>
-          {onApplyOverlays && trackedState ? (
+          {onApplyOverlays && editableBaseInput ? (
             <button
               disabled={!overlayInput.trim() || isBusy}
               onClick={() => {
@@ -672,7 +674,12 @@ export default function RepoCard({
         ) : (
           <div className="muted small">No PR overlays selected.</div>
         )}
-        {onApplyOverlays && trackedState ? (
+        {onApplyOverlays && !editableBaseInput ? (
+          <div className="muted small">
+            This legacy PR target has no editable base selection. Replace the base target to migrate it before staging overlays.
+          </div>
+        ) : null}
+        {onApplyOverlays && editableBaseInput ? (
           <div className="stack">
             <div className="muted small">
               Editing overlays does not modify the checkout or start a download/build. Apply selection validates the complete stack (including stacked-PR dependencies) and starts one operation.
