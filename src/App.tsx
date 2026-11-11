@@ -484,7 +484,7 @@ export default function App() {
     try {
       const started = await api.applyRepoOverlaySelection(input);
       if (!input.syncDependencies) {
-        setActionNotice(DEFERRED_DEPENDENCY_SYNC_MESSAGE);
+        setActionNotice("Overlay selection submitted with dependency sync disabled. After successful apply, use Update to synchronize dependencies.");
       }
       return started;
     } catch (error) {
