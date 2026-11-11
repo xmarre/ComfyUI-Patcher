@@ -1860,7 +1860,7 @@ export default function App() {
                       ...selection,
                       repoId: kitchenRepo.id,
                       dirtyRepoStrategy: defaultDirtyRepoStrategy,
-                      syncDependencies: true
+                      syncDependencies: false
                     })
                   }
                   onRollback={() =>
