@@ -329,11 +329,20 @@ export default function RepoCard({
       }
       unlisten = unsubscribe;
       // A fast operation may finish before the event listener is registered.
-      const operations = await api.listOperations(repo.installationId);
-      const operation = operations.find((item) => item.id === pendingOperationId);
-      if (operation?.status === "succeeded") finish(true);
-      if (operation?.status === "failed") finish(false, operation.errorMessage);
-    }).catch((error) => finish(false, toErrorMessage(error)));
+      try {
+        const operations = await api.listOperations(repo.installationId);
+        const operation = operations.find((item) => item.id === pendingOperationId);
+        if (operation?.status === "succeeded") finish(true);
+        if (operation?.status === "failed") finish(false, operation.errorMessage);
+      } catch (error) {
+        // Keep the event subscription active if the status lookup fails temporarily.
+        if (!cancelled) setPanelError(`Could not query operation status: ${toErrorMessage(error)}`);
+      }
+    }).catch((error) => {
+      if (cancelled) return;
+      setPendingOperationId(null);
+      setPanelError(`Could not subscribe to operation updates; check Activity before retrying: ${toErrorMessage(error)}`);
+    });
     return () => {
       cancelled = true;
       unlisten?.();
@@ -590,7 +599,7 @@ export default function RepoCard({
             </button>
           ) : null}
         </div>
-        {renderPreview(overlayPreview, "Preview a PR overlay to inspect the stack order, introduced commits, and conflict surface.")}
+        {renderPreview(overlayPreview, "Preview the PR against the currently tracked stack. Staged changes are validated together when applied.")}
 
         {selectedOverlays.length ? (
           <div className="overlay-list">
