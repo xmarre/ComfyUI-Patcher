@@ -6721,6 +6721,13 @@ async fn build_repo_overlay_selection(
         next.overlays.push(overlay);
     }
     next.materialized_branch = (!next.overlays.is_empty()).then(|| STACK_BRANCH_NAME.to_string());
+    // Older tracked PRs may lack the head-repo/branch metadata needed to prove
+    // a stacked dependency. Hydrate only when an enabled PR declares a non-base parent.
+    if next.overlays.iter().any(|overlay| {
+        overlay.enabled && overlay.pr_base_ref != next.base.checkout_ref
+    }) {
+        hydrate_overlay_dependency_metadata(state, repo, &mut next).await?;
+    }
     validate_overlay_stack(&next)?;
     Ok(next)
 }
