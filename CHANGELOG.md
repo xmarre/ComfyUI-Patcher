@@ -3,6 +3,23 @@
 All notable changes to ComfyUI Patcher are documented here. Earlier release notes
 remain available on the [GitHub Releases](https://github.com/xmarre/ComfyUI-Patcher/releases) page.
 
+## [0.1.28] - 2026-11-11
+
+This release makes pull-request overlay changes transactional in ComfyUI Patcher. Users can select the final overlay stack before rebuilding a managed repository, including retiring several PRs already merged upstream or changing dependent stacked PRs together.
+
+### Changed
+
+- Managed repository cards now stage PR additions, activation toggles, reordering, individual removals, and **Remove all** without changing the checkout. **Apply selection** executes the complete chosen stack once; **Discard changes** restores the tracked selection. Draft selections are local to the current application session.
+- The backend validates the final ordered stack, so temporary dependencies broken during editing are never materialized. New PRs retain their GitHub-declared base/head relationships; unrelated disabled legacy overlays do not require metadata hydration to apply an otherwise valid stack.
+- Before applying a selection, Patcher rechecks the saved base and ordered overlay activation snapshot under the repository lock. Concurrently changed selections fail with a conflict instead of silently overwriting newer tracking changes.
+- Applying a selection uses the existing checkpointed materialization and rollback mechanism. Invalid final selections fail during validation without applying intermediate states. If application fails, the editor retains the draft.
+- Operation completion is checked through events and status polling. After success, the repository view refreshes before editing is unlocked; refresh errors provide a retry instead of exposing stale tracking information.
+
+### Validation and limitations
+
+- [PR #79](https://github.com/xmarre/ComfyUI-Patcher/pull/79) was squash-merged after [Windows CI](https://github.com/xmarre/ComfyUI-Patcher/actions/runs/43082630990) passed the frontend build, Python dependency regression tests, 84 Rust tests, and Rust backend build. Three review findings were addressed and their threads resolved.
+- Real-world ComfyUI checkout and Windows/WSL runtime behavior have not been exercised by these CI checks. The release preserves the established dependency-sync behavior and uses the existing recovery path; actual installed-workflow validation remains outstanding.
+
 ## [0.1.27] - 2026-10-23
 
 This release preserves an active Comfy Kitchen source override during ordinary ComfyUI core and custom-node dependency updates, avoiding repeated CUDA compilation when the managed Kitchen revision is unchanged.
