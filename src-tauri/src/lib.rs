@@ -2175,6 +2175,7 @@ async fn hydrate_overlay_dependency_metadata(
     state: &AppState,
     repo: &ManagedRepo,
     tracked_state: &mut TrackedRepoState,
+    enabled_only: bool,
 ) -> AppResult<()> {
     let path = Path::new(&repo.local_path);
     let canonical_remote = repo
@@ -2184,7 +2185,9 @@ async fn hydrate_overlay_dependency_metadata(
     let _ = fetch_origin_with_retry(path).await;
 
     for (position, overlay) in tracked_state.overlays.iter_mut().enumerate() {
-        if overlay.pr_head_ref.is_some() && overlay.pr_head_repo_url.is_some() {
+        if (enabled_only && !overlay.enabled)
+            || (overlay.pr_head_ref.is_some() && overlay.pr_head_repo_url.is_some())
+        {
             continue;
         }
 
@@ -2726,7 +2729,7 @@ async fn build_requested_tracked_state_for_input(
                     ));
                 }
                 if existing.base.checkout_ref != base_ref {
-                    hydrate_overlay_dependency_metadata(state, repo, &mut existing).await?;
+                    hydrate_overlay_dependency_metadata(state, repo, &mut existing, false).await?;
                 }
                 existing
             }
@@ -6632,6 +6635,187 @@ async fn run_add_repo_overlay(
     Ok(())
 }
 
+fn ensure_overlay_selection_is_current(
+    current: &TrackedRepoState,
+    input: &ApplyRepoOverlaySelectionInput,
+) -> AppResult<()> {
+    let matches = current.base.source_input == input.expected_base_input
+        && current.overlays.len() == input.expected_overlays.len()
+        && current.overlays.iter().zip(&input.expected_overlays).all(|(overlay, expected)| {
+            overlay.id == expected.overlay_id && overlay.enabled == expected.enabled
+        });
+    if matches {
+        Ok(())
+    } else {
+        Err(AppError::Conflict(
+            "the tracked overlay selection has changed; discard the draft and refresh the repository"
+                .to_string(),
+        ))
+    }
+}
+
+fn select_existing_repo_overlays(
+    current: &TrackedRepoState,
+    requested: &[SelectedRepoOverlay],
+) -> AppResult<Vec<Option<TrackedPrOverlay>>> {
+    let mut seen_ids = HashSet::new();
+    requested.iter().map(|choice| {
+        match (&choice.overlay_id, &choice.source_input) {
+            (Some(id), None) if !id.is_empty() => {
+                if !seen_ids.insert(id.clone()) {
+                    return Err(AppError::InvalidInput(format!(
+                        "overlay '{id}' occurs more than once in the selected stack"
+                    )));
+                }
+                let mut overlay = current.overlays.iter().find(|overlay| overlay.id == *id)
+                    .cloned().ok_or_else(|| AppError::NotFound(format!(
+                        "overlay '{id}' is no longer tracked"
+                    )))?;
+                overlay.enabled = choice.enabled;
+                Ok(Some(overlay))
+            }
+            (None, Some(source)) if !source.trim().is_empty() => Ok(None),
+            _ => Err(AppError::InvalidInput(
+                "each selected overlay needs either an existing overlay ID or a new PR URL"
+                    .to_string(),
+            )),
+        }
+    }).collect()
+}
+
+async fn build_repo_overlay_selection(
+    state: &AppState,
+    installation: &Installation,
+    repo: &ManagedRepo,
+    current: &TrackedRepoState,
+    input: &ApplyRepoOverlaySelectionInput,
+) -> AppResult<TrackedRepoState> {
+    ensure_overlay_selection_is_current(current, input)?;
+    let existing = select_existing_repo_overlays(current, &input.overlays)?;
+    let mut next = current.clone();
+    next.overlays.clear();
+    let mut seen_prs = HashSet::new();
+
+    for (choice, previous) in input.overlays.iter().zip(existing) {
+        let mut overlay = if let Some(overlay) = previous {
+            overlay
+        } else {
+            let source = choice.source_input.as_deref().expect("validated PR URL");
+            // New PRs must retain their GitHub-declared base. The ordinary same-repo
+            // shortcut infers the tracked base for an empty persisted stack,
+            // which is wrong when a parent and child are staged together.
+            let resolved = state.github.resolve_target(
+                source.trim(),
+                repo.canonical_remote.as_deref(),
+                Some(Path::new(&repo.local_path)),
+            ).await?;
+            if !matches!(resolved.target_kind, TargetKind::Pr) {
+                return Err(AppError::InvalidInput(
+                    "new overlays must be GitHub pull request URLs".to_string(),
+                ));
+            }
+            ensure_remote_matches(repo.canonical_remote.as_deref(), &resolved)?;
+            let mut overlay = make_tracked_overlay(&resolved, next.overlays.len())?;
+            overlay.enabled = choice.enabled;
+            overlay
+        };
+        if !seen_prs.insert(overlay.pr_number) {
+            return Err(AppError::InvalidInput(format!(
+                "PR #{} occurs more than once in the selected stack",
+                overlay.pr_number
+            )));
+        }
+        overlay.position = next.overlays.len();
+        next.overlays.push(overlay);
+    }
+    next.materialized_branch = (!next.overlays.is_empty()).then(|| STACK_BRANCH_NAME.to_string());
+    // Legacy parent metadata is hydrated only for enabled overlays. Unrelated
+    // disabled entries must not require GitHub access to apply a valid stack.
+    if next.overlays.iter().any(|overlay| {
+        overlay.enabled && overlay.pr_base_ref != next.base.checkout_ref
+    }) {
+        hydrate_overlay_dependency_metadata(state, repo, &mut next, true).await?;
+    }
+    validate_overlay_stack(&next)?;
+    Ok(next)
+}
+
+#[tauri::command]
+async fn apply_repo_overlay_selection(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: ApplyRepoOverlaySelectionInput,
+) -> Result<OperationStart, String> {
+    let repo = state.db.get_repo(&input.repo_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "repo not found".to_string())?;
+    let installation = state.db.get_installation(&repo.installation_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "installation not found".to_string())?;
+    let background_work_lock = state.background_work_lock();
+    let _background_work_accept_guard = background_work_lock.lock().await;
+    let op = state.db.create_operation(
+        &installation.id, Some(&repo.id), OperationKind::ManageRepoStack,
+        Some("apply selected overlays"),
+    ).map_err(|e| e.to_string())?;
+    let op_id = op.id.clone();
+    let state_handle = app.state::<AppState>().inner().clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = run_apply_repo_overlay_selection(
+            app, state_handle, installation, repo, input, op_id,
+        ).await;
+    });
+    Ok(OperationStart { operation_id: op.id })
+}
+
+async fn run_apply_repo_overlay_selection(
+    app: AppHandle,
+    state: AppState,
+    installation: Installation,
+    repo: ManagedRepo,
+    input: ApplyRepoOverlaySelectionInput,
+    operation_id: String,
+) -> AppResult<()> {
+    let _background_work_guard = acquire_background_work_guard(&state).await;
+    state.db.set_operation_running(&operation_id)?;
+    let repo_lock = state.repo_lock(&repo.id).await;
+    let _guard = repo_lock.lock().await;
+    log_operation(
+        &state, &app, &operation_id, "preflight", "info",
+        stack_operation_summary("applying selected repo overlays", &repo),
+    );
+    let result = async {
+        // Take the snapshot after the repo lock: queued mutations may have finished.
+        let latest_repo = state.db.get_repo(&repo.id)?
+            .ok_or_else(|| AppError::NotFound("repo no longer exists".to_string()))?;
+        let current = load_repo_tracked_state(&state, &installation, &latest_repo)
+            .await?
+            .ok_or_else(|| AppError::InvalidInput("repo has no tracked stack".to_string()))?;
+        let requested = build_repo_overlay_selection(
+            &state, &installation, &latest_repo, &current, &input,
+        ).await?;
+        let checkpoint = apply_repo_tracking_state(
+            &state, &app, &operation_id, &installation, &latest_repo, &requested,
+            &input.dirty_repo_strategy, input.sync_dependencies, true,
+        ).await?;
+        state.db.finish_operation(
+            &operation_id, OperationStatus::Succeeded, None, Some(&checkpoint.id),
+        )?;
+        log_operation(
+            &state, &app, &operation_id, "done", "info", "overlay selection applied",
+        );
+        Ok::<(), AppError>(())
+    }.await;
+    if let Err(err) = result {
+        state.db.finish_operation(
+            &operation_id, OperationStatus::Failed, Some(&err.to_string()), None,
+        )?;
+        log_operation(&state, &app, &operation_id, "error", "error", err.to_string());
+        return Err(err);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn set_repo_overlay_enabled(
     app: AppHandle,
@@ -9239,6 +9423,182 @@ async fn shutdown_managed_installations(state: AppState) -> AppResult<()> {
 }
 
 #[cfg(test)]
+mod overlay_selection_tests {
+    use super::*;
+
+    fn state() -> TrackedRepoState {
+        let remote = "https://github.com/example/repo".to_string();
+        TrackedRepoState {
+            version: STACK_TRACKING_VERSION,
+            base: TrackedBaseTarget {
+                source_input: "main".to_string(),
+                target_kind: TargetKind::Branch,
+                canonical_repo_url: remote.clone(),
+                checkout_ref: "main".to_string(),
+                resolved_sha: None,
+                summary_label: "branch main".to_string(),
+            },
+            overlays: (14..=16).map(|n| TrackedPrOverlay {
+                id: format!("pr-{n}"),
+                source_input: format!("{remote}/pull/{n}"),
+                canonical_repo_url: remote.clone(),
+                pr_number: n,
+                pr_base_repo_url: remote.clone(),
+                pr_base_ref: "main".to_string(),
+                pr_head_repo_url: Some(remote.clone()),
+                pr_head_ref: Some(format!("feature/{n}")),
+                resolved_sha: None,
+                summary_label: format!("PR #{n}"),
+                position: (n - 14) as usize,
+                enabled: true,
+                last_apply_status: None,
+                last_error: None,
+            }).collect(),
+            materialized_branch: Some(STACK_BRANCH_NAME.to_string()),
+        }
+    }
+
+    fn request(current: &TrackedRepoState) -> ApplyRepoOverlaySelectionInput {
+        ApplyRepoOverlaySelectionInput {
+            repo_id: "repo".to_string(),
+            expected_base_input: current.base.source_input.clone(),
+            expected_overlays: current.overlays.iter().map(|overlay| ExpectedRepoOverlay {
+                overlay_id: overlay.id.clone(),
+                enabled: overlay.enabled,
+            }).collect(),
+            overlays: Vec::new(),
+            dirty_repo_strategy: DirtyRepoStrategy::Stash,
+            sync_dependencies: false,
+        }
+    }
+
+    #[test]
+    fn empty_selection_removes_all_without_intermediate_validation() {
+        let current = state();
+        let requested = request(&current);
+        ensure_overlay_selection_is_current(&current, &requested).unwrap();
+        assert!(select_existing_repo_overlays(&current, &requested.overlays).unwrap().is_empty());
+    }
+
+    #[test]
+    fn stale_selection_detects_order_and_activation_changes() {
+        let current = state();
+        let requested = request(&current);
+        let mut changed = current.clone();
+        changed.overlays.swap(0, 1);
+        assert!(ensure_overlay_selection_is_current(&changed, &requested).is_err());
+        changed = current.clone();
+        changed.overlays[0].enabled = false;
+        assert!(ensure_overlay_selection_is_current(&changed, &requested).is_err());
+    }
+
+    #[test]
+    fn selection_preserves_user_order_activation_and_original_state() {
+        let current = state();
+        let choices = [
+            SelectedRepoOverlay {
+                overlay_id: Some("pr-16".to_string()), source_input: None, enabled: false,
+            },
+            SelectedRepoOverlay {
+                overlay_id: Some("pr-14".to_string()), source_input: None, enabled: true,
+            },
+        ];
+        let selected = select_existing_repo_overlays(&current, &choices).unwrap()
+            .into_iter().map(Option::unwrap).collect::<Vec<_>>();
+        assert_eq!(selected.iter().map(|overlay| overlay.pr_number).collect::<Vec<_>>(), vec![16, 14]);
+        assert!(!selected[0].enabled);
+        assert!(selected[1].enabled);
+        assert_eq!(current.overlays.len(), 3);
+    }
+
+    #[test]
+    fn newly_staged_child_preserves_declared_parent_from_resolved_pr_metadata() {
+        let remote = "https://github.com/example/repo";
+        let resolved = |number: u64, base: &str, head: &str| ResolvedTarget {
+            source_input: format!("{remote}/pull/{number}"),
+            target_kind: TargetKind::Pr,
+            canonical_repo_url: remote.to_string(),
+            fetch_url: format!("{remote}.git"),
+            checkout_ref: format!("patcher/pr-{number}"),
+            resolved_sha: Some(format!("{number:040x}")),
+            pr_number: Some(number),
+            pr_base_repo_url: Some(remote.to_string()),
+            pr_base_ref: Some(base.to_string()),
+            pr_head_repo_url: Some(remote.to_string()),
+            pr_head_ref: Some(head.to_string()),
+            summary_label: format!("PR #{number}"),
+            suggested_local_dir_name: "repo".to_string(),
+        };
+        let mut selected = state();
+        selected.overlays = vec![
+            make_tracked_overlay(&resolved(15, "main", "feature/parent"), 0).unwrap(),
+            make_tracked_overlay(&resolved(16, "feature/parent", "feature/child"), 1).unwrap(),
+        ];
+        assert_eq!(selected.overlays[1].pr_base_ref, "feature/parent");
+        validate_overlay_stack(&selected).unwrap();
+        selected.overlays.remove(0);
+        assert!(validate_overlay_stack(&selected).is_err());
+    }
+
+    #[test]
+    fn stacked_dependency_can_be_removed_in_one_final_selection() {
+        let mut current = state();
+        current.overlays[1].pr_head_ref = Some("feature/parent".to_string());
+        current.overlays[2].pr_base_ref = "feature/parent".to_string();
+        validate_overlay_stack(&current).unwrap();
+
+        let choose = |id: &str, enabled| SelectedRepoOverlay {
+            overlay_id: Some(id.to_string()),
+            source_input: None,
+            enabled,
+        };
+        let mut intermediate = current.clone();
+        intermediate.overlays = select_existing_repo_overlays(
+            &current,
+            &[choose("pr-14", true), choose("pr-15", false), choose("pr-16", true)],
+        ).unwrap().into_iter().map(Option::unwrap).collect();
+        assert!(validate_overlay_stack(&intermediate).is_err());
+
+        let mut final_state = current.clone();
+        final_state.overlays = select_existing_repo_overlays(
+            &current, &[choose("pr-14", true)],
+        ).unwrap().into_iter().map(Option::unwrap).collect();
+        validate_overlay_stack(&final_state).unwrap();
+        final_state.overlays.clear();
+        validate_overlay_stack(&final_state).unwrap();
+    }
+
+    #[test]
+    fn selection_input_uses_frontend_camel_case_shape() {
+        let payload = serde_json::json!({
+            "repoId": "repo",
+            "expectedBaseInput": "main",
+            "expectedOverlays": [{"overlayId": "pr-14", "enabled": true}],
+            "overlays": [{"overlayId": null, "sourceInput": "https://github.com/example/repo/pull/20", "enabled": true}],
+            "dirtyRepoStrategy": "stash",
+            "syncDependencies": false
+        });
+        let input: ApplyRepoOverlaySelectionInput = serde_json::from_value(payload).unwrap();
+        assert_eq!(input.expected_overlays[0].overlay_id, "pr-14");
+        assert_eq!(input.overlays[0].overlay_id, None);
+        assert_eq!(input.overlays[0].enabled, true);
+    }
+
+    #[test]
+    fn malformed_unknown_and_duplicate_overlay_ids_are_rejected() {
+        let current = state();
+        let choice = |id: &str| SelectedRepoOverlay {
+            overlay_id: Some(id.to_string()), source_input: None, enabled: true,
+        };
+        assert!(select_existing_repo_overlays(&current, &[choice("pr-14"), choice("pr-14")]).is_err());
+        assert!(select_existing_repo_overlays(&current, &[choice("pr-99")]).is_err());
+        assert!(select_existing_repo_overlays(&current, &[SelectedRepoOverlay {
+            overlay_id: None, source_input: Some(" ".to_string()), enabled: true,
+        }]).is_err());
+    }
+}
+
+#[cfg(test)]
 mod kitchen_management_tests {
     use super::*;
 
@@ -9381,6 +9741,7 @@ pub fn run() {
             install_or_patch_custom_node,
             set_repo_base_target,
             add_repo_overlay,
+            apply_repo_overlay_selection,
             set_repo_overlay_enabled,
             remove_repo_overlay,
             move_repo_overlay,

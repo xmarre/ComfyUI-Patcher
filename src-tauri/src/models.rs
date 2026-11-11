@@ -649,6 +649,32 @@ pub struct MoveRepoOverlayInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ExpectedRepoOverlay {
+    pub overlay_id: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectedRepoOverlay {
+    pub overlay_id: Option<String>,
+    pub source_input: Option<String>,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyRepoOverlaySelectionInput {
+    pub repo_id: String,
+    pub expected_base_input: String,
+    pub expected_overlays: Vec<ExpectedRepoOverlay>,
+    pub overlays: Vec<SelectedRepoOverlay>,
+    pub dirty_repo_strategy: DirtyRepoStrategy,
+    pub sync_dependencies: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateAllInput {
     pub installation_id: String,
     pub dirty_repo_strategy: DirtyRepoStrategy,

@@ -1,13 +1,15 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type {
   ManagedRepo,
   OverlayApplyStatus,
-  OverlayMoveDirection,
   RepoActionPreview,
   RepoCheckpoint,
   RepoCheckpointComparison,
-  TrackedPrOverlay
+  TrackedPrOverlay,
+  OverlaySelectionRequest,
+  SelectedRepoOverlay,
+  OperationStart
 } from "../types";
 
 type Props = {
@@ -15,11 +17,11 @@ type Props = {
   onUpdate?: () => Promise<void>;
   onRollback?: () => Promise<void>;
   onSetBaseTarget?: (input: string, clearOverlays: boolean) => Promise<boolean>;
-  onAddOverlay?: (input: string) => Promise<boolean>;
-  onSetOverlayEnabled?: (overlayId: string, enabled: boolean) => Promise<boolean>;
-  onRemoveOverlay?: (overlayId: string) => Promise<boolean>;
-  onMoveOverlay?: (overlayId: string, direction: OverlayMoveDirection) => Promise<boolean>;
+  onApplyOverlays?: (selection: OverlaySelectionRequest) => Promise<OperationStart>;
+  onRefresh?: () => Promise<void>;
 };
+
+type DraftOverlay = SelectedRepoOverlay & { key: string };
 
 type EffectiveOverlayStatus = OverlayApplyStatus | "disabled" | "pending";
 
@@ -203,15 +205,20 @@ export default function RepoCard({
   onUpdate,
   onRollback,
   onSetBaseTarget,
-  onAddOverlay,
-  onSetOverlayEnabled,
-  onRemoveOverlay,
-  onMoveOverlay
+  onApplyOverlays,
+  onRefresh
 }: Props) {
   const trackedState = repo.trackedState;
   const overlays = trackedState?.overlays ?? [];
   const [baseInput, setBaseInput] = useState("");
   const [overlayInput, setOverlayInput] = useState("");
+  const [draftOverlays, setDraftOverlays] = useState<DraftOverlay[] | null>(null);
+  const [draftBaseline, setDraftBaseline] = useState<Pick<OverlaySelectionRequest, "expectedBaseInput" | "expectedOverlays"> | null>(null);
+  const [pendingOperationId, setPendingOperationId] = useState<string | null>(null);
+  const [refreshRequired, setRefreshRequired] = useState(false);
+  const refreshCallback = useRef(onRefresh);
+  refreshCallback.current = onRefresh;
+  const [panelNotice, setPanelNotice] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [panelError, setPanelError] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -221,13 +228,28 @@ export default function RepoCard({
   const [basePreview, setBasePreview] = useState<RepoActionPreview | null>(null);
   const [overlayPreview, setOverlayPreview] = useState<RepoActionPreview | null>(null);
   const integrationBranch = trackedState?.materializedBranch ?? repo.currentBranch ?? "detached";
-  const hasOverlays = overlays.length > 0;
+  const hasOverlays = overlays.length > 0 || (!trackedState && repo.trackedTargetKind === "pr");
+  const editableBaseInput = trackedState?.base.sourceInput ??
+    (repo.trackedTargetKind !== "pr" ? repo.trackedTargetInput : null);
+  const selectedOverlays = draftOverlays ?? overlays.map((overlay) => ({
+    key: overlay.id,
+    overlayId: overlay.id,
+    sourceInput: null,
+    enabled: overlay.enabled
+  }));
+  const baselineOverlays = draftBaseline?.expectedOverlays ?? overlays.map((overlay) => ({ overlayId: overlay.id, enabled: overlay.enabled }));
+  const selectionChanged = draftOverlays !== null && (
+    draftOverlays.length !== baselineOverlays.length || draftOverlays.some((choice, index) =>
+      choice.overlayId !== baselineOverlays[index]?.overlayId || choice.enabled !== baselineOverlays[index]?.enabled
+    )
+  );
+  const isBusy = isSubmitting || pendingOperationId !== null || refreshRequired;
   const hasTrackedUpdate =
     trackedState !== null || (repo.trackedTargetKind !== null && repo.trackedTargetInput !== null);
   const lifecycleSupported = repo.kind !== "core";
 
   async function runStackAction(action: () => Promise<boolean>): Promise<boolean> {
-    if (isSubmitting) {
+    if (isBusy) {
       return false;
     }
     setPanelError(null);
@@ -243,7 +265,7 @@ export default function RepoCard({
   }
 
   async function runLocalAction(action: () => Promise<void>) {
-    if (isSubmitting) {
+    if (isBusy) {
       return;
     }
     setPanelError(null);
@@ -256,6 +278,109 @@ export default function RepoCard({
       setIsSubmitting(false);
     }
   }
+
+  // Capture the original selection on the first edit, not the latest refreshed props.
+  function stageOverlayDraft(next: DraftOverlay[]) {
+    if (!draftBaseline && editableBaseInput) {
+      setDraftBaseline({
+        expectedBaseInput: editableBaseInput,
+        expectedOverlays: overlays.map((overlay) => ({ overlayId: overlay.id, enabled: overlay.enabled }))
+      });
+    }
+    setDraftOverlays(next);
+  }
+
+  // One operation materializes the final desired selection. Draft edits never alter the checkout.
+  async function applySelectedOverlays() {
+    if (!onApplyOverlays || !draftBaseline || !selectionChanged || isBusy) return;
+    await runStackAction(async () => {
+      const started = await onApplyOverlays({
+        ...draftBaseline,
+        overlays: selectedOverlays.map(({ overlayId, sourceInput, enabled }) => ({
+          overlayId, sourceInput, enabled
+        }))
+      });
+      setPendingOperationId(started.operationId);
+      setPanelNotice("Applying the complete overlay selection with checkpointed recovery if materialization fails.");
+      return true;
+    });
+  }
+
+  useEffect(() => {
+    if (!pendingOperationId) return;
+    let cancelled = false;
+    let finished = false;
+    let unlisten: (() => void) | null = null;
+    const finish = (success: boolean, error?: string | null) => {
+      if (cancelled || finished) return;
+      finished = true;
+      if (success) {
+        // Polling can observe completion even if App missed the event entirely.
+        // Keep editing locked until fresh tracked state replaces the old snapshot.
+        setPanelNotice("Overlay selection applied. Refreshing repository state.");
+        const refresh = refreshCallback.current;
+        if (!refresh) {
+          setRefreshRequired(true);
+          setPendingOperationId(null);
+          setPanelError("Repository refresh is unavailable. Reopen this repository before editing again.");
+          return;
+        }
+        void refresh().then(() => {
+          if (cancelled) return;
+          setDraftOverlays(null);
+          setDraftBaseline(null);
+          setRefreshRequired(false);
+          setPanelError(null);
+          setPanelNotice("Overlay selection applied.");
+        }).catch((refreshError) => {
+          if (cancelled) return;
+          setRefreshRequired(true);
+          setPanelError(`Overlay selection applied, but refreshing failed: ${toErrorMessage(refreshError)}`);
+          setPanelNotice(null);
+        }).finally(() => {
+          if (!cancelled) setPendingOperationId(null);
+        });
+      } else {
+        setPendingOperationId(null);
+        setPanelError(error || "Overlay selection failed. The draft is retained; inspect the operation log.");
+        setPanelNotice(null);
+      }
+    };
+    const checkStatus = async () => {
+      try {
+        const operations = await api.listOperations(repo.installationId);
+        if (cancelled || finished) return;
+        const operation = operations.find((item) => item.id === pendingOperationId);
+        if (operation?.status === "succeeded") finish(true);
+        if (operation?.status === "failed") finish(false, operation.errorMessage);
+      } catch (error) {
+        if (!cancelled && !finished) {
+          setPanelError(`Could not query operation status: ${toErrorMessage(error)}`);
+        }
+      }
+    };
+    void api.subscribeOperationEvents((event) => {
+      if (event.operationId !== pendingOperationId) return;
+      if (event.phase === "done") finish(true);
+      if (event.phase === "error") finish(false, event.message);
+    }).then((unsubscribe) => {
+      if (cancelled) unsubscribe();
+      else unlisten = unsubscribe;
+    }).catch((error) => {
+      if (!cancelled && !finished) {
+        setPanelError(`Operation event subscription unavailable; checking status directly: ${toErrorMessage(error)}`);
+      }
+    });
+    // Check immediately in case the event was emitted before subscribing.
+    // Polling also covers temporary event-channel failures without enabling duplicate applies.
+    void checkStatus();
+    const poll = setInterval(() => void checkStatus(), 1500);
+    return () => {
+      cancelled = true;
+      unlisten?.();
+      clearInterval(poll);
+    };
+  }, [pendingOperationId, repo.installationId]);
 
   async function toggleHistory() {
     if (historyOpen) {
@@ -420,7 +545,7 @@ export default function RepoCard({
             </div>
           </div>
           <span className="badge">
-            {hasOverlays ? `${overlays.filter((overlay) => overlay.enabled).length}/${overlays.length} overlays` : "base only"}
+            {selectedOverlays.length ? `${selectedOverlays.filter((overlay) => overlay.enabled).length}/${selectedOverlays.length} selected` : "base only"}
           </span>
         </div>
 
@@ -433,14 +558,14 @@ export default function RepoCard({
         <div className="row gap repo-stack-inputs">
           <input
             className="grow"
-            disabled={isSubmitting}
+            disabled={isBusy}
             placeholder="Branch, tag, commit, or GitHub tree URL"
             value={baseInput}
             onChange={(event) => setBaseInput(event.target.value)}
           />
           <button
             className="secondary"
-            disabled={!baseInput.trim() || isSubmitting}
+            disabled={!baseInput.trim() || isBusy}
             onClick={() => void previewTarget(baseInput, hasOverlays, "base")}
           >
             Preview
@@ -448,15 +573,17 @@ export default function RepoCard({
           {onSetBaseTarget ? (
             <button
               className="secondary"
-              disabled={!baseInput.trim() || isSubmitting}
+              disabled={!baseInput.trim() || isBusy || selectionChanged}
               onClick={async () => {
-                if (!onSetBaseTarget || !baseInput.trim() || isSubmitting) {
+                if (!onSetBaseTarget || !baseInput.trim() || isBusy || selectionChanged) {
                   return;
                 }
                 const ok = await runStackAction(() => onSetBaseTarget(baseInput, hasOverlays));
                 if (ok) {
                   setBaseInput("");
                   setBasePreview(null);
+                  setDraftOverlays(null);
+                  setDraftBaseline(null);
                 }
               }}
             >
@@ -469,124 +596,204 @@ export default function RepoCard({
         <div className="row gap repo-stack-inputs">
           <input
             className="grow"
-            disabled={isSubmitting}
+            disabled={isBusy}
             placeholder="GitHub PR URL"
             value={overlayInput}
             onChange={(event) => setOverlayInput(event.target.value)}
           />
           <button
             className="secondary"
-            disabled={!overlayInput.trim() || isSubmitting}
+            disabled={!overlayInput.trim() || isBusy}
             onClick={() => void previewTarget(overlayInput, false, "overlay")}
           >
             Preview
           </button>
-          {onAddOverlay ? (
+          {onApplyOverlays && editableBaseInput ? (
             <button
-              disabled={!overlayInput.trim() || isSubmitting}
-              onClick={async () => {
-                if (!onAddOverlay || !overlayInput.trim() || isSubmitting) {
+              disabled={!overlayInput.trim() || isBusy}
+              onClick={() => {
+                const source = overlayInput.trim();
+                if (!source || isBusy) return;
+                if (selectedOverlays.some((item) => item.sourceInput === source)) {
+                  setPanelError("This PR URL is already staged.");
                   return;
                 }
-                const ok = await runStackAction(() => onAddOverlay(overlayInput));
-                if (ok) {
-                  setOverlayInput("");
-                  setOverlayPreview(null);
-                }
+                stageOverlayDraft([...selectedOverlays, {
+                  key: `new:${source}`,
+                  overlayId: null,
+                  sourceInput: source,
+                  enabled: true
+                }]);
+                setOverlayInput("");
+                setOverlayPreview(null);
+                setPanelError(null);
+                setPanelNotice(null);
               }}
             >
-              Add PR overlay
+              Stage PR
             </button>
           ) : null}
         </div>
-        {renderPreview(overlayPreview, "Preview a PR overlay to inspect the stack order, introduced commits, and conflict surface.")}
+        {renderPreview(overlayPreview, "Preview the PR against the currently tracked stack. Staged changes are validated together when applied.")}
 
-        {hasOverlays ? (
+        {selectedOverlays.length ? (
           <div className="overlay-list">
-            {overlays.map((overlay, index) => {
-              const status = overlayEffectiveStatus(overlay);
+            {selectedOverlays.map((choice, index) => {
+              const overlay = overlays.find((item) => item.id === choice.overlayId);
+              const status = overlay
+                ? choice.enabled === overlay.enabled ? overlayEffectiveStatus(overlay) : "staged"
+                : "new";
               return (
-                <div key={overlay.id} className="overlay-item">
+                <div key={choice.key} className="overlay-item">
                   <div className="row between overlay-row">
                     <label className="overlay-toggle">
                       <input
                         type="checkbox"
-                        disabled={isSubmitting}
-                        checked={overlay.enabled}
-                        onChange={async (event) => {
-                          if (!onSetOverlayEnabled || isSubmitting) {
-                            return;
-                          }
-                          await runStackAction(() =>
-                            onSetOverlayEnabled(overlay.id, event.target.checked)
-                          );
+                        disabled={isBusy || !onApplyOverlays}
+                        checked={choice.enabled}
+                        onChange={(event) => {
+                          stageOverlayDraft(selectedOverlays.map((item, i) =>
+                            i === index ? { ...item, enabled: event.target.checked } : item
+                          ));
+                          setPanelNotice(null);
                         }}
                       />
                       <span>
-                        <strong>{overlay.summaryLabel}</strong>
+                        <strong>{overlay?.summaryLabel ?? choice.sourceInput}</strong>
                         <span className="mono small overlay-meta">
-                          PR #{overlay.prNumber} on {overlay.prBaseRef}
+                          {overlay ? `PR #${overlay.prNumber} on ${overlay.prBaseRef}` : "New PR (pending apply)"}
                         </span>
                       </span>
                     </label>
-                    <span className={`badge ${overlayStatusClass(overlay)}`}>{status}</span>
+                    <span className={`badge ${overlay && status === overlayEffectiveStatus(overlay) ? overlayStatusClass(overlay) : "warn"}`}>
+                      {status}
+                    </span>
                   </div>
                   <div className="row between overlay-row">
-                    <div className="mono small overlay-meta">{overlay.resolvedSha ?? overlay.sourceInput}</div>
+                    <div className="mono small overlay-meta">
+                      {overlay?.resolvedSha ?? overlay?.sourceInput ?? choice.sourceInput}
+                    </div>
                     <div className="row gap overlay-actions">
                       <button
                         className="secondary"
-                        disabled={index === 0 || isSubmitting}
-                        onClick={async () => {
-                          if (!onMoveOverlay || isSubmitting) {
-                            return;
-                          }
-                          await runStackAction(() => onMoveOverlay(overlay.id, "up"));
+                        disabled={index === 0 || isBusy || !onApplyOverlays}
+                        onClick={() => {
+                          const next = [...selectedOverlays];
+                          [next[index - 1], next[index]] = [next[index], next[index - 1]];
+                          stageOverlayDraft(next);
+                          setPanelNotice(null);
                         }}
                       >
                         Up
                       </button>
                       <button
                         className="secondary"
-                        disabled={index === overlays.length - 1 || isSubmitting}
-                        onClick={async () => {
-                          if (!onMoveOverlay || isSubmitting) {
-                            return;
-                          }
-                          await runStackAction(() => onMoveOverlay(overlay.id, "down"));
+                        disabled={index === selectedOverlays.length - 1 || isBusy || !onApplyOverlays}
+                        onClick={() => {
+                          const next = [...selectedOverlays];
+                          [next[index + 1], next[index]] = [next[index], next[index + 1]];
+                          stageOverlayDraft(next);
+                          setPanelNotice(null);
                         }}
                       >
                         Down
                       </button>
                       <button
                         className="secondary"
-                        disabled={isSubmitting}
-                        onClick={async () => {
-                          if (!onRemoveOverlay || isSubmitting) {
-                            return;
-                          }
-                          await runStackAction(() => onRemoveOverlay(overlay.id));
+                        disabled={isBusy || !onApplyOverlays}
+                        onClick={() => {
+                          stageOverlayDraft(selectedOverlays.filter((_, i) => i !== index));
+                          setPanelNotice(null);
                         }}
                       >
                         Remove
                       </button>
                     </div>
                   </div>
-                  {overlay.lastError ? <div className="muted small">{overlay.lastError}</div> : null}
+                  {overlay?.lastError ? <div className="muted small">{overlay.lastError}</div> : null}
                 </div>
               );
             })}
           </div>
         ) : (
-          <div className="muted small">No PR overlays are stored for this repo.</div>
+          <div className="muted small">No PR overlays selected.</div>
         )}
+        {onApplyOverlays && !editableBaseInput ? (
+          <div className="muted small">
+            This legacy PR target has no editable base selection. Replace the base target to migrate it before staging overlays.
+          </div>
+        ) : null}
+        {refreshRequired && onRefresh ? (
+          <div className="row gap">
+            <button
+              className="secondary"
+              disabled={isSubmitting || pendingOperationId !== null}
+              onClick={() => {
+                setIsSubmitting(true);
+                void onRefresh().then(() => {
+                  setDraftOverlays(null);
+                  setDraftBaseline(null);
+                  setRefreshRequired(false);
+                  setPanelError(null);
+                  setPanelNotice("Repository state refreshed.");
+                }).catch((error) => {
+                  setPanelError(`Repository refresh failed: ${toErrorMessage(error)}`);
+                }).finally(() => setIsSubmitting(false));
+              }}
+            >
+              Retry repository refresh
+            </button>
+          </div>
+        ) : null}
+        {onApplyOverlays && editableBaseInput ? (
+          <div className="stack">
+            <div className="muted small">
+              Editing overlays does not modify the checkout or start a download/build. Apply selection validates the complete stack (including stacked-PR dependencies) and starts one operation.
+            </div>
+            <div className="row gap repo-action-wrap">
+              <button
+                className="secondary"
+                disabled={isBusy || selectedOverlays.length === 0}
+                onClick={() => {
+                  stageOverlayDraft([]);
+                  setPanelNotice(null);
+                }}
+              >
+                Remove all
+              </button>
+              <button
+                className="secondary"
+                disabled={isBusy || draftOverlays === null}
+                onClick={() => {
+                  setDraftOverlays(null);
+                  setDraftBaseline(null);
+                  setPanelError(null);
+                  setPanelNotice(null);
+                }}
+              >
+                Discard changes
+              </button>
+              <button
+                disabled={isBusy || !selectionChanged}
+                onClick={() => void applySelectedOverlays()}
+              >
+                {pendingOperationId ? "Applying selection..." : "Apply selection"}
+              </button>
+            </div>
+            {selectionChanged ? (
+              <div className="muted small">
+                Pending: {selectedOverlays.length} overlays selected ({overlays.length} currently tracked).
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
       <div className="row gap repo-action-wrap">
         {hasTrackedUpdate ? (
           <button
             className="secondary"
-            disabled={isSubmitting}
+            disabled={isBusy}
             onClick={() =>
               void runLocalAction(async () => {
                 const preview = await api.previewTrackedRepoUpdate(repo.id);
@@ -598,14 +805,14 @@ export default function RepoCard({
           </button>
         ) : null}
         {hasTrackedUpdate && onUpdate ? (
-          <button disabled={isSubmitting} onClick={() => void runLocalAction(onUpdate)}>
+          <button disabled={isBusy || selectionChanged} onClick={() => void runLocalAction(onUpdate)}>
             Update
           </button>
         ) : null}
         {onRollback ? (
           <button
             className="secondary"
-            disabled={isSubmitting}
+            disabled={isBusy}
             onClick={() => void runLocalAction(onRollback)}
           >
             Rollback latest
@@ -614,7 +821,7 @@ export default function RepoCard({
         {repo.kind === "kitchen" && repo.materializationState ? (
           <button
             className="secondary"
-            disabled={isSubmitting}
+            disabled={isBusy}
             onClick={() =>
               void runLocalAction(async () => {
                 if (
@@ -634,7 +841,7 @@ export default function RepoCard({
             Restore ComfyUI Kitchen
           </button>
         ) : null}
-        <button className="secondary" disabled={isSubmitting} onClick={() => void toggleHistory()}>
+        <button className="secondary" disabled={isBusy} onClick={() => void toggleHistory()}>
           {historyOpen ? "Hide history" : "History"}
         </button>
       </div>
@@ -651,7 +858,7 @@ export default function RepoCard({
             </div>
             <button
               className="secondary"
-              disabled={isSubmitting}
+              disabled={isBusy}
               onClick={() =>
                 void runLocalAction(async () => {
                   const next = await api.listCheckpoints(repo.id);
@@ -705,7 +912,7 @@ export default function RepoCard({
                   <div className="row gap repo-action-wrap">
                     <button
                       className="secondary"
-                      disabled={isSubmitting}
+                      disabled={isBusy}
                       onClick={() =>
                         void runLocalAction(async () => {
                           const comparison = await api.compareCheckpoint(repo.id, checkpoint.id);
@@ -716,7 +923,7 @@ export default function RepoCard({
                       Compare
                     </button>
                     <button
-                      disabled={isSubmitting}
+                      disabled={isBusy}
                       onClick={() =>
                         void runLocalAction(async () => {
                           await api.restoreCheckpoint({
@@ -808,7 +1015,7 @@ export default function RepoCard({
           <div className="row gap repo-action-wrap">
             <button
               className="secondary"
-              disabled={isSubmitting}
+              disabled={isBusy}
               onClick={() =>
                 void runLocalAction(async () => {
                   if (!window.confirm(`Uninstall ${repo.displayName}? This deletes ${repo.localPath}.`)) {
@@ -822,7 +1029,7 @@ export default function RepoCard({
             </button>
             <button
               className="secondary"
-              disabled={isSubmitting}
+              disabled={isBusy}
               onClick={() =>
                 void runLocalAction(async () => {
                   if (!window.confirm(`Disable ${repo.displayName}? This moves it out of the active install.`)) {
@@ -836,7 +1043,7 @@ export default function RepoCard({
             </button>
             <button
               className="secondary"
-              disabled={isSubmitting}
+              disabled={isBusy}
               onClick={() =>
                 void runLocalAction(async () => {
                   if (!window.confirm(`Untrack ${repo.displayName}? Files stay on disk, but future reconcile passes will ignore this path.`)) {
@@ -852,6 +1059,7 @@ export default function RepoCard({
         </div>
       ) : null}
 
+      {panelNotice ? <div className="muted small">{panelNotice}</div> : null}
       {panelError ? <div className="muted small">{panelError}</div> : null}
     </div>
   );

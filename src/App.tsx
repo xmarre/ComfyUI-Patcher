@@ -17,7 +17,9 @@ import type {
   ResolveTargetInput,
   ResolvedTarget,
   SaveInstallationInput,
-  AppUpdateCheckResult
+  AppUpdateCheckResult,
+  ApplyRepoOverlaySelectionInput,
+  OperationStart
 } from "./types";
 
 const defaultLaunchProfile: LaunchProfile = {
@@ -473,6 +475,21 @@ export default function App() {
     } catch (error) {
       setActionError(toErrorMessage(error));
       return false;
+    }
+  }
+
+  async function runOverlaySelectionAction(input: ApplyRepoOverlaySelectionInput): Promise<OperationStart> {
+    setActionError(null);
+    setActionNotice(null);
+    try {
+      const started = await api.applyRepoOverlaySelection(input);
+      if (!input.syncDependencies) {
+        setActionNotice("Overlay selection submitted with dependency sync disabled. After successful apply, use Update to synchronize dependencies.");
+      }
+      return started;
+    } catch (error) {
+      setActionError(toErrorMessage(error));
+      throw error;
     }
   }
 
@@ -1601,48 +1618,16 @@ export default function App() {
                       });
                     })
                   }
-                  onAddOverlay={(input) =>
-                    runStackMutationAction(async () => {
-                      await api.addRepoOverlay({
-                        repoId: coreRepo.id,
-                        input,
-                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
-                        syncDependencies: false
-                      });
+                  onApplyOverlays={(selection) =>
+                    runOverlaySelectionAction({
+                      ...selection,
+                      repoId: coreRepo.id,
+                      dirtyRepoStrategy: defaultDirtyRepoStrategy,
+                      syncDependencies: false
                     })
                   }
-                  onSetOverlayEnabled={(overlayId, enabled) =>
-                    runStackMutationAction(async () => {
-                      await api.setRepoOverlayEnabled({
-                        repoId: coreRepo.id,
-                        overlayId,
-                        enabled,
-                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
-                        syncDependencies: false
-                      });
-                    })
-                  }
-                  onRemoveOverlay={(overlayId) =>
-                    runStackMutationAction(async () => {
-                      await api.removeRepoOverlay({
-                        repoId: coreRepo.id,
-                        overlayId,
-                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
-                        syncDependencies: false
-                      });
-                    })
-                  }
-                  onMoveOverlay={(overlayId, direction) =>
-                    runStackMutationAction(async () => {
-                      await api.moveRepoOverlay({
-                        repoId: coreRepo.id,
-                        overlayId,
-                        direction,
-                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
-                        syncDependencies: false
-                      });
-                    })
-                  }
+
+                  onRefresh={() => refreshDetail(coreRepo.installationId)}
                   onRollback={() =>
                     runAction(async () => {
                       await api.rollbackRepo({
@@ -1743,48 +1728,16 @@ export default function App() {
                       });
                     })
                   }
-                  onAddOverlay={(input) =>
-                    runActionOk(async () => {
-                      await api.addRepoOverlay({
-                        repoId: frontendRepo.id,
-                        input,
-                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
-                        syncDependencies: true
-                      });
+                  onApplyOverlays={(selection) =>
+                    runOverlaySelectionAction({
+                      ...selection,
+                      repoId: frontendRepo.id,
+                      dirtyRepoStrategy: defaultDirtyRepoStrategy,
+                      syncDependencies: true
                     })
                   }
-                  onSetOverlayEnabled={(overlayId, enabled) =>
-                    runActionOk(async () => {
-                      await api.setRepoOverlayEnabled({
-                        repoId: frontendRepo.id,
-                        overlayId,
-                        enabled,
-                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
-                        syncDependencies: true
-                      });
-                    })
-                  }
-                  onRemoveOverlay={(overlayId) =>
-                    runActionOk(async () => {
-                      await api.removeRepoOverlay({
-                        repoId: frontendRepo.id,
-                        overlayId,
-                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
-                        syncDependencies: true
-                      });
-                    })
-                  }
-                  onMoveOverlay={(overlayId, direction) =>
-                    runActionOk(async () => {
-                      await api.moveRepoOverlay({
-                        repoId: frontendRepo.id,
-                        overlayId,
-                        direction,
-                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
-                        syncDependencies: true
-                      });
-                    })
-                  }
+
+                  onRefresh={() => refreshDetail(frontendRepo.installationId)}
                   onRollback={() =>
                     runAction(async () => {
                       await api.rollbackRepo({
@@ -1906,48 +1859,16 @@ export default function App() {
                       });
                     })
                   }
-                  onAddOverlay={(input) =>
-                    runActionOk(async () => {
-                      await api.addRepoOverlay({
-                        repoId: kitchenRepo.id,
-                        input,
-                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
-                        syncDependencies: false
-                      });
+                  onApplyOverlays={(selection) =>
+                    runOverlaySelectionAction({
+                      ...selection,
+                      repoId: kitchenRepo.id,
+                      dirtyRepoStrategy: defaultDirtyRepoStrategy,
+                      syncDependencies: false
                     })
                   }
-                  onSetOverlayEnabled={(overlayId, enabled) =>
-                    runActionOk(async () => {
-                      await api.setRepoOverlayEnabled({
-                        repoId: kitchenRepo.id,
-                        overlayId,
-                        enabled,
-                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
-                        syncDependencies: false
-                      });
-                    })
-                  }
-                  onRemoveOverlay={(overlayId) =>
-                    runActionOk(async () => {
-                      await api.removeRepoOverlay({
-                        repoId: kitchenRepo.id,
-                        overlayId,
-                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
-                        syncDependencies: false
-                      });
-                    })
-                  }
-                  onMoveOverlay={(overlayId, direction) =>
-                    runActionOk(async () => {
-                      await api.moveRepoOverlay({
-                        repoId: kitchenRepo.id,
-                        overlayId,
-                        direction,
-                        dirtyRepoStrategy: defaultDirtyRepoStrategy,
-                        syncDependencies: false
-                      });
-                    })
-                  }
+
+                  onRefresh={() => refreshDetail(kitchenRepo.installationId)}
                   onRollback={() =>
                     runAction(async () => {
                       await api.rollbackRepo({
@@ -2099,48 +2020,16 @@ export default function App() {
                               });
                             })
                           }
-                          onAddOverlay={(input) =>
-                            runStackMutationAction(async () => {
-                              await api.addRepoOverlay({
-                                repoId: repo.id,
-                                input,
-                                dirtyRepoStrategy: defaultDirtyRepoStrategy,
-                                syncDependencies: false
-                              });
+                          onApplyOverlays={(selection) =>
+                            runOverlaySelectionAction({
+                              ...selection,
+                              repoId: repo.id,
+                              dirtyRepoStrategy: defaultDirtyRepoStrategy,
+                              syncDependencies: false
                             })
                           }
-                          onSetOverlayEnabled={(overlayId, enabled) =>
-                            runStackMutationAction(async () => {
-                              await api.setRepoOverlayEnabled({
-                                repoId: repo.id,
-                                overlayId,
-                                enabled,
-                                dirtyRepoStrategy: defaultDirtyRepoStrategy,
-                                syncDependencies: false
-                              });
-                            })
-                          }
-                          onRemoveOverlay={(overlayId) =>
-                            runStackMutationAction(async () => {
-                              await api.removeRepoOverlay({
-                                repoId: repo.id,
-                                overlayId,
-                                dirtyRepoStrategy: defaultDirtyRepoStrategy,
-                                syncDependencies: false
-                              });
-                            })
-                          }
-                          onMoveOverlay={(overlayId, direction) =>
-                            runStackMutationAction(async () => {
-                              await api.moveRepoOverlay({
-                                repoId: repo.id,
-                                overlayId,
-                                direction,
-                                dirtyRepoStrategy: defaultDirtyRepoStrategy,
-                                syncDependencies: false
-                              });
-                            })
-                          }
+
+                          onRefresh={() => refreshDetail(repo.installationId)}
                           onUpdate={() =>
                             runAction(async () => {
                               await api.updateRepo({

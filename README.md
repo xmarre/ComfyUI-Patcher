@@ -63,7 +63,7 @@ Tracked state supports:
 * **base target** — branch / tag / commit / repo default branch / PR base
 * **overlay list** — typically PR overlays, applied in order; an overlay may target the tracked base branch or the head branch of an earlier enabled overlay
 
-Stack dependency ordering is enforced. A dependent PR cannot be moved ahead of, enabled without, or left enabled after removal of the PR whose head branch it targets. Same-repository stacks resolve dependency branch identity from local git refs and GitHub's pull test-merge ref when that topology is unambiguous, preserving the API/rate-limit-safe path. Older or ambiguous locally-resolved overlay records are enriched from GitHub metadata only when local git cannot prove the relationship.
+Stack dependency ordering is enforced when the complete selected stack is applied. A dependent PR cannot be placed ahead of its provider, enabled without its provider, or retained as enabled after removing its provider. Same-repository stacks resolve dependency branch identity from local git refs and GitHub's pull test-merge ref when that topology is unambiguous, preserving the API/rate-limit-safe path. Older or ambiguous locally-resolved overlay records are enriched from GitHub metadata only when local git cannot prove the relationship.
 
 This lets the app support flows like:
 
@@ -73,6 +73,16 @@ This lets the app support flows like:
 * keep a base branch and stack multiple PR overlays on top of it
 
 For PR overlays, the app materializes an integration branch such as `patcher/stack` and synthesizes merge commits for the overlays.
+
+### Editing an overlay stack
+
+The repository card stages **Stage PR**, enabled/disabled checkboxes, **Up**, **Down**, **Remove**, and **Remove all** locally. These controls do not download sources, change the tracked configuration, or rebuild dependencies. **Apply selection** submits the entire final ordered list in one operation; **Discard changes** restores the currently tracked list. The draft is not persisted across application restarts.
+
+Apply checks that the base and overlay selection have not changed since the edit began, resolves new PR URLs, validates stacked-PR dependencies against the final list, then creates one checkpoint and materializes the target stack. Invalid selections are rejected without applying intermediate states. If materialization subsequently fails, checkpoint recovery attempts to restore the prior checkout and tracked configuration. A failed apply leaves the draft available for correction.
+
+After upstream merges several overlays, use **Remove all** (or remove the merged entries individually), then **Apply selection** once. If an enabled child depends on a removed PR, also remove or disable that child before applying. **Update**, **Update all**, and base replacement remain separate explicit operations and act on the currently tracked state, not an unapplied draft.
+
+
 
 ---
 
@@ -591,6 +601,14 @@ When a managed frontend is configured, **Start / Restart** inject the frontend d
 * confirm `hard_reset` discards changes
 
 ### Overlay stack behavior
+
+* stage several add/remove/reorder/toggle edits; verify the working checkout stays unchanged until **Apply selection**
+* remove an entire stacked PR chain in one selection; verify no intermediate dependent-without-parent state is materialized
+* test an invalid final chain; verify apply fails without modifying the tracked list
+* refresh the tracked stack while a draft exists; verify stale selection is rejected rather than overwriting the newer list
+* discard a draft; verify the original tracked list is restored without an operation
+* simulate a failed apply; verify the draft remains available and the recovery checkpoint restores the previous checkout
+* stage all overlay removals after upstream merges the PRs; apply once and verify the repo follows the updated base
 
 * set a base target
 * add one or more PR overlays
