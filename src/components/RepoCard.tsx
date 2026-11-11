@@ -211,6 +211,7 @@ export default function RepoCard({
   const [baseInput, setBaseInput] = useState("");
   const [overlayInput, setOverlayInput] = useState("");
   const [draftOverlays, setDraftOverlays] = useState<DraftOverlay[] | null>(null);
+  const [draftBaseline, setDraftBaseline] = useState<Pick<OverlaySelectionRequest, "expectedBaseInput" | "expectedOverlays"> | null>(null);
   const [pendingOperationId, setPendingOperationId] = useState<string | null>(null);
   const [panelNotice, setPanelNotice] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -229,9 +230,10 @@ export default function RepoCard({
     sourceInput: null,
     enabled: overlay.enabled
   }));
+  const baselineOverlays = draftBaseline?.expectedOverlays ?? overlays.map((overlay) => ({ overlayId: overlay.id, enabled: overlay.enabled }));
   const selectionChanged = draftOverlays !== null && (
-    draftOverlays.length !== overlays.length || draftOverlays.some((choice, index) =>
-      choice.overlayId !== overlays[index]?.id || choice.enabled !== overlays[index]?.enabled
+    draftOverlays.length !== baselineOverlays.length || draftOverlays.some((choice, index) =>
+      choice.overlayId !== baselineOverlays[index]?.overlayId || choice.enabled !== baselineOverlays[index]?.enabled
     )
   );
   const isBusy = isSubmitting || pendingOperationId !== null;
@@ -270,16 +272,23 @@ export default function RepoCard({
     }
   }
 
+  // Capture the original selection on the first edit, not the latest refreshed props.
+  function stageOverlayDraft(next: DraftOverlay[]) {
+    if (!draftBaseline && trackedState) {
+      setDraftBaseline({
+        expectedBaseInput: trackedState.base.sourceInput,
+        expectedOverlays: overlays.map((overlay) => ({ overlayId: overlay.id, enabled: overlay.enabled }))
+      });
+    }
+    setDraftOverlays(next);
+  }
+
   // One operation materializes the final desired selection. Draft edits never alter the checkout.
   async function applySelectedOverlays() {
-    if (!onApplyOverlays || !trackedState || !selectionChanged || isBusy) return;
+    if (!onApplyOverlays || !draftBaseline || !selectionChanged || isBusy) return;
     await runStackAction(async () => {
       const started = await onApplyOverlays({
-        expectedBaseInput: trackedState.base.sourceInput,
-        expectedOverlays: overlays.map((overlay) => ({
-          overlayId: overlay.id,
-          enabled: overlay.enabled
-        })),
+        ...draftBaseline,
         overlays: selectedOverlays.map(({ overlayId, sourceInput, enabled }) => ({
           overlayId, sourceInput, enabled
         }))
@@ -299,6 +308,7 @@ export default function RepoCard({
       setPendingOperationId(null);
       if (success) {
         setDraftOverlays(null);
+        setDraftBaseline(null);
         setPanelError(null);
         setPanelNotice("Overlay selection applied. Repository state is refreshing.");
       } else {
@@ -519,9 +529,9 @@ export default function RepoCard({
           {onSetBaseTarget ? (
             <button
               className="secondary"
-              disabled={!baseInput.trim() || isBusy}
+              disabled={!baseInput.trim() || isBusy || selectionChanged}
               onClick={async () => {
-                if (!onSetBaseTarget || !baseInput.trim() || isSubmitting) {
+                if (!onSetBaseTarget || !baseInput.trim() || isBusy || selectionChanged) {
                   return;
                 }
                 const ok = await runStackAction(() => onSetBaseTarget(baseInput, hasOverlays));
@@ -552,7 +562,7 @@ export default function RepoCard({
           >
             Preview
           </button>
-          {onApplyOverlays ? (
+          {onApplyOverlays && trackedState ? (
             <button
               disabled={!overlayInput.trim() || isBusy}
               onClick={() => {
@@ -562,7 +572,7 @@ export default function RepoCard({
                   setPanelError("This PR URL is already staged.");
                   return;
                 }
-                setDraftOverlays([...selectedOverlays, {
+                stageOverlayDraft([...selectedOverlays, {
                   key: `new:${source}`,
                   overlayId: null,
                   sourceInput: source,
@@ -596,7 +606,7 @@ export default function RepoCard({
                         disabled={isBusy || !onApplyOverlays}
                         checked={choice.enabled}
                         onChange={(event) => {
-                          setDraftOverlays(selectedOverlays.map((item, i) =>
+                          stageOverlayDraft(selectedOverlays.map((item, i) =>
                             i === index ? { ...item, enabled: event.target.checked } : item
                           ));
                           setPanelNotice(null);
@@ -624,7 +634,7 @@ export default function RepoCard({
                         onClick={() => {
                           const next = [...selectedOverlays];
                           [next[index - 1], next[index]] = [next[index], next[index - 1]];
-                          setDraftOverlays(next);
+                          stageOverlayDraft(next);
                           setPanelNotice(null);
                         }}
                       >
@@ -636,7 +646,7 @@ export default function RepoCard({
                         onClick={() => {
                           const next = [...selectedOverlays];
                           [next[index + 1], next[index]] = [next[index], next[index + 1]];
-                          setDraftOverlays(next);
+                          stageOverlayDraft(next);
                           setPanelNotice(null);
                         }}
                       >
@@ -646,7 +656,7 @@ export default function RepoCard({
                         className="secondary"
                         disabled={isBusy || !onApplyOverlays}
                         onClick={() => {
-                          setDraftOverlays(selectedOverlays.filter((_, i) => i !== index));
+                          stageOverlayDraft(selectedOverlays.filter((_, i) => i !== index));
                           setPanelNotice(null);
                         }}
                       >
@@ -665,15 +675,14 @@ export default function RepoCard({
         {onApplyOverlays && trackedState ? (
           <div className="stack">
             <div className="muted small">
-              Overlay changes are staged locally. No checkout, download, or dependency build starts until Apply selection.
-              Stacked PR dependencies are checked against the complete selection.
+              Editing overlays does not modify the checkout or start a download/build. Apply selection validates the complete stack (including stacked-PR dependencies) and starts one operation.
             </div>
             <div className="row gap repo-action-wrap">
               <button
                 className="secondary"
                 disabled={isBusy || selectedOverlays.length === 0}
                 onClick={() => {
-                  setDraftOverlays([]);
+                  stageOverlayDraft([]);
                   setPanelNotice(null);
                 }}
               >
@@ -684,6 +693,7 @@ export default function RepoCard({
                 disabled={isBusy || draftOverlays === null}
                 onClick={() => {
                   setDraftOverlays(null);
+                  setDraftBaseline(null);
                   setPanelError(null);
                   setPanelNotice(null);
                 }}
@@ -722,7 +732,7 @@ export default function RepoCard({
           </button>
         ) : null}
         {hasTrackedUpdate && onUpdate ? (
-          <button disabled={isBusy} onClick={() => void runLocalAction(onUpdate)}>
+          <button disabled={isBusy || selectionChanged} onClick={() => void runLocalAction(onUpdate)}>
             Update
           </button>
         ) : null}
