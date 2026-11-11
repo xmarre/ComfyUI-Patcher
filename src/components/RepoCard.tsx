@@ -1,13 +1,15 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../api";
 import type {
   ManagedRepo,
   OverlayApplyStatus,
-  OverlayMoveDirection,
   RepoActionPreview,
   RepoCheckpoint,
   RepoCheckpointComparison,
-  TrackedPrOverlay
+  TrackedPrOverlay,
+  OverlaySelectionRequest,
+  SelectedRepoOverlay,
+  OperationStart
 } from "../types";
 
 type Props = {
@@ -15,11 +17,10 @@ type Props = {
   onUpdate?: () => Promise<void>;
   onRollback?: () => Promise<void>;
   onSetBaseTarget?: (input: string, clearOverlays: boolean) => Promise<boolean>;
-  onAddOverlay?: (input: string) => Promise<boolean>;
-  onSetOverlayEnabled?: (overlayId: string, enabled: boolean) => Promise<boolean>;
-  onRemoveOverlay?: (overlayId: string) => Promise<boolean>;
-  onMoveOverlay?: (overlayId: string, direction: OverlayMoveDirection) => Promise<boolean>;
+  onApplyOverlays?: (selection: OverlaySelectionRequest) => Promise<OperationStart>;
 };
+
+type DraftOverlay = SelectedRepoOverlay & { key: string };
 
 type EffectiveOverlayStatus = OverlayApplyStatus | "disabled" | "pending";
 
@@ -203,15 +204,15 @@ export default function RepoCard({
   onUpdate,
   onRollback,
   onSetBaseTarget,
-  onAddOverlay,
-  onSetOverlayEnabled,
-  onRemoveOverlay,
-  onMoveOverlay
+  onApplyOverlays
 }: Props) {
   const trackedState = repo.trackedState;
   const overlays = trackedState?.overlays ?? [];
   const [baseInput, setBaseInput] = useState("");
   const [overlayInput, setOverlayInput] = useState("");
+  const [draftOverlays, setDraftOverlays] = useState<DraftOverlay[] | null>(null);
+  const [pendingOperationId, setPendingOperationId] = useState<string | null>(null);
+  const [panelNotice, setPanelNotice] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [panelError, setPanelError] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -222,6 +223,18 @@ export default function RepoCard({
   const [overlayPreview, setOverlayPreview] = useState<RepoActionPreview | null>(null);
   const integrationBranch = trackedState?.materializedBranch ?? repo.currentBranch ?? "detached";
   const hasOverlays = overlays.length > 0;
+  const selectedOverlays = draftOverlays ?? overlays.map((overlay) => ({
+    key: overlay.id,
+    overlayId: overlay.id,
+    sourceInput: null,
+    enabled: overlay.enabled
+  }));
+  const selectionChanged = draftOverlays !== null && (
+    draftOverlays.length !== overlays.length || draftOverlays.some((choice, index) =>
+      choice.overlayId !== overlays[index]?.id || choice.enabled !== overlays[index]?.enabled
+    )
+  );
+  const isBusy = isSubmitting || pendingOperationId !== null;
   const hasTrackedUpdate =
     trackedState !== null || (repo.trackedTargetKind !== null && repo.trackedTargetInput !== null);
   const lifecycleSupported = repo.kind !== "core";
@@ -256,6 +269,64 @@ export default function RepoCard({
       setIsSubmitting(false);
     }
   }
+
+  // One operation materializes the final desired selection. Draft edits never alter the checkout.
+  async function applySelectedOverlays() {
+    if (!onApplyOverlays || !trackedState || !selectionChanged || isBusy) return;
+    await runStackAction(async () => {
+      const started = await onApplyOverlays({
+        expectedBaseInput: trackedState.base.sourceInput,
+        expectedOverlays: overlays.map((overlay) => ({
+          overlayId: overlay.id,
+          enabled: overlay.enabled
+        })),
+        overlays: selectedOverlays.map(({ overlayId, sourceInput, enabled }) => ({
+          overlayId, sourceInput, enabled
+        }))
+      });
+      setPendingOperationId(started.operationId);
+      setPanelNotice("Applying overlay selection. The current checkout remains unchanged until materialization succeeds.");
+      return true;
+    });
+  }
+
+  useEffect(() => {
+    if (!pendingOperationId) return;
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    const finish = (success: boolean, error?: string | null) => {
+      if (cancelled) return;
+      setPendingOperationId(null);
+      if (success) {
+        setDraftOverlays(null);
+        setPanelError(null);
+        setPanelNotice("Overlay selection applied. Repository state is refreshing.");
+      } else {
+        setPanelError(error || "Overlay selection failed. The draft is retained; inspect the operation log.");
+        setPanelNotice(null);
+      }
+    };
+    void api.subscribeOperationEvents((event) => {
+      if (event.operationId !== pendingOperationId) return;
+      if (event.phase === "done") finish(true);
+      if (event.phase === "error") finish(false, event.message);
+    }).then(async (unsubscribe) => {
+      if (cancelled) {
+        unsubscribe();
+        return;
+      }
+      unlisten = unsubscribe;
+      // A fast operation may finish before the event listener is registered.
+      const operations = await api.listOperations(repo.installationId);
+      const operation = operations.find((item) => item.id === pendingOperationId);
+      if (operation?.status === "succeeded") finish(true);
+      if (operation?.status === "failed") finish(false, operation.errorMessage);
+    }).catch((error) => finish(false, toErrorMessage(error)));
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [pendingOperationId, repo.installationId]);
 
   async function toggleHistory() {
     if (historyOpen) {
